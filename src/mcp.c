@@ -361,6 +361,35 @@ int mcp_call_tool(runtime_ctx *ctx, const char *server_name, const char *tool_na
 }
 
 /* ------------------------------------------------------------------ */
+/*  mcp_send_request                                                   */
+/* ------------------------------------------------------------------ */
+
+int mcp_send_request(runtime_ctx *ctx, const char *server_name, const char *request_json,
+                     char **out_response) {
+    (void)ctx;
+    if (server_name == NULL || request_json == NULL || out_response == NULL)
+        return EXIT_INTERNAL_ERR;
+    *out_response = NULL;
+
+    mcp_connection *conn = NULL;
+    mcp_server_cfg *cfg = NULL;
+    for (int i = 0; i < s_conn_count; i++) {
+        if (s_connections[i].cfg != NULL && strcmp(s_connections[i].cfg->name, server_name) == 0) {
+            conn = &s_connections[i];
+            cfg = s_connections[i].cfg;
+            break;
+        }
+    }
+
+    if (conn == NULL || !conn->initialized) {
+        log_activity("[error] MCP server '%s' not found or not initialized", server_name);
+        return EXIT_MCP_ERR;
+    }
+
+    return transport_send(conn, request_json, cfg->call_timeout_ms, out_response);
+}
+
+/* ------------------------------------------------------------------ */
 /*  mcp_disconnect_all                                                 */
 /* ------------------------------------------------------------------ */
 

@@ -62,6 +62,7 @@ TIDY_FLAGS := -std=c17 -D_DEFAULT_SOURCE -I $(SRCDIR) \
 
 .PHONY: all debug profile test clean install uninstall dist check-ascii \
         vendors check-deps test_utf8 test_util test_config test_jsonrpc test_transport \
+        test_mcp test_conversation test_llm \
         format format-check lint
 
 # The build phase runs the ASCII check, the format check, and the linter
@@ -118,8 +119,11 @@ endif
 $(OBJDIR):
 	mkdir -p $(OBJDIR)
 
+TEST_BINS := tests/test_utf8 tests/test_util tests/test_config tests/test_jsonrpc \
+             tests/test_transport tests/test_mcp tests/test_conversation tests/test_llm
+
 clean:
-	rm -rf $(OBJDIR) $(TARGET) build-win llmkit.exe
+	rm -rf $(OBJDIR) $(TARGET) build-win llmkit.exe $(TEST_BINS)
 
 install: $(TARGET)
 	install -m 755 $(TARGET) $(DESTDIR)/usr/local/bin/$(TARGET)
@@ -161,7 +165,7 @@ check-deps:
 	fi
 	@echo "Done."
 
-test: test_utf8 test_util test_config test_jsonrpc test_transport
+test: test_utf8 test_util test_config test_jsonrpc test_transport test_mcp test_conversation test_llm
 	@echo "All tests passed."
 
 test_utf8: tests/test_utf8.c src/utf8.c
@@ -183,4 +187,16 @@ test_jsonrpc: tests/test_jsonrpc.c src/jsonrpc.c src/util.c src/utf8.c src/platf
 test_transport: tests/test_transport.c src/mcp_transport.c src/util.c src/utf8.c src/platform.c
 	$(CC) $(CFLAGS) -Isrc -o tests/test_transport tests/test_transport.c src/mcp_transport.c src/util.c src/utf8.c src/platform.c $(LIBS)
 	./tests/test_transport
+
+test_mcp: tests/test_mcp.c src/mcp.c src/mcp_transport.c src/util.c src/utf8.c src/platform.c src/jsonrpc.c
+	$(CC) $(CFLAGS) -Isrc -o tests/test_mcp tests/test_mcp.c src/mcp.c src/mcp_transport.c src/util.c src/utf8.c src/platform.c src/jsonrpc.c $(LIBS)
+	./tests/test_mcp
+
+test_conversation: tests/test_conversation.c src/conversation.c src/util.c src/utf8.c src/platform.c
+	$(CC) $(CFLAGS) -Isrc -o tests/test_conversation tests/test_conversation.c src/conversation.c src/util.c src/utf8.c src/platform.c $(LIBS)
+	./tests/test_conversation
+
+test_llm: tests/test_llm.c src/llm.c src/util.c src/utf8.c src/platform.c
+	$(CC) $(CFLAGS) -Isrc -o tests/test_llm tests/test_llm.c src/llm.c src/util.c src/utf8.c src/platform.c $(LIBS)
+	./tests/test_llm
 
