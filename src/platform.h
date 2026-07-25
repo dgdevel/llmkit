@@ -46,4 +46,9 @@ int platform_tcp_listen(const char *addr, int port);
 int platform_tcp_accept(int fd, int64_t timeout_ms);
 bool platform_stderr_is_tty(void);
 
+/* Monotonic clock in milliseconds. Untyped epoch; only deltas are meaningful. */
+int64_t platform_now_ms(void);
+/* Sleep for the given number of milliseconds. */
+void platform_sleep_ms(int64_t ms);
+
 #endif

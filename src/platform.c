@@ -130,7 +130,6 @@ int platform_process_spawn(const char *cmdline, platform_process *out_proc, plat
 
         char *argv[64];
         int argc = 0;
-        argv[argc++] = cmdline_copy;
         char *p = cmdline_copy;
         while (*p) {
             while (*p && *p == ' ') *p++ = '\0';
@@ -145,6 +144,12 @@ int platform_process_spawn(const char *cmdline, platform_process *out_proc, plat
                 while (*p && *p != ' ') p++;
             }
             if (argc >= 60) break;
+        }
+        if (argc == 0) {
+            /* empty/whitespace cmdline: fall back to the raw string so execvp
+             * fails cleanly rather than reading an uninitialized argv[0]. */
+            argv[0] = cmdline_copy;
+            argc = 1;
         }
         argv[argc] = NULL;
 
@@ -376,5 +381,33 @@ bool platform_stderr_is_tty(void) {
     return _isatty(_fileno(stderr)) != 0;
 #else
     return isatty(STDERR_FILENO) != 0;
+#endif
+}
+
+int64_t platform_now_ms(void) {
+#ifdef _WIN32
+    static LARGE_INTEGER freq = {0};
+    LARGE_INTEGER counter;
+    if (freq.QuadPart == 0) {
+        QueryPerformanceFrequency(&freq);
+    }
+    QueryPerformanceCounter(&counter);
+    return (int64_t)(counter.QuadPart * 1000 / freq.QuadPart);
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ((int64_t)ts.tv_sec * 1000) + (ts.tv_nsec / 1000000);
+#endif
+}
+
+void platform_sleep_ms(int64_t ms) {
+    if (ms <= 0) return;
+#ifdef _WIN32
+    Sleep((DWORD)ms);
+#else
+    struct timespec ts;
+    ts.tv_sec = (time_t)(ms / 1000);
+    ts.tv_nsec = (long)((ms % 1000) * 1000000L);
+    nanosleep(&ts, NULL);
 #endif
 }

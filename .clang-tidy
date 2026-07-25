@@ -5,6 +5,10 @@
 # developer in style noise. Style enforcement (formatting, naming) is
 # handled by clang-format; clang-tidy focuses on semantic checks.
 #
+# readability-function-size is disabled because curl_easy_setopt and other
+# variadic-macro APIs expand to hundreds of statements, pushing any curl
+# setup function past the 800-statement threshold, making the check useless.
+#
 # Run:   make lint
 # Apply: clang-tidy -p . src/foo.c -- <cflags>
 
@@ -39,6 +43,7 @@ Checks: >
   -clang-analyzer-unix.Stream,
   -readability-else-after-return,
   -readability-function-cognitive-complexity,
+  -readability-function-size,
   -readability-identifier-length,
   -readability-isolate-declaration,
   -readability-magic-numbers,
