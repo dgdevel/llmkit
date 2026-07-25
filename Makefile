@@ -61,7 +61,7 @@ TIDY_FLAGS := -std=c17 -D_DEFAULT_SOURCE -I $(SRCDIR) \
               $(YAML_CFLAGS) $(CURL_CFLAGS) $(CRYPTO_CFLAGS) $(CJSON_CFLAGS)
 
 .PHONY: all debug profile test clean install uninstall dist check-ascii \
-        vendors check-deps test_utf8 test_util test_config \
+        vendors check-deps test_utf8 test_util test_config test_jsonrpc \
         format format-check lint
 
 # The build phase runs the ASCII check, the format check, and the linter
@@ -161,7 +161,7 @@ check-deps:
 	fi
 	@echo "Done."
 
-test: test_utf8 test_util test_config
+test: test_utf8 test_util test_config test_jsonrpc
 	@echo "All tests passed."
 
 test_utf8: tests/test_utf8.c src/utf8.c
@@ -175,3 +175,7 @@ test_config: tests/test_config.c src/config.c src/util.c src/utf8.c src/platform
 test_util: tests/test_util.c src/util.c src/utf8.c src/platform.c
 	$(CC) $(CFLAGS) -Isrc -o tests/test_util tests/test_util.c src/util.c src/utf8.c src/platform.c $(LIBS)
 	./tests/test_util
+
+test_jsonrpc: tests/test_jsonrpc.c src/jsonrpc.c src/util.c src/utf8.c src/platform.c
+	$(CC) $(CFLAGS) -Isrc -o tests/test_jsonrpc tests/test_jsonrpc.c src/jsonrpc.c src/util.c src/utf8.c src/platform.c $(LIBS)
+	./tests/test_jsonrpc

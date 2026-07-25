@@ -3,6 +3,8 @@
 
 #include "llmkit.h"
 
+#define MCP_PROTOCOL_VERSION "2025-11-25"
+
 char *jsonrpc_build_request(const char *method, const char *params_json, const char *id);
 int jsonrpc_parse_response(const char *resp_json, char **out_result, char **out_error);
 int jsonrpc_build_initialize(char **out_json);
