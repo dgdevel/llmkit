@@ -5,5 +5,6 @@
 
 int config_load(const char *path, runtime_ctx *ctx);
 void config_free(runtime_ctx *ctx);
+void config_free_mcp(mcp_server_cfg *cfg);
 
 #endif

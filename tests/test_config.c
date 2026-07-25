@@ -1,0 +1,405 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include "config.h"
+#include "util.h"
+
+static int tests_run = 0;
+static int tests_failed = 0;
+
+#define CHECK(cond, msg) do { \
+    tests_run++; \
+    if (!(cond)) { \
+        fprintf(stderr, "  FAIL (%s:%d): %s\n", __FILE__, __LINE__, msg); \
+        tests_failed++; \
+    } \
+} while(0)
+
+#define CHECK_EQ(a, b, msg) do { \
+    tests_run++; \
+    if ((a) != (b)) { \
+        fprintf(stderr, "  FAIL (%s:%d): %s — expected %lld, got %lld\n", \
+                __FILE__, __LINE__, msg, (long long)(b), (long long)(a)); \
+        tests_failed++; \
+    } \
+} while(0)
+
+#define CHECK_STR_EQ(a, b, msg) do { \
+    tests_run++; \
+    if (!(a) || !(b) || strcmp((a), (b)) != 0) { \
+        fprintf(stderr, "  FAIL (%s:%d): %s — expected \"%s\", got \"%s\"\n", \
+                __FILE__, __LINE__, msg, (b) ? (b) : "NULL", (a) ? (a) : "NULL"); \
+        tests_failed++; \
+    } \
+} while(0)
+
+#define CHECK_STR_NULL(a, msg) do { \
+    tests_run++; \
+    if ((a) != NULL) { \
+        fprintf(stderr, "  FAIL (%s:%d): %s — expected NULL, got \"%s\"\n", \
+                __FILE__, __LINE__, msg, (a)); \
+        tests_failed++; \
+    } \
+} while(0)
+
+static int write_file(const char *path, const char *content) {
+    FILE *fp = fopen(path, "wb");
+    if (!fp) return -1;
+    size_t n = fwrite(content, 1, strlen(content), fp);
+    fclose(fp);
+    return (int)n;
+}
+
+static void test_full_config(void) {
+    const char *yaml =
+        "llm:\n"
+        "  api_base: \"http://localhost:11434/v1\"\n"
+        "  api_key: \"sk-test-key\"\n"
+        "  model: \"llama3\"\n"
+        "  headers:\n"
+        "    X-Custom: \"value1\"\n"
+        "    X-Other: \"value2\"\n"
+        "\n"
+        "mcps:\n"
+        "  - name: \"srv1\"\n"
+        "    type: stdio\n"
+        "    cmdline: \"node server.js\"\n"
+        "    init_timeout: \"10s\"\n"
+        "    call_timeout: \"5m\"\n"
+        "    call_timeout_behavior: continue\n"
+        "    namespace: \"fs\"\n"
+        "    rename:\n"
+        "      fs.old_tool: fs.new_tool\n"
+        "    redefine:\n"
+        "      fs.tool1: \"New description\"\n"
+        "    whitelist:\n"
+        "      - \"fs.tool1\"\n"
+        "    blacklist:\n"
+        "      - \"fs.tool2\"\n"
+        "\n"
+        "  - name: \"srv2\"\n"
+        "    type: http\n"
+        "    url: \"http://localhost:8080/mcp\"\n"
+        "    headers:\n"
+        "      Authorization: \"Bearer token123\"\n"
+        "\n"
+        "  - name: \"srv3\"\n"
+        "    type: sse\n"
+        "    url: \"http://localhost:9090/sse\"\n"
+        "    max_reconnect: 5\n"
+        "    reconnect_delay: \"2s\"\n"
+        "    hide: true\n"
+        "\n"
+        "agent:\n"
+        "  system_prompt: \"You are a helpful assistant\"\n";
+
+    const char *tmp = "/tmp/llmkit_test_full.yml";
+    write_file(tmp, yaml);
+
+    runtime_ctx ctx;
+    memset(&ctx, 0, sizeof(ctx));
+
+    int ret = config_load(tmp, &ctx);
+    CHECK_EQ(ret, 0, "full config should load successfully");
+
+    /* Check LLM config */
+    CHECK_STR_EQ(ctx.llm.api_base, "http://localhost:11434/v1", "llm.api_base");
+    CHECK_STR_EQ(ctx.llm.api_key, "sk-test-key", "llm.api_key");
+    CHECK_STR_EQ(ctx.llm.model, "llama3", "llm.model");
+
+    CHECK(ctx.llm.headers != NULL, "llm.headers should be set");
+    CHECK_STR_EQ(ctx.llm.headers[0], "X-Custom=value1", "llm.headers[0]");
+    CHECK_STR_EQ(ctx.llm.headers[1], "X-Other=value2", "llm.headers[1]");
+    CHECK(ctx.llm.headers[2] == NULL, "llm.headers[2] should be NULL");
+
+    /* Check MCP servers */
+    CHECK_EQ(ctx.mcp_count, 3, "mcp_count should be 3");
+
+    /* srv1 - stdio */
+    CHECK_STR_EQ(ctx.mcps[0].name, "srv1", "mcps[0].name");
+    CHECK_EQ(ctx.mcps[0].transport, MCP_STDIO, "mcps[0].transport");
+    CHECK_STR_EQ(ctx.mcps[0].cmdline, "node server.js", "mcps[0].cmdline");
+    CHECK(ctx.mcps[0].url == NULL, "mcps[0].url should be NULL");
+    CHECK_EQ(ctx.mcps[0].init_timeout_ms, 10000, "mcps[0].init_timeout");
+    CHECK_EQ(ctx.mcps[0].call_timeout_ms, 300000, "mcps[0].call_timeout");
+    CHECK_EQ(ctx.mcps[0].call_timeout_beh, TIMEOUT_CONTINUE, "mcps[0].timeout_beh");
+    CHECK_EQ(ctx.mcps[0].hide, false, "mcps[0].hide");
+    CHECK_STR_EQ(ctx.mcps[0].namespace, "fs", "mcps[0].namespace");
+    CHECK_STR_EQ(ctx.mcps[0].rename_keys[0], "fs.old_tool=fs.new_tool", "mcps[0].rename");
+    CHECK(ctx.mcps[0].rename_keys[1] == NULL, "mcps[0].rename[1] NULL");
+    CHECK_STR_EQ(ctx.mcps[0].redefine_keys[0], "fs.tool1=New description", "mcps[0].redefine");
+    CHECK(ctx.mcps[0].redefine_keys[1] == NULL, "mcps[0].redefine[1] NULL");
+    CHECK_STR_EQ(ctx.mcps[0].whitelist[0], "fs.tool1", "mcps[0].whitelist[0]");
+    CHECK(ctx.mcps[0].whitelist[1] == NULL, "mcps[0].whitelist[1] NULL");
+    CHECK_STR_EQ(ctx.mcps[0].blacklist[0], "fs.tool2", "mcps[0].blacklist[0]");
+    CHECK(ctx.mcps[0].blacklist[1] == NULL, "mcps[0].blacklist[1] NULL");
+
+    /* srv2 - http */
+    CHECK_STR_EQ(ctx.mcps[1].name, "srv2", "mcps[1].name");
+    CHECK_EQ(ctx.mcps[1].transport, MCP_HTTP, "mcps[1].transport");
+    CHECK(ctx.mcps[1].cmdline == NULL, "mcps[1].cmdline NULL");
+    CHECK_STR_EQ(ctx.mcps[1].url, "http://localhost:8080/mcp", "mcps[1].url");
+    CHECK_STR_EQ(ctx.mcps[1].headers[0], "Authorization=Bearer token123", "mcps[1].headers[0]");
+    CHECK(ctx.mcps[1].headers[1] == NULL, "mcps[1].headers[1] NULL");
+    CHECK_STR_EQ(ctx.mcps[1].namespace, "srv2", "mcps[1].namespace (defaults to name)");
+    CHECK_EQ(ctx.mcps[1].max_reconnect, 3, "mcps[1].max_reconnect (default)");
+
+    /* srv3 - sse */
+    CHECK_STR_EQ(ctx.mcps[2].name, "srv3", "mcps[2].name");
+    CHECK_EQ(ctx.mcps[2].transport, MCP_SSE, "mcps[2].transport");
+    CHECK_STR_EQ(ctx.mcps[2].url, "http://localhost:9090/sse", "mcps[2].url");
+    CHECK_EQ(ctx.mcps[2].hide, true, "mcps[2].hide");
+    CHECK_EQ(ctx.mcps[2].max_reconnect, 5, "mcps[2].max_reconnect");
+    CHECK_EQ(ctx.mcps[2].reconnect_delay_ms, 2000, "mcps[2].reconnect_delay");
+
+    /* Check agent config */
+    CHECK_STR_EQ(ctx.agent.system_prompt, "You are a helpful assistant", "agent.system_prompt");
+
+    config_free(&ctx);
+    unlink(tmp);
+
+    fprintf(stderr, "  [ok] test_full_config\n");
+}
+
+static void test_defaults(void) {
+    const char *yaml =
+        "llm:\n"
+        "  api_base: \"http://localhost:11434/v1\"\n"
+        "\n"
+        "mcps:\n"
+        "  - name: \"defaults\"\n"
+        "    cmdline: \"/bin/echo\"\n";
+
+    const char *tmp = "/tmp/llmkit_test_defaults.yml";
+    write_file(tmp, yaml);
+
+    runtime_ctx ctx;
+    memset(&ctx, 0, sizeof(ctx));
+
+    int ret = config_load(tmp, &ctx);
+    CHECK_EQ(ret, 0, "minimal config should load");
+
+    CHECK_STR_EQ(ctx.llm.model, "gpt-4o-mini", "default model");
+    CHECK_STR_NULL(ctx.llm.api_key, "default api_key NULL");
+
+    CHECK_EQ(ctx.mcp_count, 1, "one MCP server");
+    CHECK_STR_EQ(ctx.mcps[0].name, "defaults", "server name");
+    CHECK_EQ(ctx.mcps[0].transport, MCP_STDIO, "default transport stdio");
+    CHECK_STR_EQ(ctx.mcps[0].cmdline, "/bin/echo", "cmdline");
+    CHECK_EQ(ctx.mcps[0].init_timeout_ms, 30000, "default init_timeout");
+    CHECK_EQ(ctx.mcps[0].call_timeout_ms, 600000, "default call_timeout");
+    CHECK_EQ(ctx.mcps[0].call_timeout_beh, TIMEOUT_FAIL, "default timeout behavior");
+    CHECK_EQ(ctx.mcps[0].hide, false, "default hide");
+    CHECK_STR_EQ(ctx.mcps[0].namespace, "defaults", "default namespace (name)");
+    CHECK_EQ(ctx.mcps[0].max_reconnect, 3, "default max_reconnect");
+    CHECK_EQ(ctx.mcps[0].reconnect_delay_ms, 1000, "default reconnect_delay");
+
+    CHECK_STR_NULL(ctx.agent.system_prompt, "default system_prompt NULL");
+
+    config_free(&ctx);
+    unlink(tmp);
+
+    fprintf(stderr, "  [ok] test_defaults\n");
+}
+
+static void test_invalid_utf8(void) {
+    const char *yaml =
+        "llm:\n"
+        "  api_base: \"http://localhost:11434/v1\"\n"
+        "mcps:\n"
+        "  - name: \"test\xFF\xFE\"\n"
+        "    cmdline: \"/bin/echo\"\n";
+
+    const char *tmp = "/tmp/llmkit_test_invalid_utf8.yml";
+    write_file(tmp, yaml);
+
+    runtime_ctx ctx;
+    memset(&ctx, 0, sizeof(ctx));
+
+    int ret = config_load(tmp, &ctx);
+    CHECK_EQ(ret, EXIT_CONFIG_ERR, "invalid UTF-8 in name should fail");
+
+    config_free(&ctx);
+    unlink(tmp);
+
+    fprintf(stderr, "  [ok] test_invalid_utf8\n");
+}
+
+static void test_missing_required(void) {
+    /* MCP server without name */
+    const char *yaml1 =
+        "mcps:\n"
+        "  - cmdline: \"/bin/echo\"\n";
+
+    const char *tmp = "/tmp/llmkit_test_missing.yml";
+    write_file(tmp, yaml1);
+
+    runtime_ctx ctx;
+    memset(&ctx, 0, sizeof(ctx));
+
+    int ret = config_load(tmp, &ctx);
+    CHECK_EQ(ret, EXIT_CONFIG_ERR, "missing mcp name should fail");
+    config_free(&ctx);
+
+    /* MCP server without cmdline for stdio */
+    const char *yaml2 =
+        "mcps:\n"
+        "  - name: \"test\"\n";
+
+    write_file(tmp, yaml2);
+    memset(&ctx, 0, sizeof(ctx));
+
+    ret = config_load(tmp, &ctx);
+    CHECK_EQ(ret, EXIT_CONFIG_ERR, "missing cmdline for stdio should fail");
+    config_free(&ctx);
+
+    /* MCP server without url for http */
+    const char *yaml3 =
+        "mcps:\n"
+        "  - name: \"test\"\n"
+        "    type: http\n";
+
+    write_file(tmp, yaml3);
+    memset(&ctx, 0, sizeof(ctx));
+
+    ret = config_load(tmp, &ctx);
+    CHECK_EQ(ret, EXIT_CONFIG_ERR, "missing url for http should fail");
+    config_free(&ctx);
+
+    unlink(tmp);
+
+    fprintf(stderr, "  [ok] test_missing_required\n");
+}
+
+static void test_empty_mcps(void) {
+    const char *yaml =
+        "mcps:\n";
+
+    const char *tmp = "/tmp/llmkit_test_empty_mcps.yml";
+    write_file(tmp, yaml);
+
+    runtime_ctx ctx;
+    memset(&ctx, 0, sizeof(ctx));
+
+    int ret = config_load(tmp, &ctx);
+    CHECK_EQ(ret, EXIT_CONFIG_ERR, "empty mcps should fail");
+
+    config_free(&ctx);
+    unlink(tmp);
+
+    fprintf(stderr, "  [ok] test_empty_mcps\n");
+}
+
+static void test_invalid_types(void) {
+    const char *yaml =
+        "mcps:\n"
+        "  - name: \"test\"\n"
+        "    type: invalid_type\n"
+        "    cmdline: \"/bin/echo\"\n";
+
+    const char *tmp = "/tmp/llmkit_test_invalid_type.yml";
+    write_file(tmp, yaml);
+
+    runtime_ctx ctx;
+    memset(&ctx, 0, sizeof(ctx));
+
+    int ret = config_load(tmp, &ctx);
+    CHECK_EQ(ret, EXIT_CONFIG_ERR, "invalid transport type should fail");
+
+    config_free(&ctx);
+    unlink(tmp);
+
+    /* invalid timeout behavior */
+    const char *yaml2 =
+        "mcps:\n"
+        "  - name: \"test\"\n"
+        "    cmdline: \"/bin/echo\"\n"
+        "    call_timeout_behavior: invalid\n";
+
+    write_file(tmp, yaml2);
+    memset(&ctx, 0, sizeof(ctx));
+
+    ret = config_load(tmp, &ctx);
+    CHECK_EQ(ret, EXIT_CONFIG_ERR, "invalid timeout behavior should fail");
+
+    config_free(&ctx);
+    unlink(tmp);
+
+    /* invalid duration */
+    const char *yaml3 =
+        "mcps:\n"
+        "  - name: \"test\"\n"
+        "    cmdline: \"/bin/echo\"\n"
+        "    init_timeout: \"abc\"\n";
+
+    write_file(tmp, yaml3);
+    memset(&ctx, 0, sizeof(ctx));
+
+    ret = config_load(tmp, &ctx);
+    CHECK_EQ(ret, EXIT_CONFIG_ERR, "invalid duration should fail");
+
+    config_free(&ctx);
+    unlink(tmp);
+
+    fprintf(stderr, "  [ok] test_invalid_types\n");
+}
+
+static void test_config_free_null(void) {
+    config_free(NULL);
+    config_free_mcp(NULL);
+    fprintf(stderr, "  [ok] test_config_free_null\n");
+}
+
+static void test_unknown_keys(void) {
+    const char *yaml =
+        "llm:\n"
+        "  api_base: \"http://localhost:11434/v1\"\n"
+        "  unknown_field: \"should be ignored\"\n"
+        "\n"
+        "mcps:\n"
+        "  - name: \"test\"\n"
+        "    cmdline: \"/bin/echo\"\n"
+        "    unknown_key: \"should be ignored\"\n"
+        "\n"
+        "agent:\n"
+        "  system_prompt: \"prompt\"\n"
+        "  unknown_agent_key: \"should be ignored\"\n"
+        "\n"
+        "unknown_root_key:\n"
+        "  sub: \"should be ignored\"\n";
+
+    const char *tmp = "/tmp/llmkit_test_unknown_keys.yml";
+    write_file(tmp, yaml);
+
+    runtime_ctx ctx;
+    memset(&ctx, 0, sizeof(ctx));
+
+    int ret = config_load(tmp, &ctx);
+    CHECK_EQ(ret, 0, "unknown keys should be ignored");
+
+    CHECK_STR_EQ(ctx.llm.api_base, "http://localhost:11434/v1", "api_base");
+    CHECK_STR_EQ(ctx.mcps[0].cmdline, "/bin/echo", "cmdline");
+    CHECK_STR_EQ(ctx.agent.system_prompt, "prompt", "system_prompt");
+
+    config_free(&ctx);
+    unlink(tmp);
+
+    fprintf(stderr, "  [ok] test_unknown_keys\n");
+}
+
+int main(void) {
+    fprintf(stderr, "=== test_config ===\n");
+
+    test_full_config();
+    test_defaults();
+    test_invalid_utf8();
+    test_missing_required();
+    test_empty_mcps();
+    test_invalid_types();
+    test_config_free_null();
+    test_unknown_keys();
+
+    fprintf(stderr, "\n%d tests, %d failed\n", tests_run, tests_failed);
+    return tests_failed > 0 ? 1 : 0;
+}
