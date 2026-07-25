@@ -82,6 +82,29 @@ typedef struct {
     char *mcp_server;
 } tool_def;
 
+/* Tool call within an assistant message */
+typedef struct {
+    char *id;
+    char *name;      /* function name */
+    char *arguments; /* JSON arguments string */
+} tool_call;
+
+/* Token usage from LLM API response */
+typedef struct {
+    int prompt_tokens;
+    int completion_tokens;
+    int total_tokens;
+} usage_info;
+
+/* A single message in the LLM chat request */
+typedef struct {
+    char *role;            /* "system", "user", "assistant", "tool" */
+    char *content;         /* text content (may be NULL/empty) */
+    tool_call *tool_calls; /* for assistant messages with tool_calls */
+    int tool_call_count;
+    char *tool_call_id; /* for tool result messages */
+} json_message;
+
 /* Runtime context */
 typedef struct {
     llm_cfg llm;
