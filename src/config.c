@@ -8,17 +8,16 @@
 
 /* Internal parser state */
 typedef struct {
-    yaml_parser_t  *parser;
-    yaml_event_t    event;
-    int             error_code;
-    char            error_msg[256];
-    runtime_ctx    *ctx;
+    yaml_parser_t *parser;
+    yaml_event_t event;
+    int error_code;
+    char error_msg[256];
+    runtime_ctx *ctx;
 } cfg_parse;
 
 static int cfg_next(cfg_parse *p) {
     if (!yaml_parser_parse(p->parser, &p->event)) {
-        snprintf(p->error_msg, sizeof(p->error_msg),
-                 "YAML parse error: %s", p->parser->problem);
+        snprintf(p->error_msg, sizeof(p->error_msg), "YAML parse error: %s", p->parser->problem);
         p->error_code = EXIT_CONFIG_ERR;
         return -1;
     }
@@ -27,8 +26,8 @@ static int cfg_next(cfg_parse *p) {
 
 static int cfg_expect(cfg_parse *p, yaml_event_type_t type) {
     if (p->event.type != type) {
-        snprintf(p->error_msg, sizeof(p->error_msg),
-                 "Expected YAML event type %d, got %d", type, p->event.type);
+        snprintf(p->error_msg, sizeof(p->error_msg), "Expected YAML event type %d, got %d", type,
+                 p->event.type);
         p->error_code = EXIT_CONFIG_ERR;
         return -1;
     }
@@ -48,8 +47,10 @@ static int cfg_skip_mapping(cfg_parse *p) {
     int depth = 1;
     while (depth > 0) {
         if (cfg_next(p) != 0) return -1;
-        if (p->event.type == YAML_MAPPING_START_EVENT) depth++;
-        else if (p->event.type == YAML_MAPPING_END_EVENT) depth--;
+        if (p->event.type == YAML_MAPPING_START_EVENT)
+            depth++;
+        else if (p->event.type == YAML_MAPPING_END_EVENT)
+            depth--;
         cfg_event_done(p);
     }
     return 0;
@@ -59,8 +60,10 @@ static int cfg_skip_sequence(cfg_parse *p) {
     int depth = 1;
     while (depth > 0) {
         if (cfg_next(p) != 0) return -1;
-        if (p->event.type == YAML_SEQUENCE_START_EVENT) depth++;
-        else if (p->event.type == YAML_SEQUENCE_END_EVENT) depth--;
+        if (p->event.type == YAML_SEQUENCE_START_EVENT)
+            depth++;
+        else if (p->event.type == YAML_SEQUENCE_END_EVENT)
+            depth--;
         cfg_event_done(p);
     }
     return 0;
@@ -69,20 +72,19 @@ static int cfg_skip_sequence(cfg_parse *p) {
 static int cfg_skip_value(cfg_parse *p) {
     if (cfg_next(p) != 0) return -1;
     switch (p->event.type) {
-        case YAML_SCALAR_EVENT:
-            cfg_event_done(p);
-            return 0;
-        case YAML_MAPPING_START_EVENT:
-            cfg_event_done(p);
-            return cfg_skip_mapping(p);
-        case YAML_SEQUENCE_START_EVENT:
-            cfg_event_done(p);
-            return cfg_skip_sequence(p);
-        default:
-            snprintf(p->error_msg, sizeof(p->error_msg),
-                     "Expected scalar, mapping, or sequence value");
-            p->error_code = EXIT_CONFIG_ERR;
-            return -1;
+    case YAML_SCALAR_EVENT:
+        cfg_event_done(p);
+        return 0;
+    case YAML_MAPPING_START_EVENT:
+        cfg_event_done(p);
+        return cfg_skip_mapping(p);
+    case YAML_SEQUENCE_START_EVENT:
+        cfg_event_done(p);
+        return cfg_skip_sequence(p);
+    default:
+        snprintf(p->error_msg, sizeof(p->error_msg), "Expected scalar, mapping, or sequence value");
+        p->error_code = EXIT_CONFIG_ERR;
+        return -1;
     }
 }
 
@@ -115,8 +117,7 @@ static int cfg_parse_headers(cfg_parse *p, char ***out) {
         if (cfg_expect(p, YAML_SCALAR_EVENT) != 0) goto err;
         const char *key = cfg_scalar(p);
         if (!utf8_validate_c_string(key)) {
-            snprintf(p->error_msg, sizeof(p->error_msg),
-                     "Invalid UTF-8 in header key");
+            snprintf(p->error_msg, sizeof(p->error_msg), "Invalid UTF-8 in header key");
             p->error_code = EXIT_CONFIG_ERR;
             goto err;
         }
@@ -126,8 +127,7 @@ static int cfg_parse_headers(cfg_parse *p, char ***out) {
         if (cfg_expect(p, YAML_SCALAR_EVENT) != 0) goto err;
         const char *val = cfg_scalar(p);
         if (!utf8_validate_c_string(val)) {
-            snprintf(p->error_msg, sizeof(p->error_msg),
-                     "Invalid UTF-8 in header value");
+            snprintf(p->error_msg, sizeof(p->error_msg), "Invalid UTF-8 in header value");
             p->error_code = EXIT_CONFIG_ERR;
             goto err;
         }
@@ -136,12 +136,18 @@ static int cfg_parse_headers(cfg_parse *p, char ***out) {
         if (count >= cap) {
             cap = cap ? cap * 2 : 8;
             char **tmp = realloc(arr, (cap + 1) * sizeof(char *));
-            if (!tmp) { p->error_code = EXIT_INTERNAL_ERR; goto err; }
+            if (!tmp) {
+                p->error_code = EXIT_INTERNAL_ERR;
+                goto err;
+            }
             arr = tmp;
         }
 
         char *entry = malloc(klen + 1 + vlen + 1);
-        if (!entry) { p->error_code = EXIT_INTERNAL_ERR; goto err; }
+        if (!entry) {
+            p->error_code = EXIT_INTERNAL_ERR;
+            goto err;
+        }
         memcpy(entry, key, klen);
         entry[klen] = '=';
         memcpy(entry + klen + 1, val, vlen + 1);
@@ -177,9 +183,9 @@ static int cfg_parse_str_map(cfg_parse *p, char ***out) {
         if (cfg_expect(p, YAML_SCALAR_EVENT) != 0) goto err;
         const char *key = cfg_scalar(p);
         if (!utf8_validate_c_string(key)) {
-            snprintf(p->error_msg, sizeof(p->error_msg),
-                     "Invalid UTF-8 in map key");
-            p->error_code = EXIT_CONFIG_ERR; goto err;
+            snprintf(p->error_msg, sizeof(p->error_msg), "Invalid UTF-8 in map key");
+            p->error_code = EXIT_CONFIG_ERR;
+            goto err;
         }
         size_t klen = strlen(key);
 
@@ -187,21 +193,27 @@ static int cfg_parse_str_map(cfg_parse *p, char ***out) {
         if (cfg_expect(p, YAML_SCALAR_EVENT) != 0) goto err;
         const char *val = cfg_scalar(p);
         if (!utf8_validate_c_string(val)) {
-            snprintf(p->error_msg, sizeof(p->error_msg),
-                     "Invalid UTF-8 in map value");
-            p->error_code = EXIT_CONFIG_ERR; goto err;
+            snprintf(p->error_msg, sizeof(p->error_msg), "Invalid UTF-8 in map value");
+            p->error_code = EXIT_CONFIG_ERR;
+            goto err;
         }
         size_t vlen = strlen(val);
 
         if (count >= cap) {
             cap = cap ? cap * 2 : 8;
             char **tmp = realloc(arr, (cap + 1) * sizeof(char *));
-            if (!tmp) { p->error_code = EXIT_INTERNAL_ERR; goto err; }
+            if (!tmp) {
+                p->error_code = EXIT_INTERNAL_ERR;
+                goto err;
+            }
             arr = tmp;
         }
 
         char *entry = malloc(klen + 1 + vlen + 1);
-        if (!entry) { p->error_code = EXIT_INTERNAL_ERR; goto err; }
+        if (!entry) {
+            p->error_code = EXIT_INTERNAL_ERR;
+            goto err;
+        }
         memcpy(entry, key, klen);
         entry[klen] = '=';
         memcpy(entry + klen + 1, val, vlen + 1);
@@ -237,8 +249,7 @@ static int cfg_parse_str_list(cfg_parse *p, char ***out) {
         if (cfg_expect(p, YAML_SCALAR_EVENT) != 0) goto err;
         const char *val = cfg_scalar(p);
         if (!utf8_validate_c_string(val)) {
-            snprintf(p->error_msg, sizeof(p->error_msg),
-                     "Invalid UTF-8 in list item");
+            snprintf(p->error_msg, sizeof(p->error_msg), "Invalid UTF-8 in list item");
             p->error_code = EXIT_CONFIG_ERR;
             goto err;
         }
@@ -246,7 +257,10 @@ static int cfg_parse_str_list(cfg_parse *p, char ***out) {
         if (count >= cap) {
             cap = cap ? cap * 2 : 8;
             char **tmp = realloc(arr, (cap + 1) * sizeof(char *));
-            if (!tmp) { p->error_code = EXIT_INTERNAL_ERR; goto err; }
+            if (!tmp) {
+                p->error_code = EXIT_INTERNAL_ERR;
+                goto err;
+            }
             arr = tmp;
         }
         arr[count] = util_strdup(val);
@@ -285,22 +299,26 @@ static int mcp_parse_fields(cfg_parse *p, mcp_server_cfg *cfg) {
             cfg_event_done(p);
             if (cfg_read_scalar(p, &cfg->name) != 0) goto err;
             if (strlen(cfg->name) == 0) {
-                snprintf(p->error_msg, sizeof(p->error_msg),
-                         "MCP server name must not be empty");
-                p->error_code = EXIT_CONFIG_ERR; goto err;
+                snprintf(p->error_msg, sizeof(p->error_msg), "MCP server name must not be empty");
+                p->error_code = EXIT_CONFIG_ERR;
+                goto err;
             }
 
         } else if (strcmp(key, "type") == 0) {
             cfg_event_done(p);
             char *v = NULL;
             if (cfg_read_scalar(p, &v) != 0) goto err;
-            if (strcmp(v, "stdio") == 0) cfg->transport = MCP_STDIO;
-            else if (strcmp(v, "http") == 0) cfg->transport = MCP_HTTP;
-            else if (strcmp(v, "sse") == 0) cfg->transport = MCP_SSE;
-            else {
-                snprintf(p->error_msg, sizeof(p->error_msg),
-                         "Invalid mcp type '%s'", v);
-                free(v); p->error_code = EXIT_CONFIG_ERR; goto err;
+            if (strcmp(v, "stdio") == 0) {
+                cfg->transport = MCP_STDIO;
+            } else if (strcmp(v, "http") == 0) {
+                cfg->transport = MCP_HTTP;
+            } else if (strcmp(v, "sse") == 0) {
+                cfg->transport = MCP_SSE;
+            } else {
+                snprintf(p->error_msg, sizeof(p->error_msg), "Invalid mcp type '%s'", v);
+                free(v);
+                p->error_code = EXIT_CONFIG_ERR;
+                goto err;
             }
             free(v);
 
@@ -323,9 +341,9 @@ static int mcp_parse_fields(cfg_parse *p, mcp_server_cfg *cfg) {
             int64_t ms = util_parse_duration(v);
             free(v);
             if (ms < 0) {
-                snprintf(p->error_msg, sizeof(p->error_msg),
-                         "Invalid init_timeout");
-                p->error_code = EXIT_CONFIG_ERR; goto err;
+                snprintf(p->error_msg, sizeof(p->error_msg), "Invalid init_timeout");
+                p->error_code = EXIT_CONFIG_ERR;
+                goto err;
             }
             cfg->init_timeout_ms = ms;
 
@@ -336,9 +354,9 @@ static int mcp_parse_fields(cfg_parse *p, mcp_server_cfg *cfg) {
             int64_t ms = util_parse_duration(v);
             free(v);
             if (ms < 0) {
-                snprintf(p->error_msg, sizeof(p->error_msg),
-                         "Invalid call_timeout");
-                p->error_code = EXIT_CONFIG_ERR; goto err;
+                snprintf(p->error_msg, sizeof(p->error_msg), "Invalid call_timeout");
+                p->error_code = EXIT_CONFIG_ERR;
+                goto err;
             }
             cfg->call_timeout_ms = ms;
 
@@ -346,12 +364,16 @@ static int mcp_parse_fields(cfg_parse *p, mcp_server_cfg *cfg) {
             cfg_event_done(p);
             char *v = NULL;
             if (cfg_read_scalar(p, &v) != 0) goto err;
-            if (strcmp(v, "fail") == 0) cfg->call_timeout_beh = TIMEOUT_FAIL;
-            else if (strcmp(v, "continue") == 0) cfg->call_timeout_beh = TIMEOUT_CONTINUE;
-            else {
-                snprintf(p->error_msg, sizeof(p->error_msg),
-                         "Invalid call_timeout_behavior '%s'", v);
-                free(v); p->error_code = EXIT_CONFIG_ERR; goto err;
+            if (strcmp(v, "fail") == 0) {
+                cfg->call_timeout_beh = TIMEOUT_FAIL;
+            } else if (strcmp(v, "continue") == 0) {
+                cfg->call_timeout_beh = TIMEOUT_CONTINUE;
+            } else {
+                snprintf(p->error_msg, sizeof(p->error_msg), "Invalid call_timeout_behavior '%s'",
+                         v);
+                free(v);
+                p->error_code = EXIT_CONFIG_ERR;
+                goto err;
             }
             free(v);
 
@@ -359,12 +381,15 @@ static int mcp_parse_fields(cfg_parse *p, mcp_server_cfg *cfg) {
             cfg_event_done(p);
             char *v = NULL;
             if (cfg_read_scalar(p, &v) != 0) goto err;
-            if (strcmp(v, "true") == 0 || strcmp(v, "yes") == 0) cfg->hide = true;
-            else if (strcmp(v, "false") == 0 || strcmp(v, "no") == 0) cfg->hide = false;
-            else {
-                snprintf(p->error_msg, sizeof(p->error_msg),
-                         "Invalid boolean '%s' for hide", v);
-                free(v); p->error_code = EXIT_CONFIG_ERR; goto err;
+            if (strcmp(v, "true") == 0 || strcmp(v, "yes") == 0) {
+                cfg->hide = true;
+            } else if (strcmp(v, "false") == 0 || strcmp(v, "no") == 0) {
+                cfg->hide = false;
+            } else {
+                snprintf(p->error_msg, sizeof(p->error_msg), "Invalid boolean '%s' for hide", v);
+                free(v);
+                p->error_code = EXIT_CONFIG_ERR;
+                goto err;
             }
             free(v);
 
@@ -395,9 +420,10 @@ static int mcp_parse_fields(cfg_parse *p, mcp_server_cfg *cfg) {
             char *end;
             long n = strtol(v, &end, 10);
             if (end == v || *end != '\0' || n < 0) {
-                snprintf(p->error_msg, sizeof(p->error_msg),
-                         "Invalid max_reconnect '%s'", v);
-                free(v); p->error_code = EXIT_CONFIG_ERR; goto err;
+                snprintf(p->error_msg, sizeof(p->error_msg), "Invalid max_reconnect '%s'", v);
+                free(v);
+                p->error_code = EXIT_CONFIG_ERR;
+                goto err;
             }
             cfg->max_reconnect = (int)n;
             free(v);
@@ -409,9 +435,9 @@ static int mcp_parse_fields(cfg_parse *p, mcp_server_cfg *cfg) {
             int64_t ms = util_parse_duration(v);
             free(v);
             if (ms < 0) {
-                snprintf(p->error_msg, sizeof(p->error_msg),
-                         "Invalid reconnect_delay");
-                p->error_code = EXIT_CONFIG_ERR; goto err;
+                snprintf(p->error_msg, sizeof(p->error_msg), "Invalid reconnect_delay");
+                p->error_code = EXIT_CONFIG_ERR;
+                goto err;
             }
             cfg->reconnect_delay_ms = ms;
 
@@ -432,16 +458,15 @@ static int mcp_parse_fields(cfg_parse *p, mcp_server_cfg *cfg) {
 
     if (cfg->transport == MCP_STDIO && !cfg->cmdline) {
         snprintf(p->error_msg, sizeof(p->error_msg),
-                 "MCP server '%s' of type stdio missing required 'cmdline' field",
-                 cfg->name);
+                 "MCP server '%s' of type stdio missing required 'cmdline' field", cfg->name);
         p->error_code = EXIT_CONFIG_ERR;
         goto err;
     }
 
     if ((cfg->transport == MCP_HTTP || cfg->transport == MCP_SSE) && !cfg->url) {
         snprintf(p->error_msg, sizeof(p->error_msg),
-                 "MCP server '%s' of type %s missing required 'url' field",
-                 cfg->name, cfg->transport == MCP_HTTP ? "http" : "sse");
+                 "MCP server '%s' of type %s missing required 'url' field", cfg->name,
+                 cfg->transport == MCP_HTTP ? "http" : "sse");
         p->error_code = EXIT_CONFIG_ERR;
         goto err;
     }
@@ -495,8 +520,7 @@ static int cfg_parse_mcps(cfg_parse *p, runtime_ctx *ctx) {
         if (p->event.type == YAML_SEQUENCE_END_EVENT) break;
 
         if (p->event.type != YAML_MAPPING_START_EVENT) {
-            snprintf(p->error_msg, sizeof(p->error_msg),
-                     "Expected mapping for MCP server entry");
+            snprintf(p->error_msg, sizeof(p->error_msg), "Expected mapping for MCP server entry");
             p->error_code = EXIT_CONFIG_ERR;
             cfg_event_done(p);
             goto err;
@@ -506,7 +530,10 @@ static int cfg_parse_mcps(cfg_parse *p, runtime_ctx *ctx) {
         if (ctx->mcp_count >= cap) {
             cap = cap ? cap * 2 : 8;
             mcp_server_cfg *tmp = realloc(ctx->mcps, cap * sizeof(mcp_server_cfg));
-            if (!tmp) { p->error_code = EXIT_INTERNAL_ERR; goto err; }
+            if (!tmp) {
+                p->error_code = EXIT_INTERNAL_ERR;
+                goto err;
+            }
             ctx->mcps = tmp;
         }
 
@@ -517,8 +544,7 @@ static int cfg_parse_mcps(cfg_parse *p, runtime_ctx *ctx) {
     cfg_event_done(p);
 
     if (ctx->mcp_count == 0) {
-        snprintf(p->error_msg, sizeof(p->error_msg),
-                 "'mcps' must contain at least one server");
+        snprintf(p->error_msg, sizeof(p->error_msg), "'mcps' must contain at least one server");
         p->error_code = EXIT_CONFIG_ERR;
         goto err;
     }
@@ -637,7 +663,10 @@ int config_load(const char *path, runtime_ctx *ctx) {
 
     int result = EXIT_SUCCESS;
 
-    if (cfg_next(&p) != 0) { result = p.error_code; goto done; }
+    if (cfg_next(&p) != 0) {
+        result = p.error_code;
+        goto done;
+    }
     if (p.event.type != YAML_STREAM_START_EVENT) {
         snprintf(p.error_msg, sizeof(p.error_msg), "Expected YAML stream");
         result = EXIT_CONFIG_ERR;
@@ -646,7 +675,10 @@ int config_load(const char *path, runtime_ctx *ctx) {
     }
     cfg_event_done(&p);
 
-    if (cfg_next(&p) != 0) { result = p.error_code; goto done; }
+    if (cfg_next(&p) != 0) {
+        result = p.error_code;
+        goto done;
+    }
     if (p.event.type != YAML_DOCUMENT_START_EVENT) {
         snprintf(p.error_msg, sizeof(p.error_msg), "Expected YAML document");
         result = EXIT_CONFIG_ERR;
@@ -655,10 +687,12 @@ int config_load(const char *path, runtime_ctx *ctx) {
     }
     cfg_event_done(&p);
 
-    if (cfg_next(&p) != 0) { result = p.error_code; goto done; }
+    if (cfg_next(&p) != 0) {
+        result = p.error_code;
+        goto done;
+    }
     if (p.event.type != YAML_MAPPING_START_EVENT) {
-        snprintf(p.error_msg, sizeof(p.error_msg),
-                 "Root must be a YAML mapping");
+        snprintf(p.error_msg, sizeof(p.error_msg), "Root must be a YAML mapping");
         result = EXIT_CONFIG_ERR;
         cfg_event_done(&p);
         goto done;
@@ -666,12 +700,14 @@ int config_load(const char *path, runtime_ctx *ctx) {
     cfg_event_done(&p);
 
     while (1) {
-        if (cfg_next(&p) != 0) { result = p.error_code; goto done; }
+        if (cfg_next(&p) != 0) {
+            result = p.error_code;
+            goto done;
+        }
         if (p.event.type == YAML_MAPPING_END_EVENT) break;
 
         if (p.event.type != YAML_SCALAR_EVENT) {
-            snprintf(p.error_msg, sizeof(p.error_msg),
-                     "Expected scalar key in root mapping");
+            snprintf(p.error_msg, sizeof(p.error_msg), "Expected scalar key in root mapping");
             result = EXIT_CONFIG_ERR;
             cfg_event_done(&p);
             goto done;
@@ -680,24 +716,42 @@ int config_load(const char *path, runtime_ctx *ctx) {
 
         if (strcmp(key, "llm") == 0) {
             cfg_event_done(&p);
-            if (cfg_parse_llm(&p, ctx) != 0) { result = p.error_code; goto done; }
+            if (cfg_parse_llm(&p, ctx) != 0) {
+                result = p.error_code;
+                goto done;
+            }
         } else if (strcmp(key, "mcps") == 0) {
             cfg_event_done(&p);
-            if (cfg_parse_mcps(&p, ctx) != 0) { result = p.error_code; goto done; }
+            if (cfg_parse_mcps(&p, ctx) != 0) {
+                result = p.error_code;
+                goto done;
+            }
         } else if (strcmp(key, "agent") == 0) {
             cfg_event_done(&p);
-            if (cfg_parse_agent(&p, ctx) != 0) { result = p.error_code; goto done; }
+            if (cfg_parse_agent(&p, ctx) != 0) {
+                result = p.error_code;
+                goto done;
+            }
         } else {
             cfg_event_done(&p);
-            if (cfg_skip_value(&p) != 0) { result = p.error_code; goto done; }
+            if (cfg_skip_value(&p) != 0) {
+                result = p.error_code;
+                goto done;
+            }
         }
     }
     cfg_event_done(&p);
 
-    if (cfg_next(&p) != 0) { result = p.error_code; goto done; }
+    if (cfg_next(&p) != 0) {
+        result = p.error_code;
+        goto done;
+    }
     cfg_event_done(&p);
 
-    if (cfg_next(&p) != 0) { result = p.error_code; goto done; }
+    if (cfg_next(&p) != 0) {
+        result = p.error_code;
+        goto done;
+    }
     cfg_event_done(&p);
 
 done:

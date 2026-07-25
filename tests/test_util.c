@@ -7,31 +7,34 @@
 static int tests_run = 0;
 static int tests_failed = 0;
 
-#define CHECK(cond, msg) do { \
-    tests_run++; \
-    if (!(cond)) { \
-        fprintf(stderr, "  FAIL (%s:%d): %s\n", __FILE__, __LINE__, msg); \
-        tests_failed++; \
-    } \
-} while(0)
+#define CHECK(cond, msg)                                                      \
+    do {                                                                      \
+        tests_run++;                                                          \
+        if (!(cond)) {                                                        \
+            fprintf(stderr, "  FAIL (%s:%d): %s\n", __FILE__, __LINE__, msg); \
+            tests_failed++;                                                   \
+        }                                                                     \
+    } while (0)
 
-#define CHECK_EQ(a, b, msg) do { \
-    tests_run++; \
-    if ((a) != (b)) { \
-        fprintf(stderr, "  FAIL (%s:%d): %s — expected %lld, got %lld\n", \
-                __FILE__, __LINE__, msg, (long long)(b), (long long)(a)); \
-        tests_failed++; \
-    } \
-} while(0)
+#define CHECK_EQ(a, b, msg)                                                                       \
+    do {                                                                                          \
+        tests_run++;                                                                              \
+        if ((a) != (b)) {                                                                         \
+            fprintf(stderr, "  FAIL (%s:%d): %s — expected %lld, got %lld\n", __FILE__, __LINE__, \
+                    msg, (long long)(b), (long long)(a));                                         \
+            tests_failed++;                                                                       \
+        }                                                                                         \
+    } while (0)
 
-#define CHECK_STR_EQ(a, b, msg) do { \
-    tests_run++; \
-    if (strcmp((a), (b)) != 0) { \
-        fprintf(stderr, "  FAIL (%s:%d): %s — expected \"%s\", got \"%s\"\n", \
-                __FILE__, __LINE__, msg, (b), (a)); \
-        tests_failed++; \
-    } \
-} while(0)
+#define CHECK_STR_EQ(a, b, msg)                                                             \
+    do {                                                                                    \
+        tests_run++;                                                                        \
+        if (strcmp((a), (b)) != 0) {                                                        \
+            fprintf(stderr, "  FAIL (%s:%d): %s — expected \"%s\", got \"%s\"\n", __FILE__, \
+                    __LINE__, msg, (b), (a));                                               \
+            tests_failed++;                                                                 \
+        }                                                                                   \
+    } while (0)
 
 static void test_parse_duration(void) {
     CHECK_EQ(util_parse_duration("0"), 0, "zero");
@@ -72,8 +75,9 @@ static void test_uuid_v4(void) {
     CHECK(buf[23] == '-', "UUID format: dash after 23");
     CHECK(buf[14] == '4', "UUID version nibble should be 4");
     char variant = buf[19];
-    CHECK((variant == '8' || variant == '9' || variant == 'a' || variant == 'b' ||
-           variant == 'A' || variant == 'B'), "UUID variant nibble should be 8/9/A/B");
+    CHECK((variant == '8' || variant == '9' || variant == 'a' || variant == 'b' || variant == 'A' ||
+           variant == 'B'),
+          "UUID variant nibble should be 8/9/A/B");
 
     /* verify uniqueness across two calls */
     char buf2[64];

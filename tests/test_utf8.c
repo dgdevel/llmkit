@@ -5,13 +5,14 @@
 static int tests_run = 0;
 static int tests_failed = 0;
 
-#define CHECK(cond, msg) do { \
-    tests_run++; \
-    if (!(cond)) { \
-        fprintf(stderr, "  FAIL (%s:%d): %s\n", __FILE__, __LINE__, msg); \
-        tests_failed++; \
-    } \
-} while(0)
+#define CHECK(cond, msg)                                                      \
+    do {                                                                      \
+        tests_run++;                                                          \
+        if (!(cond)) {                                                        \
+            fprintf(stderr, "  FAIL (%s:%d): %s\n", __FILE__, __LINE__, msg); \
+            tests_failed++;                                                   \
+        }                                                                     \
+    } while (0)
 
 int main(void) {
     fprintf(stderr, "=== test_utf8 ===\n");

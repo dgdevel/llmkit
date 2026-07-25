@@ -1,0 +1,92 @@
+---
+# clang-format configuration for LLMKIT
+#
+# Design goals:
+#   - Match the dominant conventions already present in src/
+#   - 4-space indentation, attached braces (1TBS / K&R)
+#   - pointer '*' binds to the variable name (right alignment)
+#   - 100-column limit
+#   - include order is left to the developer (own header first, then
+#     stdlib, then third-party); clang-format preserves the existing
+#     block structure and does not re-sort
+#   - short single-line if/loop statements are expanded for clarity
+
+Language:        Cpp
+BasedOnStyle:    LLVM
+
+# Indentation
+IndentWidth:     4
+TabWidth:        4
+UseTab:          Never
+ContinuationIndentWidth: 4
+ConstructorInitializerIndentWidth: 4
+
+# Line length
+ColumnLimit:     100
+ReflowComments:  true
+
+# Braces (1TBS / K&R: opening brace on same line)
+BreakBeforeBraces: Attach
+Cpp11BracedListStyle: true
+
+# Alignment
+AlignAfterOpenBracket: Align
+AlignConsecutiveAssignments: None
+AlignConsecutiveBitFields: None
+AlignConsecutiveDeclarations: None
+AlignConsecutiveMacros: Consecutive
+AlignEscapedNewlines: Left
+AlignOperands:   Align
+AlignTrailingComments: true
+SpacesBeforeTrailingComments: 1
+
+# Pointers: '*' binds to the variable name
+DerivePointerAlignment: false
+PointerAlignment: Right
+
+# Short forms
+# Single-line `if (cond) stmt;` is allowed (matches existing code) but the
+# branch must fit on one line; multi-line branches are always braced.
+AllowShortBlocksOnASingleLine: Empty
+AllowShortCaseLabelsOnASingleLine: false
+AllowShortEnumsOnASingleLine: false
+AllowShortFunctionsOnASingleLine: Empty
+AllowShortIfStatementsOnASingleLine: WithoutElse
+AllowShortLambdasOnASingleLine: All
+AllowShortLoopsOnASingleLine: true
+
+# Parameters and arguments: allow packing onto one line when they fit
+AllowAllParametersOfDeclarationOnNextLine: true
+BinPackArguments: true
+BinPackParameters: true
+
+# Includes: preserve developer-chosen order and grouping
+IncludeBlocks:   Preserve
+SortIncludes:    Never
+
+# Spaces
+SpaceAfterCStyleCast: false
+SpaceAfterLogicalNot: false
+SpaceAroundPointerQualifiers: Default
+SpaceBeforeAssignmentOperators: true
+SpaceBeforeCaseColon: false
+SpaceBeforeParens: ControlStatements
+SpaceBeforeRangeBasedForLoopColon: true
+SpaceInEmptyBlock: false
+SpaceInEmptyParentheses: false
+SpacesInCStyleCastParentheses: false
+SpacesInConditionalStatement: false
+SpacesInContainerLiterals: true
+SpacesInParentheses: false
+SpacesInSquareBrackets: false
+
+# Misc
+AlwaysBreakBeforeMultilineStrings: false
+BreakArrays:     true
+BreakStringLiterals: true
+CompactNamespaces: false
+FixNamespaceComments: true
+KeepEmptyLinesAtTheStartOfBlocks: false
+MaxEmptyLinesToKeep: 1
+NamespaceIndentation: None
+SortUsingDeclarations: Lexicographic

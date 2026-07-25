@@ -17,9 +17,9 @@ int64_t util_parse_duration(const char *s) {
 
     if (*end == '\0') return val;
     if (strcmp(end, "ms") == 0) return (int64_t)val;
-    if (strcmp(end, "s") == 0)  return (int64_t)val * 1000;
-    if (strcmp(end, "m") == 0)  return (int64_t)val * 60 * 1000;
-    if (strcmp(end, "h") == 0)  return (int64_t)val * 60 * 60 * 1000;
+    if (strcmp(end, "s") == 0) return (int64_t)val * 1000;
+    if (strcmp(end, "m") == 0) return (int64_t)val * 60 * 1000;
+    if (strcmp(end, "h") == 0) return (int64_t)val * 60 * 60 * 1000;
 
     return -1;
 }
@@ -35,12 +35,10 @@ void util_uuid_v4(char *buf) {
     random[6] = (random[6] & 0x0F) | 0x40;
     random[8] = (random[8] & 0x3F) | 0x80;
 
-    snprintf(buf, 37,
-        "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
-        random[0], random[1], random[2], random[3],
-        random[4], random[5], random[6], random[7],
-        random[8], random[9], random[10], random[11],
-        random[12], random[13], random[14], random[15]);
+    snprintf(buf, 37, "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+             random[0], random[1], random[2], random[3], random[4], random[5], random[6], random[7],
+             random[8], random[9], random[10], random[11], random[12], random[13], random[14],
+             random[15]);
 }
 
 void util_sha256(const char *data, size_t len, char *hex_out) {
@@ -66,7 +64,7 @@ char *util_read_file(const char *path) {
         fclose(fp);
         return NULL;
     }
-    rewind(fp);
+    fseek(fp, 0, SEEK_SET);
 
     char *buf = (char *)malloc((size_t)size + 1);
     if (buf == NULL) {

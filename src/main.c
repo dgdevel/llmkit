@@ -5,18 +5,17 @@
 
 static void print_usage(void) {
     fprintf(stderr,
-        "llmkit v" LLMKIT_VERSION "\n"
-        "\n"
-        "Usage:\n"
-        "  llmkit agent -c <config.yml> -o <conversation.jsonl> -p <prompt|prompt_file>\n"
-        "  llmkit proxy -c <config.yml> [-l <host:port>]\n"
-        "\n"
-        "Commands:\n"
-        "  agent   Run LLM conversation agent with MCP tool support\n"
-        "  proxy   Run MCP proxy server (stdio or HTTP)\n"
-        "\n"
-        "Run 'llmkit <command> --help' for detailed options.\n"
-    );
+            "llmkit v" LLMKIT_VERSION "\n"
+            "\n"
+            "Usage:\n"
+            "  llmkit agent -c <config.yml> -o <conversation.jsonl> -p <prompt|prompt_file>\n"
+            "  llmkit proxy -c <config.yml> [-l <host:port>]\n"
+            "\n"
+            "Commands:\n"
+            "  agent   Run LLM conversation agent with MCP tool support\n"
+            "  proxy   Run MCP proxy server (stdio or HTTP)\n"
+            "\n"
+            "Run 'llmkit <command> --help' for detailed options.\n");
 }
 
 int main(int argc, char **argv) {

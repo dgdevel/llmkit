@@ -22,8 +22,8 @@
 #include <sys/stat.h>
 #endif
 
-int platform_process_spawn(const char *cmdline, platform_process *out_proc,
-                           platform_pipe *in_pipe, platform_pipe *out_pipe) {
+int platform_process_spawn(const char *cmdline, platform_process *out_proc, platform_pipe *in_pipe,
+                           platform_pipe *out_pipe) {
 #ifdef _WIN32
     SECURITY_ATTRIBUTES sa;
     HANDLE child_stdin_rd, child_stdin_wr;
@@ -36,18 +36,23 @@ int platform_process_spawn(const char *cmdline, platform_process *out_proc,
 
     if (!CreatePipe(&child_stdin_rd, &child_stdin_wr, &sa, 0)) return -1;
     if (!CreatePipe(&child_stdout_rd, &child_stdout_wr, &sa, 0)) {
-        CloseHandle(child_stdin_rd); CloseHandle(child_stdin_wr);
+        CloseHandle(child_stdin_rd);
+        CloseHandle(child_stdin_wr);
         return -1;
     }
 
     if (!SetHandleInformation(child_stdin_wr, HANDLE_FLAG_INHERIT, 0)) {
-        CloseHandle(child_stdin_rd); CloseHandle(child_stdin_wr);
-        CloseHandle(child_stdout_rd); CloseHandle(child_stdout_wr);
+        CloseHandle(child_stdin_rd);
+        CloseHandle(child_stdin_wr);
+        CloseHandle(child_stdout_rd);
+        CloseHandle(child_stdout_wr);
         return -1;
     }
     if (!SetHandleInformation(child_stdout_rd, HANDLE_FLAG_INHERIT, 0)) {
-        CloseHandle(child_stdin_rd); CloseHandle(child_stdin_wr);
-        CloseHandle(child_stdout_rd); CloseHandle(child_stdout_wr);
+        CloseHandle(child_stdin_rd);
+        CloseHandle(child_stdin_wr);
+        CloseHandle(child_stdout_rd);
+        CloseHandle(child_stdout_wr);
         return -1;
     }
 
@@ -63,18 +68,22 @@ int platform_process_spawn(const char *cmdline, platform_process *out_proc,
 
     char *cmdline_copy = _strdup(cmdline);
     if (cmdline_copy == NULL) {
-        CloseHandle(child_stdin_rd); CloseHandle(child_stdin_wr);
-        CloseHandle(child_stdout_rd); CloseHandle(child_stdout_wr);
+        CloseHandle(child_stdin_rd);
+        CloseHandle(child_stdin_wr);
+        CloseHandle(child_stdout_rd);
+        CloseHandle(child_stdout_wr);
         return -1;
     }
 
-    BOOL success = CreateProcessA(NULL, cmdline_copy, NULL, NULL, TRUE,
-                                   CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
+    BOOL success = CreateProcessA(NULL, cmdline_copy, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL,
+                                  NULL, &si, &pi);
     free(cmdline_copy);
 
     if (!success) {
-        CloseHandle(child_stdin_rd); CloseHandle(child_stdin_wr);
-        CloseHandle(child_stdout_rd); CloseHandle(child_stdout_wr);
+        CloseHandle(child_stdin_rd);
+        CloseHandle(child_stdin_wr);
+        CloseHandle(child_stdout_rd);
+        CloseHandle(child_stdout_wr);
         return -1;
     }
 
@@ -94,14 +103,17 @@ int platform_process_spawn(const char *cmdline, platform_process *out_proc,
 
     if (pipe(stdin_pipe) != 0) return -1;
     if (pipe(stdout_pipe) != 0) {
-        close(stdin_pipe[0]); close(stdin_pipe[1]);
+        close(stdin_pipe[0]);
+        close(stdin_pipe[1]);
         return -1;
     }
 
     pid_t pid = fork();
     if (pid < 0) {
-        close(stdin_pipe[0]); close(stdin_pipe[1]);
-        close(stdout_pipe[0]); close(stdout_pipe[1]);
+        close(stdin_pipe[0]);
+        close(stdin_pipe[1]);
+        close(stdout_pipe[0]);
+        close(stdout_pipe[1]);
         return -1;
     }
 
@@ -164,8 +176,7 @@ int platform_process_kill(platform_process *proc) {
 
 int platform_process_wait(platform_process *proc, int64_t timeout_ms) {
 #ifdef _WIN32
-    DWORD ret = WaitForSingleObject(proc->hProcess,
-        timeout_ms < 0 ? INFINITE : (DWORD)timeout_ms);
+    DWORD ret = WaitForSingleObject(proc->hProcess, timeout_ms < 0 ? INFINITE : (DWORD)timeout_ms);
     return (ret == WAIT_OBJECT_0) ? 0 : -1;
 #else
     int status;
@@ -178,7 +189,7 @@ int platform_process_wait(platform_process *proc, int64_t timeout_ms) {
         pid_t ret = waitpid(proc->pid, &status, WNOHANG);
         if (ret == proc->pid) return 0;
         if (ret < 0) return -1;
-        struct pollfd pfd = { .fd = -1, .events = 0 };
+        struct pollfd pfd = {.fd = -1, .events = 0};
         int64_t remaining = timeout_ms - elapsed;
         int delay = remaining > 10 ? 10 : (int)remaining;
         poll(&pfd, 0, delay);
@@ -218,7 +229,7 @@ int platform_pipe_read(platform_pipe *p, char *buf, size_t size, int64_t timeout
     }
     return -1;
 #else
-    struct pollfd pfd = { .fd = p->fd, .events = POLLIN };
+    struct pollfd pfd = {.fd = p->fd, .events = POLLIN};
     int ret = poll(&pfd, 1, (int)timeout_ms);
     if (ret <= 0) return -1;
     ssize_t n = read(p->fd, buf, size);
@@ -351,7 +362,7 @@ int platform_tcp_accept(int fd, int64_t timeout_ms) {
     return (client == INVALID_SOCKET) ? -1 : (int)client;
 #else
     if (timeout_ms >= 0) {
-        struct pollfd pfd = { .fd = fd, .events = POLLIN };
+        struct pollfd pfd = {.fd = fd, .events = POLLIN};
         int ret = poll(&pfd, 1, (int)timeout_ms);
         if (ret <= 0) return -1;
     }

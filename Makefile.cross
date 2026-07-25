@@ -16,6 +16,17 @@ MINGW_OBJS := $(patsubst $(SRCDIR)/%.c,$(MINGW_OBJDIR)/%.o,$(SOURCES))
 
 SCRIPTS  := scripts
 
+# Format / lint tools (host tools; clang-tidy analyzes the C source text,
+# not the cross-compiled output, so it runs identically for native and
+# cross builds). Both are overridable.
+CLANG_FORMAT ?= clang-format
+CLANG_TIDY   ?= clang-tidy
+
+# Files checked by clang-format / clang-tidy. The non-recursive glob
+# $(SRCDIR)/*.c deliberately excludes src/vendor/* (vendored code).
+FORMAT_SOURCES := $(SRCDIR)/*.c $(SRCDIR)/*.h tests/*.c
+LINT_SOURCES   := $(SOURCES) $(wildcard tests/*.c)
+
 # Auto-detect MinGW library paths via pkg-config
 MINGW_PKG_CONFIG := PKG_CONFIG_LIBDIR=/usr/$(MINGW_W64)/lib/pkgconfig pkg-config
 # Filter out -R (Solaris rpath) flags not recognized by GCC
@@ -45,9 +56,12 @@ endif
 override MINGW_CFLAGS += $(MINGW_YAML_CFLAGS) $(MINGW_CURL_CFLAGS) $(MINGW_CRYPTO_CFLAGS) $(MINGW_CJSON_CFLAGS)
 MINGW_ALL_LIBS := $(MINGW_YAML_LIBS) $(MINGW_CURL_LIBS) $(MINGW_CRYPTO_LIBS) $(MINGW_SSL_LIBS) $(MINGW_CJSON_LIBS) -lws2_32 -lbcrypt
 
-.PHONY: windows windows64 windows32 clean-win
+.PHONY: windows windows64 windows32 clean-win check-ascii format format-check lint
 
-windows: check-ascii windows64
+# Cross build runs the same host-side gates (ASCII / format / lint) as the
+# native build, then cross-compiles. clang-tidy is host-only — it never
+# produces or links any object code.
+windows: check-ascii format-check lint windows64
 
 windows64:
 	$(MAKE) -f Makefile.cross $(MINGW_TARGET) MINGW_W64=x86_64-w64-mingw32
@@ -74,3 +88,35 @@ clean-win:
 
 check-ascii:
 	@$(SCRIPTS)/check-ascii.sh $(SRCDIR)/*.c $(SRCDIR)/*.h
+
+# Host-side format / lint gates (mirror of the main Makefile). Definitions
+# and rationale live in .clang-format / .clang-tidy at the project root.
+format:
+	$(CLANG_FORMAT) -i $(FORMAT_SOURCES)
+
+format-check:
+	@$(CLANG_FORMAT) --dry-run --Werror $(FORMAT_SOURCES)
+
+# TIDY_FLAGS uses the HOST (native) include paths, not the MinGW ones.
+# clang-tidy is a host tool that parses C source for semantic issues; it
+# never produces object code, so cross-specific sysroot headers (which
+# require a Win32 target triple and would fail with "Only Win32 target is
+# supported!") must not be on the include path. The native dev packages
+# installed for `make` provide identical headers in a host-parseable form.
+HOST_YAML_CFLAGS   := $(shell pkg-config --cflags yaml-0.1 2>/dev/null)
+HOST_CURL_CFLAGS   := $(shell pkg-config --cflags libcurl 2>/dev/null)
+HOST_CRYPTO_CFLAGS := $(shell pkg-config --cflags libcrypto 2>/dev/null)
+HOST_CJSON_CFLAGS  := $(shell pkg-config --cflags libcjson 2>/dev/null)
+
+TIDY_FLAGS := -std=c17 -D_DEFAULT_SOURCE -I $(SRCDIR) \
+              $(HOST_YAML_CFLAGS) $(HOST_CURL_CFLAGS) \
+              $(HOST_CRYPTO_CFLAGS) $(HOST_CJSON_CFLAGS)
+
+lint:
+	@set -e; \
+	for src in $(LINT_SOURCES); do \
+		printf "[clang-tidy] %s\n" "$$src"; \
+		$(CLANG_TIDY) --quiet --warnings-as-errors='*' \
+		              --config-file=.clang-tidy \
+		              "$$src" -- $(TIDY_FLAGS); \
+	done

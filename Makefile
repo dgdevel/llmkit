@@ -3,6 +3,10 @@ CFLAGS   ?= -Os -g0 -Wall -Wextra -Wpedantic -std=c17 -D_DEFAULT_SOURCE
 LDFLAGS  ?=
 STATIC   ?= 0
 
+# Lint / format tools (overridable for CI or alternative toolchains)
+CLANG_FORMAT ?= clang-format
+CLANG_TIDY   ?= clang-tidy
+
 SRCDIR   := src
 OBJDIR   := build
 TARGET   := llmkit
@@ -12,6 +16,12 @@ OBJS     := $(patsubst $(SRCDIR)/%.c,$(OBJDIR)/%.o,$(SRCS))
 
 SCRIPTS  := scripts
 SOURCES  := $(SRCS) $(wildcard $(SRCDIR)/*.h)
+
+# Files checked by clang-format / clang-tidy.
+# NOTE: $(SRCDIR)/*.c is a non-recursive glob, so src/vendor/* is excluded
+# automatically. Vendored third-party code is never reformatted or linted.
+FORMAT_SOURCES := $(SRCDIR)/*.c $(SRCDIR)/*.h tests/*.c
+LINT_SOURCES   := $(SRCS) $(wildcard tests/*.c)
 
 ifeq ($(STATIC),1)
   LDFLAGS += -static
@@ -45,9 +55,18 @@ endif
 override CFLAGS += $(YAML_CFLAGS) $(CURL_CFLAGS) $(CRYPTO_CFLAGS) $(CJSON_CFLAGS)
 LIBS := $(YAML_LIBS) $(CURL_LIBS) $(CRYPTO_LIBS) $(SSL_LIBS) $(CJSON_LIBS)
 
-.PHONY: all debug profile test clean install uninstall dist check-ascii vendors check-deps test_utf8 test_util test_config
+# Compile flags passed to clang-tidy. Mirrors CFLAGS minus the warning flags
+# (clang-tidy has its own diagnostics) plus the include paths gathered above.
+TIDY_FLAGS := -std=c17 -D_DEFAULT_SOURCE -I $(SRCDIR) \
+              $(YAML_CFLAGS) $(CURL_CFLAGS) $(CRYPTO_CFLAGS) $(CJSON_CFLAGS)
 
-all: check-ascii $(TARGET)
+.PHONY: all debug profile test clean install uninstall dist check-ascii \
+        vendors check-deps test_utf8 test_util test_config \
+        format format-check lint
+
+# The build phase runs the ASCII check, the format check, and the linter
+# before compiling. Skip with `make $(TARGET)` if you only need the binary.
+all: check-ascii format-check lint $(TARGET)
 
 debug: CFLAGS = -Og -g3 -Wall -Wextra -Wpedantic -std=c17 -D_DEFAULT_SOURCE -DLLMKIT_DEBUG
 debug: LDFLAGS += -fsanitize=address
@@ -59,6 +78,31 @@ profile: all
 
 check-ascii:
 	@$(SCRIPTS)/check-ascii.sh $(SOURCES) $(SCRIPTS)/check-ascii.sh Makefile
+
+# --- Code formatting (clang-format) -------------------------------------
+# `format`        rewrites files in place; run it before committing.
+# `format-check`  is a read-only check used by the build / CI; it fails the
+#                 build if any file is not formatted. Vendored files under
+#                 src/vendor/ are excluded by the non-recursive glob above.
+format:
+	$(CLANG_FORMAT) -i $(FORMAT_SOURCES)
+
+format-check:
+	@$(CLANG_FORMAT) --dry-run --Werror $(FORMAT_SOURCES)
+
+# --- Static analysis (clang-tidy) ---------------------------------------
+# Runs clang-tidy over every translation unit in src/ and tests/. Warnings
+# are promoted to errors via --warnings-as-errors so the build fails on any
+# lint violation. The checks and naming rules live in .clang-tidy at the
+# project root. Run `make lint` directly to see full diagnostics.
+lint:
+	@set -e; \
+	for src in $(LINT_SOURCES); do \
+		printf "[clang-tidy] %s\n" "$$src"; \
+		$(CLANG_TIDY) --quiet --warnings-as-errors='*' \
+		              --config-file=.clang-tidy \
+		              "$$src" -- $(TIDY_FLAGS); \
+	done
 
 $(TARGET): $(OBJS)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LIBS)
@@ -83,7 +127,7 @@ install: $(TARGET)
 uninstall:
 	rm -f $(DESTDIR)/usr/local/bin/$(TARGET)
 
-dist: check-ascii $(TARGET)
+dist: all
 	strip $(TARGET)
 	tar czf llmkit-$(shell git describe --tags 2>/dev/null || echo "dev").tar.gz $(TARGET) docs/ Makefile Makefile.cross scripts/ src/ tests/
 

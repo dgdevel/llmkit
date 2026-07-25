@@ -8,40 +8,44 @@
 static int tests_run = 0;
 static int tests_failed = 0;
 
-#define CHECK(cond, msg) do { \
-    tests_run++; \
-    if (!(cond)) { \
-        fprintf(stderr, "  FAIL (%s:%d): %s\n", __FILE__, __LINE__, msg); \
-        tests_failed++; \
-    } \
-} while(0)
+#define CHECK(cond, msg)                                                      \
+    do {                                                                      \
+        tests_run++;                                                          \
+        if (!(cond)) {                                                        \
+            fprintf(stderr, "  FAIL (%s:%d): %s\n", __FILE__, __LINE__, msg); \
+            tests_failed++;                                                   \
+        }                                                                     \
+    } while (0)
 
-#define CHECK_EQ(a, b, msg) do { \
-    tests_run++; \
-    if ((a) != (b)) { \
-        fprintf(stderr, "  FAIL (%s:%d): %s — expected %lld, got %lld\n", \
-                __FILE__, __LINE__, msg, (long long)(b), (long long)(a)); \
-        tests_failed++; \
-    } \
-} while(0)
+#define CHECK_EQ(a, b, msg)                                                                       \
+    do {                                                                                          \
+        tests_run++;                                                                              \
+        if ((a) != (b)) {                                                                         \
+            fprintf(stderr, "  FAIL (%s:%d): %s — expected %lld, got %lld\n", __FILE__, __LINE__, \
+                    msg, (long long)(b), (long long)(a));                                         \
+            tests_failed++;                                                                       \
+        }                                                                                         \
+    } while (0)
 
-#define CHECK_STR_EQ(a, b, msg) do { \
-    tests_run++; \
-    if (!(a) || !(b) || strcmp((a), (b)) != 0) { \
-        fprintf(stderr, "  FAIL (%s:%d): %s — expected \"%s\", got \"%s\"\n", \
-                __FILE__, __LINE__, msg, (b) ? (b) : "NULL", (a) ? (a) : "NULL"); \
-        tests_failed++; \
-    } \
-} while(0)
+#define CHECK_STR_EQ(a, b, msg)                                                             \
+    do {                                                                                    \
+        tests_run++;                                                                        \
+        if (!(a) || !(b) || strcmp((a), (b)) != 0) {                                        \
+            fprintf(stderr, "  FAIL (%s:%d): %s — expected \"%s\", got \"%s\"\n", __FILE__, \
+                    __LINE__, msg, (b) ? (b) : "NULL", (a) ? (a) : "NULL");                 \
+            tests_failed++;                                                                 \
+        }                                                                                   \
+    } while (0)
 
-#define CHECK_STR_NULL(a, msg) do { \
-    tests_run++; \
-    if ((a) != NULL) { \
-        fprintf(stderr, "  FAIL (%s:%d): %s — expected NULL, got \"%s\"\n", \
-                __FILE__, __LINE__, msg, (a)); \
-        tests_failed++; \
-    } \
-} while(0)
+#define CHECK_STR_NULL(a, msg)                                                            \
+    do {                                                                                  \
+        tests_run++;                                                                      \
+        if ((a) != NULL) {                                                                \
+            fprintf(stderr, "  FAIL (%s:%d): %s — expected NULL, got \"%s\"\n", __FILE__, \
+                    __LINE__, msg, (a));                                                  \
+            tests_failed++;                                                               \
+        }                                                                                 \
+    } while (0)
 
 static int write_file(const char *path, const char *content) {
     FILE *fp = fopen(path, "wb");
@@ -52,47 +56,46 @@ static int write_file(const char *path, const char *content) {
 }
 
 static void test_full_config(void) {
-    const char *yaml =
-        "llm:\n"
-        "  api_base: \"http://localhost:11434/v1\"\n"
-        "  api_key: \"sk-test-key\"\n"
-        "  model: \"llama3\"\n"
-        "  headers:\n"
-        "    X-Custom: \"value1\"\n"
-        "    X-Other: \"value2\"\n"
-        "\n"
-        "mcps:\n"
-        "  - name: \"srv1\"\n"
-        "    type: stdio\n"
-        "    cmdline: \"node server.js\"\n"
-        "    init_timeout: \"10s\"\n"
-        "    call_timeout: \"5m\"\n"
-        "    call_timeout_behavior: continue\n"
-        "    namespace: \"fs\"\n"
-        "    rename:\n"
-        "      fs.old_tool: fs.new_tool\n"
-        "    redefine:\n"
-        "      fs.tool1: \"New description\"\n"
-        "    whitelist:\n"
-        "      - \"fs.tool1\"\n"
-        "    blacklist:\n"
-        "      - \"fs.tool2\"\n"
-        "\n"
-        "  - name: \"srv2\"\n"
-        "    type: http\n"
-        "    url: \"http://localhost:8080/mcp\"\n"
-        "    headers:\n"
-        "      Authorization: \"Bearer token123\"\n"
-        "\n"
-        "  - name: \"srv3\"\n"
-        "    type: sse\n"
-        "    url: \"http://localhost:9090/sse\"\n"
-        "    max_reconnect: 5\n"
-        "    reconnect_delay: \"2s\"\n"
-        "    hide: true\n"
-        "\n"
-        "agent:\n"
-        "  system_prompt: \"You are a helpful assistant\"\n";
+    const char *yaml = "llm:\n"
+                       "  api_base: \"http://localhost:11434/v1\"\n"
+                       "  api_key: \"sk-test-key\"\n"
+                       "  model: \"llama3\"\n"
+                       "  headers:\n"
+                       "    X-Custom: \"value1\"\n"
+                       "    X-Other: \"value2\"\n"
+                       "\n"
+                       "mcps:\n"
+                       "  - name: \"srv1\"\n"
+                       "    type: stdio\n"
+                       "    cmdline: \"node server.js\"\n"
+                       "    init_timeout: \"10s\"\n"
+                       "    call_timeout: \"5m\"\n"
+                       "    call_timeout_behavior: continue\n"
+                       "    namespace: \"fs\"\n"
+                       "    rename:\n"
+                       "      fs.old_tool: fs.new_tool\n"
+                       "    redefine:\n"
+                       "      fs.tool1: \"New description\"\n"
+                       "    whitelist:\n"
+                       "      - \"fs.tool1\"\n"
+                       "    blacklist:\n"
+                       "      - \"fs.tool2\"\n"
+                       "\n"
+                       "  - name: \"srv2\"\n"
+                       "    type: http\n"
+                       "    url: \"http://localhost:8080/mcp\"\n"
+                       "    headers:\n"
+                       "      Authorization: \"Bearer token123\"\n"
+                       "\n"
+                       "  - name: \"srv3\"\n"
+                       "    type: sse\n"
+                       "    url: \"http://localhost:9090/sse\"\n"
+                       "    max_reconnect: 5\n"
+                       "    reconnect_delay: \"2s\"\n"
+                       "    hide: true\n"
+                       "\n"
+                       "agent:\n"
+                       "  system_prompt: \"You are a helpful assistant\"\n";
 
     const char *tmp = "/tmp/llmkit_test_full.yml";
     write_file(tmp, yaml);
@@ -163,13 +166,12 @@ static void test_full_config(void) {
 }
 
 static void test_defaults(void) {
-    const char *yaml =
-        "llm:\n"
-        "  api_base: \"http://localhost:11434/v1\"\n"
-        "\n"
-        "mcps:\n"
-        "  - name: \"defaults\"\n"
-        "    cmdline: \"/bin/echo\"\n";
+    const char *yaml = "llm:\n"
+                       "  api_base: \"http://localhost:11434/v1\"\n"
+                       "\n"
+                       "mcps:\n"
+                       "  - name: \"defaults\"\n"
+                       "    cmdline: \"/bin/echo\"\n";
 
     const char *tmp = "/tmp/llmkit_test_defaults.yml";
     write_file(tmp, yaml);
@@ -204,12 +206,11 @@ static void test_defaults(void) {
 }
 
 static void test_invalid_utf8(void) {
-    const char *yaml =
-        "llm:\n"
-        "  api_base: \"http://localhost:11434/v1\"\n"
-        "mcps:\n"
-        "  - name: \"test\xFF\xFE\"\n"
-        "    cmdline: \"/bin/echo\"\n";
+    const char *yaml = "llm:\n"
+                       "  api_base: \"http://localhost:11434/v1\"\n"
+                       "mcps:\n"
+                       "  - name: \"test\xFF\xFE\"\n"
+                       "    cmdline: \"/bin/echo\"\n";
 
     const char *tmp = "/tmp/llmkit_test_invalid_utf8.yml";
     write_file(tmp, yaml);
@@ -228,9 +229,8 @@ static void test_invalid_utf8(void) {
 
 static void test_missing_required(void) {
     /* MCP server without name */
-    const char *yaml1 =
-        "mcps:\n"
-        "  - cmdline: \"/bin/echo\"\n";
+    const char *yaml1 = "mcps:\n"
+                        "  - cmdline: \"/bin/echo\"\n";
 
     const char *tmp = "/tmp/llmkit_test_missing.yml";
     write_file(tmp, yaml1);
@@ -243,9 +243,8 @@ static void test_missing_required(void) {
     config_free(&ctx);
 
     /* MCP server without cmdline for stdio */
-    const char *yaml2 =
-        "mcps:\n"
-        "  - name: \"test\"\n";
+    const char *yaml2 = "mcps:\n"
+                        "  - name: \"test\"\n";
 
     write_file(tmp, yaml2);
     memset(&ctx, 0, sizeof(ctx));
@@ -255,10 +254,9 @@ static void test_missing_required(void) {
     config_free(&ctx);
 
     /* MCP server without url for http */
-    const char *yaml3 =
-        "mcps:\n"
-        "  - name: \"test\"\n"
-        "    type: http\n";
+    const char *yaml3 = "mcps:\n"
+                        "  - name: \"test\"\n"
+                        "    type: http\n";
 
     write_file(tmp, yaml3);
     memset(&ctx, 0, sizeof(ctx));
@@ -273,8 +271,7 @@ static void test_missing_required(void) {
 }
 
 static void test_empty_mcps(void) {
-    const char *yaml =
-        "mcps:\n";
+    const char *yaml = "mcps:\n";
 
     const char *tmp = "/tmp/llmkit_test_empty_mcps.yml";
     write_file(tmp, yaml);
@@ -292,11 +289,10 @@ static void test_empty_mcps(void) {
 }
 
 static void test_invalid_types(void) {
-    const char *yaml =
-        "mcps:\n"
-        "  - name: \"test\"\n"
-        "    type: invalid_type\n"
-        "    cmdline: \"/bin/echo\"\n";
+    const char *yaml = "mcps:\n"
+                       "  - name: \"test\"\n"
+                       "    type: invalid_type\n"
+                       "    cmdline: \"/bin/echo\"\n";
 
     const char *tmp = "/tmp/llmkit_test_invalid_type.yml";
     write_file(tmp, yaml);
@@ -311,11 +307,10 @@ static void test_invalid_types(void) {
     unlink(tmp);
 
     /* invalid timeout behavior */
-    const char *yaml2 =
-        "mcps:\n"
-        "  - name: \"test\"\n"
-        "    cmdline: \"/bin/echo\"\n"
-        "    call_timeout_behavior: invalid\n";
+    const char *yaml2 = "mcps:\n"
+                        "  - name: \"test\"\n"
+                        "    cmdline: \"/bin/echo\"\n"
+                        "    call_timeout_behavior: invalid\n";
 
     write_file(tmp, yaml2);
     memset(&ctx, 0, sizeof(ctx));
@@ -327,11 +322,10 @@ static void test_invalid_types(void) {
     unlink(tmp);
 
     /* invalid duration */
-    const char *yaml3 =
-        "mcps:\n"
-        "  - name: \"test\"\n"
-        "    cmdline: \"/bin/echo\"\n"
-        "    init_timeout: \"abc\"\n";
+    const char *yaml3 = "mcps:\n"
+                        "  - name: \"test\"\n"
+                        "    cmdline: \"/bin/echo\"\n"
+                        "    init_timeout: \"abc\"\n";
 
     write_file(tmp, yaml3);
     memset(&ctx, 0, sizeof(ctx));
@@ -352,22 +346,21 @@ static void test_config_free_null(void) {
 }
 
 static void test_unknown_keys(void) {
-    const char *yaml =
-        "llm:\n"
-        "  api_base: \"http://localhost:11434/v1\"\n"
-        "  unknown_field: \"should be ignored\"\n"
-        "\n"
-        "mcps:\n"
-        "  - name: \"test\"\n"
-        "    cmdline: \"/bin/echo\"\n"
-        "    unknown_key: \"should be ignored\"\n"
-        "\n"
-        "agent:\n"
-        "  system_prompt: \"prompt\"\n"
-        "  unknown_agent_key: \"should be ignored\"\n"
-        "\n"
-        "unknown_root_key:\n"
-        "  sub: \"should be ignored\"\n";
+    const char *yaml = "llm:\n"
+                       "  api_base: \"http://localhost:11434/v1\"\n"
+                       "  unknown_field: \"should be ignored\"\n"
+                       "\n"
+                       "mcps:\n"
+                       "  - name: \"test\"\n"
+                       "    cmdline: \"/bin/echo\"\n"
+                       "    unknown_key: \"should be ignored\"\n"
+                       "\n"
+                       "agent:\n"
+                       "  system_prompt: \"prompt\"\n"
+                       "  unknown_agent_key: \"should be ignored\"\n"
+                       "\n"
+                       "unknown_root_key:\n"
+                       "  sub: \"should be ignored\"\n";
 
     const char *tmp = "/tmp/llmkit_test_unknown_keys.yml";
     write_file(tmp, yaml);
