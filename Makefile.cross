@@ -1,0 +1,74 @@
+# Makefile.cross — Cross-compilation targets for MinGW-w64 (Linux -> Windows)
+# Include from main Makefile or invoke directly: make -f Makefile.cross windows
+
+MINGW_W64   ?= x86_64-w64-mingw32
+MINGW_CC     = $(MINGW_W64)-gcc
+MINGW_CFLAGS  = -Os -g0 -Wall -Wextra -Wpedantic -std=c17 -D_DEFAULT_SOURCE -DCURL_STATICLIB
+MINGW_LDFLAGS = -static -static-libgcc -static-libstdc++
+MINGW_LIBS    = -lyaml -lcurl -lcrypto -lssl -lws2_32 -lbcrypt
+MINGW_TARGET  = llmkit.exe
+
+SRCDIR   := src
+MINGW_OBJDIR := build-win
+
+SOURCES  := $(wildcard $(SRCDIR)/*.c)
+MINGW_OBJS := $(patsubst $(SRCDIR)/%.c,$(MINGW_OBJDIR)/%.o,$(SOURCES))
+
+SCRIPTS  := scripts
+
+# Auto-detect MinGW library paths via pkg-config
+MINGW_PKG_CONFIG := PKG_CONFIG_LIBDIR=$(MINGW_W64)/lib/pkgconfig pkg-config
+
+MINGW_YAML_CFLAGS  := $(shell $(MINGW_PKG_CONFIG) --cflags yaml-0.1 2>/dev/null)
+MINGW_YAML_LIBS    := $(shell $(MINGW_PKG_CONFIG) --libs --static yaml-0.1 2>/dev/null || echo "-lyaml")
+MINGW_CURL_CFLAGS  := $(shell $(MINGW_PKG_CONFIG) --cflags libcurl 2>/dev/null)
+MINGW_CURL_LIBS    := $(shell $(MINGW_PKG_CONFIG) --libs --static libcurl 2>/dev/null || echo "-lcurl")
+MINGW_CRYPTO_CFLAGS:= $(shell $(MINGW_PKG_CONFIG) --cflags libcrypto 2>/dev/null)
+MINGW_CRYPTO_LIBS  := $(shell $(MINGW_PKG_CONFIG) --libs --static libcrypto 2>/dev/null || echo "-lcrypto")
+MINGW_SSL_LIBS     := $(shell $(MINGW_PKG_CONFIG) --libs --static libssl 2>/dev/null || echo "-lssl")
+
+# cJSON: prefer system MinGW, fall back to vendored
+MINGW_CJSON_CFLAGS :=
+MINGW_CJSON_LIBS   :=
+ifneq ($(shell $(MINGW_PKG_CONFIG) --exists libcjson 2>/dev/null && echo yes),yes)
+  ifneq ($(wildcard $(SRCDIR)/vendor/cJSON.c),)
+    MINGW_CJSON_CFLAGS := -I$(SRCDIR)/vendor
+    MINGW_CJSON_SRC    := $(SRCDIR)/vendor/cJSON.c
+  endif
+else
+  MINGW_CJSON_CFLAGS := $(shell $(MINGW_PKG_CONFIG) --cflags libcjson)
+  MINGW_CJSON_LIBS   := $(shell $(MINGW_PKG_CONFIG) --libs --static libcjson 2>/dev/null || echo "-lcjson")
+endif
+
+override MINGW_CFLAGS += $(MINGW_YAML_CFLAGS) $(MINGW_CURL_CFLAGS) $(MINGW_CRYPTO_CFLAGS) $(MINGW_CJSON_CFLAGS)
+MINGW_ALL_LIBS := $(MINGW_YAML_LIBS) $(MINGW_CURL_LIBS) $(MINGW_CRYPTO_LIBS) $(MINGW_SSL_LIBS) $(MINGW_CJSON_LIBS)
+
+.PHONY: windows windows64 windows32 clean-win
+
+windows: check-ascii windows64
+
+windows64:
+	$(MAKE) -f Makefile.cross $(MINGW_TARGET) MINGW_W64=x86_64-w64-mingw32
+
+windows32:
+	$(MAKE) -f Makefile.cross $(MINGW_TARGET) MINGW_W64=i686-w64-mingw32
+
+$(MINGW_TARGET): $(MINGW_OBJS)
+	$(MINGW_CC) $(MINGW_CFLAGS) $(MINGW_LDFLAGS) -o $@ $^ $(MINGW_ALL_LIBS)
+
+$(MINGW_OBJDIR)/%.o: $(SRCDIR)/%.c | $(MINGW_OBJDIR)
+	$(MINGW_CC) $(MINGW_CFLAGS) -c -o $@ $<
+
+ifdef MINGW_CJSON_SRC
+$(MINGW_OBJDIR)/cJSON.o: $(MINGW_CJSON_SRC) | $(MINGW_OBJDIR)
+	$(MINGW_CC) $(MINGW_CFLAGS) -c -o $@ $<
+endif
+
+$(MINGW_OBJDIR):
+	mkdir -p $(MINGW_OBJDIR)
+
+clean-win:
+	rm -rf $(MINGW_OBJDIR) $(MINGW_TARGET)
+
+check-ascii:
+	@$(SCRIPTS)/check-ascii.sh $(SRCDIR)/*.c $(SRCDIR)/*.h
