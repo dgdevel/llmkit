@@ -1,12 +1,10 @@
 #include "util.h"
+#include "platform.h"
 #include "llmkit.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-#include <unistd.h>
-#include <fcntl.h>
-#include <sys/stat.h>
 #include <stdarg.h>
 #include <openssl/sha.h>
 
@@ -27,27 +25,12 @@ int64_t util_parse_duration(const char *s) {
 }
 
 void util_timestamp_now(char *buf, size_t len) {
-    time_t rawtime;
-    struct tm utc;
-
-    time(&rawtime);
-    gmtime_r(&rawtime, &utc);
-    strftime(buf, len, "%Y-%m-%dT%H:%M:%SZ", &utc);
+    platform_timestamp_now(buf, len);
 }
 
 void util_uuid_v4(char *buf) {
     unsigned char random[16];
-    int fd = open("/dev/urandom", O_RDONLY);
-    if (fd < 0) {
-        log_activity("[error] failed to open /dev/urandom");
-        exit(EXIT_INTERNAL_ERR);
-    }
-    ssize_t n = read(fd, random, 16);
-    close(fd);
-    if (n != 16) {
-        log_activity("[error] failed to read /dev/urandom");
-        exit(EXIT_INTERNAL_ERR);
-    }
+    platform_random_bytes(random, 16);
 
     random[6] = (random[6] & 0x0F) | 0x40;
     random[8] = (random[8] & 0x3F) | 0x80;
@@ -74,35 +57,36 @@ void util_sha256(const char *data, size_t len, char *hex_out) {
 char *util_read_file(const char *path) {
     if (path == NULL) return NULL;
 
-    int fd = open(path, O_RDONLY);
-    if (fd < 0) return NULL;
+    FILE *fp = fopen(path, "rb");
+    if (fp == NULL) return NULL;
 
-    struct stat st;
-    if (fstat(fd, &st) < 0) {
-        close(fd);
+    fseek(fp, 0, SEEK_END);
+    long size = ftell(fp);
+    if (size < 0) {
+        fclose(fp);
         return NULL;
     }
+    rewind(fp);
 
-    size_t size = (size_t)st.st_size;
-    char *buf = (char *)malloc(size + 1);
+    char *buf = (char *)malloc((size_t)size + 1);
     if (buf == NULL) {
-        close(fd);
+        fclose(fp);
         log_activity("[error] OOM reading file");
         exit(EXIT_INTERNAL_ERR);
     }
 
-    ssize_t total = 0;
-    while (total < (ssize_t)size) {
-        ssize_t n = read(fd, buf + total, size - (size_t)total);
-        if (n <= 0) {
-            close(fd);
+    size_t total = 0;
+    while (total < (size_t)size) {
+        size_t n = fread(buf + total, 1, (size_t)size - total, fp);
+        if (n == 0) {
+            fclose(fp);
             free(buf);
             return NULL;
         }
         total += n;
     }
 
-    close(fd);
+    fclose(fp);
     buf[size] = '\0';
     return buf;
 }
@@ -120,7 +104,7 @@ char *util_strdup(const char *s) {
 }
 
 void log_activity(const char *fmt, ...) {
-    if (!isatty(STDERR_FILENO)) return;
+    if (!platform_stderr_is_tty()) return;
 
     va_list args;
     va_start(args, fmt);

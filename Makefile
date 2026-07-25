@@ -75,7 +75,7 @@ $(OBJDIR):
 	mkdir -p $(OBJDIR)
 
 clean:
-	rm -rf $(OBJDIR) $(TARGET)
+	rm -rf $(OBJDIR) $(TARGET) build-win llmkit.exe
 
 install: $(TARGET)
 	install -m 755 $(TARGET) $(DESTDIR)/usr/local/bin/$(TARGET)
@@ -124,6 +124,6 @@ test_utf8: tests/test_utf8.c src/utf8.c
 	$(CC) $(CFLAGS) -Isrc -o tests/test_utf8 tests/test_utf8.c src/utf8.c
 	./tests/test_utf8
 
-test_util: tests/test_util.c src/util.c src/utf8.c
-	$(CC) $(CFLAGS) -Isrc -o tests/test_util tests/test_util.c src/util.c src/utf8.c $(LIBS)
+test_util: tests/test_util.c src/util.c src/utf8.c src/platform.c
+	$(CC) $(CFLAGS) -Isrc -o tests/test_util tests/test_util.c src/util.c src/utf8.c src/platform.c $(LIBS)
 	./tests/test_util

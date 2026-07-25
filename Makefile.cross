@@ -17,15 +17,17 @@ MINGW_OBJS := $(patsubst $(SRCDIR)/%.c,$(MINGW_OBJDIR)/%.o,$(SOURCES))
 SCRIPTS  := scripts
 
 # Auto-detect MinGW library paths via pkg-config
-MINGW_PKG_CONFIG := PKG_CONFIG_LIBDIR=$(MINGW_W64)/lib/pkgconfig pkg-config
+MINGW_PKG_CONFIG := PKG_CONFIG_LIBDIR=/usr/$(MINGW_W64)/lib/pkgconfig pkg-config
+# Filter out -R (Solaris rpath) flags not recognized by GCC
+MINGW_PC_FILTER  = sed 's/-R[^ ]*//g'
 
 MINGW_YAML_CFLAGS  := $(shell $(MINGW_PKG_CONFIG) --cflags yaml-0.1 2>/dev/null)
-MINGW_YAML_LIBS    := $(shell $(MINGW_PKG_CONFIG) --libs --static yaml-0.1 2>/dev/null || echo "-lyaml")
+MINGW_YAML_LIBS    := $(shell $(MINGW_PKG_CONFIG) --libs --static yaml-0.1 2>/dev/null | $(MINGW_PC_FILTER) || echo "-lyaml")
 MINGW_CURL_CFLAGS  := $(shell $(MINGW_PKG_CONFIG) --cflags libcurl 2>/dev/null)
-MINGW_CURL_LIBS    := $(shell $(MINGW_PKG_CONFIG) --libs --static libcurl 2>/dev/null || echo "-lcurl")
+MINGW_CURL_LIBS    := $(shell $(MINGW_PKG_CONFIG) --libs --static libcurl 2>/dev/null | $(MINGW_PC_FILTER) || echo "-lcurl")
 MINGW_CRYPTO_CFLAGS:= $(shell $(MINGW_PKG_CONFIG) --cflags libcrypto 2>/dev/null)
-MINGW_CRYPTO_LIBS  := $(shell $(MINGW_PKG_CONFIG) --libs --static libcrypto 2>/dev/null || echo "-lcrypto")
-MINGW_SSL_LIBS     := $(shell $(MINGW_PKG_CONFIG) --libs --static libssl 2>/dev/null || echo "-lssl")
+MINGW_CRYPTO_LIBS  := $(shell $(MINGW_PKG_CONFIG) --libs --static libcrypto 2>/dev/null | $(MINGW_PC_FILTER) || echo "-lcrypto")
+MINGW_SSL_LIBS     := $(shell $(MINGW_PKG_CONFIG) --libs --static libssl 2>/dev/null | $(MINGW_PC_FILTER) || echo "-lssl")
 
 # cJSON: prefer system MinGW, fall back to vendored
 MINGW_CJSON_CFLAGS :=
@@ -41,7 +43,7 @@ else
 endif
 
 override MINGW_CFLAGS += $(MINGW_YAML_CFLAGS) $(MINGW_CURL_CFLAGS) $(MINGW_CRYPTO_CFLAGS) $(MINGW_CJSON_CFLAGS)
-MINGW_ALL_LIBS := $(MINGW_YAML_LIBS) $(MINGW_CURL_LIBS) $(MINGW_CRYPTO_LIBS) $(MINGW_SSL_LIBS) $(MINGW_CJSON_LIBS)
+MINGW_ALL_LIBS := $(MINGW_YAML_LIBS) $(MINGW_CURL_LIBS) $(MINGW_CRYPTO_LIBS) $(MINGW_SSL_LIBS) $(MINGW_CJSON_LIBS) -lws2_32 -lbcrypt
 
 .PHONY: windows windows64 windows32 clean-win
 

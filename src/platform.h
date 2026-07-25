@@ -9,7 +9,7 @@
 #include <winsock2.h>
 #include <windows.h>
 struct platform_process { HANDLE hProcess; DWORD pid; };
-struct platform_pipe    { HANDLE hRead, hWrite; OVERLAPPED ov; };
+struct platform_pipe    { HANDLE hRead, hWrite; };
 #else
 #include <unistd.h>
 #include <sys/wait.h>
