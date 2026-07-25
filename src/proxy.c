@@ -166,15 +166,33 @@ static void translate_list_reverse(mcp_server_cfg *cfg, cJSON *items, const char
 /*  and return the backend-local name.  The caller must NOT free the   */
 /*  returned pointer (it points into the input).                       */
 /* ------------------------------------------------------------------ */
+/* Convert a cJSON id node (number/string/null) to a malloc'd string for
+ * use with jsonrpc_build_request, which takes a const char* id. Returns
+ * NULL if id_node is NULL or not a number/string. */
+static char *id_node_to_str(const cJSON *id_node) {
+    if (id_node == NULL) return NULL;
+    if (cJSON_IsString(id_node)) return util_strdup(id_node->valuestring);
+    if (cJSON_IsNumber(id_node)) {
+        char buf[32];
+        snprintf(buf, sizeof(buf), "%g", id_node->valuedouble);
+        return util_strdup(buf);
+    }
+    return NULL;
+}
+
 /* ------------------------------------------------------------------ */
 /*  Build a JSON-RPC response from a result or error.                  */
 /* ------------------------------------------------------------------ */
-static char *build_response(const char *id, cJSON *result, const char *error_msg) {
+static char *build_response(const cJSON *id_node, cJSON *result, const char *error_msg) {
     cJSON *root = cJSON_CreateObject();
     if (root == NULL) return NULL;
     cJSON_AddStringToObject(root, "jsonrpc", "2.0");
-    if (id != NULL) {
-        cJSON_AddStringToObject(root, "id", id);
+    /* Preserve the request id verbatim (number, string, or null). Per
+     * JSON-RPC 2.0 the response MUST echo the request id. */
+    if (id_node != NULL) {
+        cJSON_AddItemToObject(root, "id", cJSON_Duplicate(id_node, 1));
+    } else {
+        cJSON_AddNullToObject(root, "id");
     }
     if (error_msg != NULL) {
         cJSON *err = cJSON_CreateObject();
@@ -192,15 +210,38 @@ static char *build_response(const char *id, cJSON *result, const char *error_msg
 }
 
 /* Build a successful JSON-RPC response wrapping a result JSON string. */
-static char *build_success(const char *id, const char *result_json) {
+static char *build_success(const cJSON *id_node, const char *result_json) {
     cJSON *result = cJSON_Parse(result_json ? result_json : "{}");
     if (result == NULL) result = cJSON_CreateObject();
-    return build_response(id, result, NULL);
+    return build_response(id_node, result, NULL);
 }
 
 /* Build an error JSON-RPC response. */
-static char *build_error(const char *id, const char *msg) {
-    return build_response(id, NULL, msg ? msg : "Internal error");
+static char *build_error(const cJSON *id_node, const char *msg) {
+    return build_response(id_node, NULL, msg ? msg : "Internal error");
+}
+
+/* Rewrite the id of a forwarded backend response so it matches the
+ * client's original request id. backend_resp is a malloc'd string that
+ * is freed here; a new malloc'd string is returned (or the original on
+ * parse failure). */
+static char *rewrite_response_id(const cJSON *id_node, char *backend_resp) {
+    if (backend_resp == NULL) return NULL;
+    cJSON *resp = cJSON_Parse(backend_resp);
+    if (resp == NULL) {
+        /* Not valid JSON; leave the raw response as-is. */
+        return backend_resp;
+    }
+    cJSON *existing = cJSON_GetObjectItem(resp, "id");
+    if (existing != NULL) {
+        cJSON_ReplaceItemInObject(resp, "id", cJSON_Duplicate(id_node, 1));
+    } else {
+        cJSON_AddItemToObject(resp, "id", cJSON_Duplicate(id_node, 1));
+    }
+    char *out = cJSON_PrintUnformatted(resp);
+    cJSON_Delete(resp);
+    free(backend_resp);
+    return out;
 }
 
 /* ------------------------------------------------------------------ */
@@ -217,11 +258,12 @@ static int handle_mcp_request(runtime_ctx *ctx, const char *req_json, char **out
     }
 
     cJSON *id_j = cJSON_GetObjectItem(req, "id");
-    const char *id_str = (id_j && cJSON_IsString(id_j)) ? id_j->valuestring : NULL;
+    /* id_j may be NULL (notification), a number, a string, or null.
+     * Preserve it verbatim for the response. */
 
     cJSON *method_j = cJSON_GetObjectItem(req, "method");
     if (method_j == NULL || !cJSON_IsString(method_j)) {
-        *out_resp = build_error(id_str, "Method not specified");
+        *out_resp = build_error(id_j, "Method not specified");
         cJSON_Delete(req);
         return EXIT_SUCCESS;
     }
@@ -246,7 +288,7 @@ static int handle_mcp_request(runtime_ctx *ctx, const char *req_json, char **out
             cJSON_AddStringToObject(info, "name", "llmkit-proxy");
             cJSON_AddStringToObject(info, "version", LLMKIT_VERSION);
         }
-        *out_resp = build_response(id_str, result, NULL);
+        *out_resp = build_response(id_j, result, NULL);
         cJSON_Delete(req);
         return EXIT_SUCCESS;
     }
@@ -262,7 +304,7 @@ static int handle_mcp_request(runtime_ctx *ctx, const char *req_json, char **out
 
     /* ---- ping ---- */
     if (strcmp(method, "ping") == 0) {
-        *out_resp = build_success(id_str, "{}");
+        *out_resp = build_success(id_j, "{}");
         cJSON_Delete(req);
         return EXIT_SUCCESS;
     }
@@ -322,7 +364,7 @@ static int handle_mcp_request(runtime_ctx *ctx, const char *req_json, char **out
             return EXIT_INTERNAL_ERR;
         }
         cJSON_AddItemToObject(result, "tools", all_tools);
-        *out_resp = build_response(id_str, result, NULL);
+        *out_resp = build_response(id_j, result, NULL);
         cJSON_Delete(req);
         return EXIT_SUCCESS;
     }
@@ -347,7 +389,7 @@ static int handle_mcp_request(runtime_ctx *ctx, const char *req_json, char **out
         }
 
         if (backend == NULL) {
-            *out_resp = build_error(id_str, "Tool not found on any backend");
+            *out_resp = build_error(id_j, "Tool not found on any backend");
             cJSON_Delete(req);
             return EXIT_SUCCESS;
         }
@@ -361,7 +403,7 @@ static int handle_mcp_request(runtime_ctx *ctx, const char *req_json, char **out
         }
         if (jsonrpc_build_call_tool(local_tool, args_str, &call_req) != EXIT_SUCCESS) {
             free(args_str);
-            *out_resp = build_error(id_str, "Failed to build tool call");
+            *out_resp = build_error(id_j, "Failed to build tool call");
             cJSON_Delete(req);
             return EXIT_SUCCESS;
         }
@@ -373,13 +415,13 @@ static int handle_mcp_request(runtime_ctx *ctx, const char *req_json, char **out
 
         if (rc != EXIT_SUCCESS || backend_resp == NULL) {
             free(backend_resp);
-            *out_resp = build_error(id_str, "Backend request failed");
+            *out_resp = build_error(id_j, "Backend request failed");
             cJSON_Delete(req);
             return EXIT_SUCCESS;
         }
 
-        /* Forward the raw backend response as-is (it's already JSON-RPC). */
-        *out_resp = backend_resp;
+        /* Rewrite the backend's id to echo the client's request id. */
+        *out_resp = rewrite_response_id(id_j, backend_resp);
         cJSON_Delete(req);
         return EXIT_SUCCESS;
     }
@@ -432,7 +474,7 @@ static int handle_mcp_request(runtime_ctx *ctx, const char *req_json, char **out
             return EXIT_INTERNAL_ERR;
         }
         cJSON_AddItemToObject(result, "resources", all_res);
-        *out_resp = build_response(id_str, result, NULL);
+        *out_resp = build_response(id_j, result, NULL);
         cJSON_Delete(req);
         return EXIT_SUCCESS;
     }
@@ -456,7 +498,7 @@ static int handle_mcp_request(runtime_ctx *ctx, const char *req_json, char **out
         }
 
         if (backend == NULL) {
-            *out_resp = build_error(id_str, "Resource not found on any backend");
+            *out_resp = build_error(id_j, "Resource not found on any backend");
             cJSON_Delete(req);
             return EXIT_SUCCESS;
         }
@@ -470,11 +512,13 @@ static int handle_mcp_request(runtime_ctx *ctx, const char *req_json, char **out
         cJSON_AddStringToObject(rp, "uri", local_uri);
         char *rp_str = cJSON_PrintUnformatted(rp);
         cJSON_Delete(rp);
-        char *read_req = jsonrpc_build_request("resources/read", rp_str, id_str);
+        char *req_id = id_node_to_str(id_j);
+        char *read_req = jsonrpc_build_request("resources/read", rp_str, req_id);
+        free(req_id);
         free(rp_str);
 
         if (read_req == NULL) {
-            *out_resp = build_error(id_str, "Failed to build request");
+            *out_resp = build_error(id_j, "Failed to build request");
             cJSON_Delete(req);
             return EXIT_SUCCESS;
         }
@@ -485,12 +529,12 @@ static int handle_mcp_request(runtime_ctx *ctx, const char *req_json, char **out
 
         if (rc != EXIT_SUCCESS || backend_resp == NULL) {
             free(backend_resp);
-            *out_resp = build_error(id_str, "Backend request failed");
+            *out_resp = build_error(id_j, "Backend request failed");
             cJSON_Delete(req);
             return EXIT_SUCCESS;
         }
 
-        *out_resp = backend_resp;
+        *out_resp = rewrite_response_id(id_j, backend_resp);
         cJSON_Delete(req);
         return EXIT_SUCCESS;
     }
@@ -543,7 +587,7 @@ static int handle_mcp_request(runtime_ctx *ctx, const char *req_json, char **out
             return EXIT_INTERNAL_ERR;
         }
         cJSON_AddItemToObject(result, "prompts", all_pr);
-        *out_resp = build_response(id_str, result, NULL);
+        *out_resp = build_response(id_j, result, NULL);
         cJSON_Delete(req);
         return EXIT_SUCCESS;
     }
@@ -567,7 +611,7 @@ static int handle_mcp_request(runtime_ctx *ctx, const char *req_json, char **out
         }
 
         if (backend == NULL) {
-            *out_resp = build_error(id_str, "Prompt not found on any backend");
+            *out_resp = build_error(id_j, "Prompt not found on any backend");
             cJSON_Delete(req);
             return EXIT_SUCCESS;
         }
@@ -587,11 +631,13 @@ static int handle_mcp_request(runtime_ctx *ctx, const char *req_json, char **out
         }
         char *pp_str = cJSON_PrintUnformatted(pp);
         cJSON_Delete(pp);
-        char *get_req = jsonrpc_build_request("prompts/get", pp_str, id_str);
+        char *req_id = id_node_to_str(id_j);
+        char *get_req = jsonrpc_build_request("prompts/get", pp_str, req_id);
+        free(req_id);
         free(pp_str);
 
         if (get_req == NULL) {
-            *out_resp = build_error(id_str, "Failed to build request");
+            *out_resp = build_error(id_j, "Failed to build request");
             cJSON_Delete(req);
             return EXIT_SUCCESS;
         }
@@ -602,18 +648,18 @@ static int handle_mcp_request(runtime_ctx *ctx, const char *req_json, char **out
 
         if (rc != EXIT_SUCCESS || backend_resp == NULL) {
             free(backend_resp);
-            *out_resp = build_error(id_str, "Backend request failed");
+            *out_resp = build_error(id_j, "Backend request failed");
             cJSON_Delete(req);
             return EXIT_SUCCESS;
         }
 
-        *out_resp = backend_resp;
+        *out_resp = rewrite_response_id(id_j, backend_resp);
         cJSON_Delete(req);
         return EXIT_SUCCESS;
     }
 
     /* ---- Unknown method ---- */
-    *out_resp = build_error(id_str, "Method not supported");
+    *out_resp = build_error(id_j, "Method not supported");
     cJSON_Delete(req);
     return EXIT_SUCCESS;
 }

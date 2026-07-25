@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 
 /* ------------------------------------------------------------------ */
 /*  Prompt resolution                                                  */
@@ -64,9 +65,25 @@ static int startup_sequence(runtime_ctx *ctx, const char *convo_path, const char
 
     /* Resolve prompt. */
     char *prompt_text = resolve_prompt(prompt_arg);
-    if (prompt_text == NULL || prompt_text[0] == '\0') {
+    /* Spec step 4: reject empty or whitespace-only prompts (exit 2). */
+    if (prompt_text != NULL) {
+        size_t j = 0;
+        unsigned char blank = 1;
+        while (prompt_text[j] != '\0') {
+            if (!isspace((unsigned char)prompt_text[j])) {
+                blank = 0;
+                break;
+            }
+            j++;
+        }
+        if (blank) {
+            log_activity("[error] Empty prompt");
+            free(prompt_text);
+            return EXIT_ARGS_ERR;
+        }
+    }
+    if (prompt_text == NULL) {
         log_activity("[error] Empty prompt");
-        free(prompt_text);
         return EXIT_ARGS_ERR;
     }
 
