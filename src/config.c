@@ -634,7 +634,7 @@ int config_load(const char *path, runtime_ctx *ctx) {
     char *raw = util_read_file(path);
     if (!raw) {
         log_activity("[error] Cannot read config file: %s", path);
-        return EXIT_FILE_ERR;
+        return EXIT_CONFIG_ERR;
     }
 
     if (!utf8_validate_c_string(raw)) {
@@ -657,7 +657,7 @@ int config_load(const char *path, runtime_ctx *ctx) {
         log_activity("[error] Cannot open config file: %s", path);
         free(raw);
         yaml_parser_delete(&parser);
-        return EXIT_FILE_ERR;
+        return EXIT_CONFIG_ERR;
     }
     yaml_parser_set_input_file(&parser, fp);
 

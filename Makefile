@@ -133,7 +133,9 @@ uninstall:
 
 dist: all
 	strip $(TARGET)
-	tar czf llmkit-$(shell git describe --tags 2>/dev/null || echo "dev").tar.gz $(TARGET) docs/ Makefile Makefile.cross scripts/ src/ tests/
+	tar czf llmkit-$(shell git describe --tags 2>/dev/null || echo "dev").tar.gz \
+		$(TARGET) README.md docs/ Makefile Makefile.cross \
+		.clang-format .clang-tidy scripts/ src/ tests/
 
 vendors:
 	@echo "Fetching vendored dependencies..."

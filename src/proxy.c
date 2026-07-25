@@ -791,7 +791,7 @@ static int proxy_loop_http(runtime_ctx *ctx, const char *addr) {
     int listen_fd = platform_tcp_listen(host, port);
     if (listen_fd < 0) {
         log_activity("[error] Failed to bind to %s:%d", host, port);
-        return EXIT_MCP_ERR;
+        return EXIT_FILE_ERR; /* proxy spec: 3 = Server error (bind failure) */
     }
 
     log_activity("[init] Proxy listening on %s:%d", host, port);

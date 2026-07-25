@@ -85,6 +85,14 @@ EOF
 "$BIN" proxy -c "$cfg" -l "127.0.0.1:notaport" >/dev/null 2>&1
 assert_exit "proxy bad listen addr -> exit 2" 2 $?
 
+# Bind failure: valid format but a port we cannot bind (privileged port 1
+# without root, or port 0 is ambiguous). Use port 1 — bind fails -> exit 3
+# (proxy spec: 3 = Server error / bind failure).
+if [ "$(id -u)" -ne 0 ]; then
+    "$BIN" proxy -c "$cfg" -l "127.0.0.1:1" >/dev/null 2>&1
+    assert_exit "proxy bind failure -> exit 3" 3 $?
+fi
+
 # ----------------------------------------------------------------------
 # 6. MCP init timeout -> exit 6
 #    A backend that never responds to `initialize` must trigger the
