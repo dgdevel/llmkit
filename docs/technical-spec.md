@@ -454,7 +454,7 @@ SOURCES  := $(SRCS) $(wildcard $(SRCDIR)/*.h)
 all: check-ascii $(TARGET)
 
 check-ascii:
-	@$(SCRIPTS)/check-ascii.sh $(SOURCES)
+	@$(SCRIPTS)/check-ascii.py $(SOURCES)
 
 $(TARGET): $(OBJS)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LIBS)
@@ -629,7 +629,7 @@ llmkit/
 ├── vendor/
 │   └── mingw/              # vendored MinGW .a / .h
 ├── scripts/
-│   └── check-ascii.sh      # ASCII-only source checker
+│   └── check-ascii.py      # ASCII-only source checker
 └── docs/
     ├── requirements.md
     └── technical-spec.md
@@ -786,45 +786,55 @@ All source code files (`.c`, `.h`, `.sh`, `Makefile`, and any other source artif
 - vendored third-party source files (under `vendor/`) are exempt, though they SHOULD be ASCII too
 - generated binary files are not scanned
 
-### 10.2 Checker Script — `scripts/check-ascii.sh`
+### 10.2 Checker Script — `scripts/check-ascii.py`
 
 The script scans each source file byte-by-byte and reports every non-ASCII character with its filename, line number, byte offset, hex code, and the actual character.
 
-```bash
-#!/usr/bin/env bash
-# scripts/check-ascii.sh — verify all given files contain only ASCII (0x00–0x7F)
-# Usage: scripts/check-ascii.sh <file> [file...]
-# Exit code: 0 if all files are pure ASCII, 1 if any non-ASCII found
+```python
+#!/usr/bin/env python3
+"""check-ascii -- Verify all given files contain only ASCII (0x00-0x7F)."""
+import sys
+import os
 
-set -euo pipefail
+VENDOR_MARKER = os.sep + "vendor" + os.sep
 
-has_error=0
 
-for path in "$@"; do
-  # Skip vendored files
-  case "$path" in
-    vendor/*) continue ;;
-  esac
+def check_file(path: str) -> bool:
+    if VENDOR_MARKER in path:
+        return True
+    ok = True
+    with open(path, "rb") as f:
+        data = f.read()
+    lineno = 1
+    col = 0
+    for byte in data:
+        if byte == ord("\n"):
+            lineno += 1
+            col = 0
+            continue
+        if byte > 127:
+            print(
+                f"{path}:{lineno}:{col}: error: non-ASCII character 0x{byte:02X} ({chr(byte)})",
+                file=sys.stderr,
+            )
+            ok = False
+        col += 1
+    return ok
 
-  lineno=1
-  while IFS= read -r line; do
-    col=0
-    for (( i=0; i<${#line}; i++ )); do
-      byte=$(printf '%d' "'${line:$i:1}")
-      if [ "$byte" -gt 127 ]; then
-        char="${line:$i:1}"
-        hex=$(printf '0x%02X' "$byte")
-        printf '%s:%d:%d: error: non-ASCII character %s (%s)\n' \
-          "$path" "$lineno" "$col" "$hex" "$char" >&2
-        has_error=1
-      fi
-      col=$((col + 1))
-    done
-    lineno=$((lineno + 1))
-  done < "$path"
-done
 
-exit "$has_error"
+def main() -> int:
+    if len(sys.argv) < 2:
+        print("Usage: check-ascii.py <file> [file ...]", file=sys.stderr)
+        return 1
+    ok = True
+    for path in sys.argv[1:]:
+        if not check_file(path):
+            ok = False
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
 ```
 
 **Output format:** `<filename>:<line>:<column>: error: non-ASCII character 0x<HEX> (<char>)`
@@ -842,7 +852,7 @@ src/llm.h:7:31: error: non-ASCII character 0x201C (")
 
 - The script runs **before every build target** (`all`, `debug`, `profile`, `windows`, `windows32`).
 - A failed check (non-zero exit) **aborts the build immediately** — no object files or binaries are produced.
-- The script is also suitable for running in CI as a standalone check: `scripts/check-ascii.sh src/*.c src/*.h`.
+- The script is also suitable for running in CI as a standalone check: `scripts/check-ascii.py src/*.c src/*.h`.
 
 ### 10.4 Pre-Commit Hook (Optional)
 
@@ -850,7 +860,7 @@ A pre-commit hook at `.git/hooks/pre-commit` can invoke the checker:
 
 ```bash
 #!/bin/sh
-exec scripts/check-ascii.sh $(git diff --cached --name-only --diff-filter=ACMR | grep -E '\.(c|h)$')
+exec scripts/check-ascii.py $(git diff --cached --name-only --diff-filter=ACMR | grep -E '\.(c|h)$')
 ```
 
 This catches non-ASCII characters before they reach the repository.

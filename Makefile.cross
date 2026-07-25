@@ -1,4 +1,4 @@
-# Makefile.cross — Cross-compilation targets for MinGW-w64 (Linux -> Windows)
+# Makefile.cross - Cross-compilation targets for MinGW-w64 (Linux -> Windows)
 # Include from main Makefile or invoke directly: make -f Makefile.cross windows
 
 MINGW_W64   ?= x86_64-w64-mingw32
@@ -59,7 +59,7 @@ MINGW_ALL_LIBS := $(MINGW_YAML_LIBS) $(MINGW_CURL_LIBS) $(MINGW_CRYPTO_LIBS) $(M
 .PHONY: windows windows64 windows32 clean-win check-ascii format format-check lint
 
 # Cross build runs the same host-side gates (ASCII / format / lint) as the
-# native build, then cross-compiles. clang-tidy is host-only — it never
+# native build, then cross-compiles. clang-tidy is host-only - it never
 # produces or links any object code.
 windows: check-ascii format-check lint windows64
 
@@ -87,7 +87,7 @@ clean-win:
 	rm -rf $(MINGW_OBJDIR) $(MINGW_TARGET)
 
 check-ascii:
-	@$(SCRIPTS)/check-ascii.sh $(SRCDIR)/*.c $(SRCDIR)/*.h
+	@$(SCRIPTS)/check-ascii.py $(SRCDIR)/*.c $(SRCDIR)/*.h $(SCRIPTS)/check-ascii.py Makefile.cross
 
 # Host-side format / lint gates (mirror of the main Makefile). Definitions
 # and rationale live in .clang-format / .clang-tidy at the project root.

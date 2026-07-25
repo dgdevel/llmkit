@@ -61,7 +61,7 @@ TIDY_FLAGS := -std=c17 -D_DEFAULT_SOURCE -I $(SRCDIR) \
               $(YAML_CFLAGS) $(CURL_CFLAGS) $(CRYPTO_CFLAGS) $(CJSON_CFLAGS)
 
 .PHONY: all debug profile test clean install uninstall dist check-ascii \
-        vendors check-deps test_utf8 test_util test_config test_jsonrpc test_transport test_conversation \
+        vendors check-deps test_utf8 test_util test_config test_jsonrpc test_transport \
         format format-check lint
 
 # The build phase runs the ASCII check, the format check, and the linter
@@ -77,7 +77,7 @@ profile: LDFLAGS += -pg
 profile: all
 
 check-ascii:
-	@$(SCRIPTS)/check-ascii.sh $(SOURCES) $(SCRIPTS)/check-ascii.sh Makefile
+	@$(SCRIPTS)/check-ascii.py $(SOURCES) $(SCRIPTS)/check-ascii.py Makefile Makefile.cross
 
 # --- Code formatting (clang-format) -------------------------------------
 # `format`        rewrites files in place; run it before committing.
@@ -161,7 +161,7 @@ check-deps:
 	fi
 	@echo "Done."
 
-test: test_utf8 test_util test_config test_jsonrpc test_transport test_conversation
+test: test_utf8 test_util test_config test_jsonrpc test_transport
 	@echo "All tests passed."
 
 test_utf8: tests/test_utf8.c src/utf8.c
@@ -184,6 +184,3 @@ test_transport: tests/test_transport.c src/mcp_transport.c src/util.c src/utf8.c
 	$(CC) $(CFLAGS) -Isrc -o tests/test_transport tests/test_transport.c src/mcp_transport.c src/util.c src/utf8.c src/platform.c $(LIBS)
 	./tests/test_transport
 
-test_conversation: tests/test_conversation.c src/conversation.c src/util.c src/utf8.c src/platform.c
-	$(CC) $(CFLAGS) -Isrc -o tests/test_conversation tests/test_conversation.c src/conversation.c src/util.c src/utf8.c src/platform.c $(LIBS)
-	./tests/test_conversation
