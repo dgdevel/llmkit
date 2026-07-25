@@ -104,7 +104,7 @@ lint:
 		              "$$src" -- $(TIDY_FLAGS); \
 	done
 
-$(TARGET): $(OBJS)
+$(TARGET): $(OBJS) $(if $(CJSON_SRC),$(OBJDIR)/cJSON.o)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LIBS)
 
 $(OBJDIR)/%.o: $(SRCDIR)/%.c | $(OBJDIR)
