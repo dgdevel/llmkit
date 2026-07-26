@@ -17,6 +17,8 @@ llmkit agent -c <agent_config.yml> -o <convo.jsonl> -p <prompt|prompt_file>
 
 llmkit proxy -c <proxy_config.yml> -l <host:port>
 
+llmkit response -f <conversation.jsonl>
+
 ```
 
 ### `agent` Arguments
@@ -46,6 +48,22 @@ llmkit proxy -c <proxy_config.yml> -l <host:port>
 | 5 | MCP error (tool execution, call timeout with `behavior=fail`, invalid UTF-8 in MCP communication) |
 | 6 | MCP init timeout (server failed to initialize within `init_timeout`) |
 | 7 | Internal error (memory, parsing, unexpected) |
+
+### `response` Arguments
+
+| Flag | Short | Long | Required | Description |
+|------|-------|------|----------|-------------|
+| `-f` | `--file` | Yes | Path to conversation JSONL file |
+
+Reads a conversation JSONL file and prints the `content` field of the **last** `"type":"assistant"` entry to stdout. Returns empty string if no assistant entry exists.
+
+### `response` Exit Codes
+
+| Code | Meaning |
+|------|---------|
+| 0 | Success (content printed, possibly empty) |
+| 3 | File error (cannot read, invalid JSON) |
+| 7 | Internal error (memory) |
 
 ### `agent` Prompt Resolution Logic
 1. Check if `-p` argument is an existing file path

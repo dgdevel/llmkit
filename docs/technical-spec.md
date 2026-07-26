@@ -2,10 +2,11 @@
 
 ## 1. Project Overview
 
-LLMKIT is a lightweight C CLI tool with two modes of operation:
+LLMKIT is a lightweight C CLI tool with three modes of operation:
 
 - **`llmkit agent`** — Runs an LLM conversation loop with MCP tool support. Reads a YAML config, loads conversation history from JSONL, calls the LLM API, executes MCP tool calls, and writes results back to the JSONL file.
 - **`llmkit proxy`** — Runs an MCP proxy server that fronts one or more backend MCP servers, providing namespace isolation, rename/redefine, and whitelist/blacklist filtering over a single MCP endpoint (stdio or HTTP).
+- **`llmkit response`** — Reads a conversation JSONL file and prints the last assistant response content to stdout. Used to extract the final LLM answer from a completed conversation.
 
 The binary is statically linked, has zero runtime language dependencies, and targets Linux, macOS, and Windows (via MinGW-w64 cross-compilation).
 
@@ -126,15 +127,14 @@ typedef struct {
 
 | Function | Purpose |
 |----------|---------|
-| `main(int argc, char **argv)` | Parse `--config`/`-c`, `--output`/`-o`, `--prompt`/`-p`, `--listen`/`-l`. Dispatch to `agent_run()` or `proxy_run()`. |
+| `main(int argc, char **argv)` | Parse subcommand and flags. Dispatch to `agent_run()`, `proxy_run()`, or `response_run()`. |
 
 Logic:
-1. Check `argv[1]` for subcommand (`agent` or `proxy`)
+1. Check `argv[1]` for subcommand (`agent` or `proxy` or `response`)
 2. Parse remaining args with manual loop (no getopt dependency)
-3. Load YAML config via `config_load()`
-4. Validate required fields
-5. For `agent`: call `agent_run(ctx, convo_path, prompt)`
-6. For `proxy`: call `proxy_run(ctx, listen_addr)`
+3. For `agent`: load YAML config via `config_load()`, call `agent_run(ctx, convo_path, prompt)`
+4. For `proxy`: load YAML config via `config_load()`, call `proxy_run(ctx, listen_addr)`
+5. For `response`: parse `-f` flag, call `conversation_read_last_assistant()`, print to stdout
 
 ### 2.3 `config.c` / `config.h` — YAML Config
 
@@ -301,6 +301,7 @@ All functions use cJSON for JSON construction/parsing. Return value indicates su
 | `int conversation_write_entry(FILE *fp, entry_type type, ...)` | Write typed entry to JSONL. |
 | `int conversation_reconstruct(const char *path, json_message **out_msgs, int *out_count)` | Read all lines, skip meta/error, build message array for LLM API. |
 | `void conversation_free_messages(json_message *msgs, int count)` | Free reconstructed message array. |
+| `int conversation_read_last_assistant(const char *path, char **out_content)` | Read file line by line, find the last `"type":"assistant"` entry, return its `content`. |
 
 **`conversation_reconstruct` algorithm:**
 1. Open file for reading
@@ -687,6 +688,18 @@ Client (MCP) ←→ proxy (stdio/HTTP)
      apply_redefine()
             ↓          ↓
          Response to Client
+```
+
+### 5.3 Response Mode
+
+```
+CLI args → main.c
+    ↓
+conversation_read_last_assistant() ──→ JSONL file
+    ↓
+printf("%s", content) ──→ stdout
+    ↓
+exit 0
 ```
 
 ---

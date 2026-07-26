@@ -50,4 +50,12 @@ int conversation_reconstruct(const char *path, json_message **out_msgs, int *out
  */
 void conversation_free_messages(json_message *msgs, int count);
 
+/*
+ * Read a conversation JSONL file and find the last "assistant" entry.
+ * Returns its "content" field in *out_content (caller must free).
+ * If no assistant entry exists, *out_content is set to an empty string.
+ * Returns EXIT_SUCCESS or EXIT_FILE_ERR / EXIT_INTERNAL_ERR.
+ */
+int conversation_read_last_assistant(const char *path, char **out_content);
+
 #endif /* CONVERSATION_H */

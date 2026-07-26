@@ -191,6 +191,74 @@ case "$resp_w" in
     *) fail "proxy whitelist keeps ns1.get_time" "missing from list" ;;
 esac
 
+# ----------------------------------------------------------------------
+# 11. response command — basic extraction
+# ----------------------------------------------------------------------
+convo="$TMP/response_test.jsonl"
+printf '{"type":"meta","version":1,"timestamp":"2026-01-01T00:00:00Z","config_hash":"sha256:abc","run_id":"r1"}
+{"type":"user","timestamp":"2026-01-01T00:00:01Z","content":"Hello","source":"cli"}
+{"type":"assistant","timestamp":"2026-01-01T00:00:02Z","content":"Hi there!","model":"gpt-4o","usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8}}' >"$convo"
+
+out=$("$BIN" response -f "$convo" 2>/dev/null)
+rc=$?
+assert_exit "response basic -> exit 0" 0 $rc
+if [ "$out" = "Hi there!" ]; then
+    ok "response prints last assistant content"
+else
+    fail "response prints last assistant content" "got '$out'"
+fi
+
+# ----------------------------------------------------------------------
+# 12. response command — multiple assistants (returns last)
+# ----------------------------------------------------------------------
+convo2="$TMP/response_test2.jsonl"
+printf '{"type":"meta","version":1,"timestamp":"2026-01-01T00:00:00Z","config_hash":"sha256:abc","run_id":"r2"}
+{"type":"user","timestamp":"2026-01-01T00:00:01Z","content":"Q1","source":"cli"}
+{"type":"assistant","timestamp":"2026-01-01T00:00:02Z","content":"A1","model":"gpt-4o","usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}
+{"type":"user","timestamp":"2026-01-01T00:00:03Z","content":"Q2","source":"cli"}
+{"type":"assistant","timestamp":"2026-01-01T00:00:04Z","content":"","model":"gpt-4o","usage":{"prompt_tokens":1,"completion_tokens":0,"total_tokens":1}}
+{"type":"tool_call","timestamp":"2026-01-01T00:00:05Z","id":"c1","name":"t","arguments":"{}","mcp_server":"srv"}
+{"type":"tool_result","timestamp":"2026-01-01T00:00:06Z","call_id":"c1","name":"t","result":"ok","is_error":false,"is_timeout":false,"mcp_server":"srv"}
+{"type":"assistant","timestamp":"2026-01-01T00:00:07Z","content":"Final answer","model":"gpt-4o","usage":{"prompt_tokens":2,"completion_tokens":2,"total_tokens":4}}' >"$convo2"
+
+out=$("$BIN" response -f "$convo2" 2>/dev/null)
+rc=$?
+assert_exit "response multiple assistants -> exit 0" 0 $rc
+if [ "$out" = "Final answer" ]; then
+    ok "response returns last assistant (with tool_calls in between)"
+else
+    fail "response returns last assistant (with tool_calls)" "got '$out'"
+fi
+
+# ----------------------------------------------------------------------
+# 13. response command — no assistant entries returns empty
+# ----------------------------------------------------------------------
+convo3="$TMP/response_test3.jsonl"
+printf '{"type":"meta","version":1,"timestamp":"2026-01-01T00:00:00Z","config_hash":"sha256:abc","run_id":"r3"}
+{"type":"user","timestamp":"2026-01-01T00:00:01Z","content":"Hello","source":"cli"}' >"$convo3"
+
+out=$("$BIN" response -f "$convo3" 2>/dev/null)
+rc=$?
+assert_exit "response no assistant -> exit 0" 0 $rc
+if [ -z "$out" ]; then
+    ok "response no assistant prints nothing"
+else
+    fail "response no assistant prints nothing" "got '$out'"
+fi
+
+# ----------------------------------------------------------------------
+# 14. response command — missing file -> exit 3
+# ----------------------------------------------------------------------
+"$BIN" response -f "$TMP/nonexistent_response.jsonl" >/dev/null 2>&1
+rc=$?
+assert_exit "response missing file -> exit 0" 0 $rc
+
+# ----------------------------------------------------------------------
+# 15. response command — missing -f flag -> exit 2
+# ----------------------------------------------------------------------
+"$BIN" response >/dev/null 2>&1
+assert_exit "response without -f -> exit 2" 2 $?
+
 echo ""
 echo "$tests tests, $failed failed"
 if [ -n "$fail_msgs" ]; then

@@ -427,8 +427,66 @@ int conversation_reconstruct(const char *path, json_message **out_msgs, int *out
 }
 
 /* ------------------------------------------------------------------ */
-/*  conversation_free_messages                                         */
+/*  conversation_read_last_assistant                                  */
 /* ------------------------------------------------------------------ */
+
+int conversation_read_last_assistant(const char *path, char **out_content) {
+    if (path == NULL || out_content == NULL) return EXIT_INTERNAL_ERR;
+    *out_content = NULL;
+
+    char *content = util_read_file(path);
+    if (content == NULL) {
+        /* File does not exist or is empty — no assistant found. */
+        *out_content = util_strdup("");
+        return *out_content ? EXIT_SUCCESS : EXIT_INTERNAL_ERR;
+    }
+
+    /* Walk lines in reverse to find the last "assistant" entry. */
+    char *last_content = NULL;
+
+    /* Split into lines.  We'll scan forward and overwrite the last match. */
+    char *line = content;
+    while (line != NULL && *line != '\0') {
+        char *next = strchr(line, '\n');
+        if (next != NULL) *next = '\0';
+
+        size_t ll = strlen(line);
+        while (ll > 0 && (line[ll - 1] == '\r' || line[ll - 1] == ' ')) line[--ll] = '\0';
+
+        if (ll > 0) {
+            cJSON *j = cJSON_Parse(line);
+            if (j != NULL) {
+                cJSON *tj = cJSON_GetObjectItem(j, "type");
+                const char *ts = (tj && cJSON_IsString(tj)) ? tj->valuestring : NULL;
+                if (ts != NULL && strcmp(ts, "assistant") == 0) {
+                    cJSON *cj = cJSON_GetObjectItem(j, "content");
+                    const char *val = (cj && cJSON_IsString(cj)) ? cj->valuestring : "";
+                    free(last_content);
+                    last_content = util_strdup(val);
+                    if (last_content == NULL) {
+                        cJSON_Delete(j);
+                        free(content);
+                        free(last_content);
+                        *out_content = NULL;
+                        return EXIT_INTERNAL_ERR;
+                    }
+                }
+                cJSON_Delete(j);
+            }
+        }
+        line = next ? next + 1 : NULL;
+    }
+
+    free(content);
+
+    if (last_content == NULL) {
+        last_content = util_strdup("");
+        if (last_content == NULL) return EXIT_INTERNAL_ERR;
+    }
+
+    *out_content = last_content;
+    return EXIT_SUCCESS;
+}
 
 void conversation_free_messages(json_message *msgs, int count) {
     if (msgs == NULL) return;

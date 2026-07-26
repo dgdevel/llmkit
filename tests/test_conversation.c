@@ -47,6 +47,11 @@ static void test_reconstruct_simple(void);
 static void test_reconstruct_with_tools(void);
 static void test_reconstruct_roundtrip(void);
 static void test_free_null(void);
+static void test_read_last_assistant_empty(void);
+static void test_read_last_assistant_simple(void);
+static void test_read_last_assistant_multiple(void);
+static void test_read_last_assistant_no_file(void);
+static void test_read_last_assistant_no_assistant(void);
 
 int main(void) {
     printf("=== test_conversation ===\n");
@@ -64,6 +69,11 @@ int main(void) {
     test_reconstruct_with_tools();
     test_reconstruct_roundtrip();
     test_free_null();
+    test_read_last_assistant_empty();
+    test_read_last_assistant_simple();
+    test_read_last_assistant_multiple();
+    test_read_last_assistant_no_file();
+    test_read_last_assistant_no_assistant();
 
     printf("\n%d tests, %d failed\n", tests, failed);
     return failed ? 1 : 0;
@@ -399,4 +409,109 @@ void test_free_null(void) {
     TEST("free_messages handles NULL");
     conversation_free_messages(NULL, 0);
     ASSERT(1, "no crash");
+}
+
+/* ------------------------------------------------------------------ */
+/*  conversation_read_last_assistant tests                              */
+/* ------------------------------------------------------------------ */
+
+void test_read_last_assistant_empty(void) {
+    TEST("read_last_assistant from empty file returns empty string");
+    char *path = NULL;
+    FILE *fp = tmp_file(&path);
+    ASSERT(fp != NULL, "tmp file");
+    if (fp) fclose(fp);
+
+    char *content = (char *)0x1;
+    int rc = conversation_read_last_assistant(path, &content);
+    ASSERT(rc == EXIT_SUCCESS, "returns success");
+    ASSERT(content != NULL, "content set");
+    ASSERT(strcmp(content, "") == 0, "content is empty");
+    free(content);
+    remove(path);
+    free(path);
+}
+
+void test_read_last_assistant_simple(void) {
+    TEST("read_last_assistant returns last assistant content");
+    char *path = NULL;
+    FILE *fp = tmp_file(&path);
+    ASSERT(fp != NULL, "tmp file");
+    if (fp) fclose(fp);
+
+    fp = path ? fopen(path, "a") : NULL;
+    conversation_write_meta(fp, "h", "r");
+    conversation_write_entry(fp, ENTRY_USER, "Hi", "cli");
+    usage_info u = {5, 10, 15};
+    conversation_write_entry(fp, ENTRY_ASSISTANT, "Hello there!", "gpt-4o", &u);
+    if (fp) fclose(fp);
+
+    char *content = NULL;
+    int rc = conversation_read_last_assistant(path, &content);
+    ASSERT(rc == EXIT_SUCCESS, "returns success");
+    ASSERT(content != NULL, "content set");
+    ASSERT(strcmp(content, "Hello there!") == 0, "content matches last assistant");
+    free(content);
+    remove(path);
+    free(path);
+}
+
+void test_read_last_assistant_multiple(void) {
+    TEST("read_last_assistant with multiple assistant entries returns last");
+    char *path = NULL;
+    FILE *fp = tmp_file(&path);
+    ASSERT(fp != NULL, "tmp file");
+    if (fp) fclose(fp);
+
+    fp = path ? fopen(path, "a") : NULL;
+    conversation_write_entry(fp, ENTRY_USER, "Q1", "cli");
+    usage_info u = {5, 10, 15};
+    conversation_write_entry(fp, ENTRY_ASSISTANT, "Answer 1", "gpt-4o", &u);
+    conversation_write_entry(fp, ENTRY_USER, "Q2", "cli");
+    conversation_write_entry(fp, ENTRY_ASSISTANT, "", "gpt-4o", (const usage_info *)NULL);
+    conversation_write_entry(fp, ENTRY_TOOL_CALL, "c1", "t1", "{}", "srv");
+    conversation_write_entry(fp, ENTRY_TOOL_RESULT, "c1", "t1", "ok", 0, 0, "srv");
+    conversation_write_entry(fp, ENTRY_ASSISTANT, "Final answer", "gpt-4o", &u);
+    if (fp) fclose(fp);
+
+    char *content = NULL;
+    int rc = conversation_read_last_assistant(path, &content);
+    ASSERT(rc == EXIT_SUCCESS, "returns success");
+    ASSERT(content != NULL, "content set");
+    ASSERT(strcmp(content, "Final answer") == 0, "last assistant content");
+    free(content);
+    remove(path);
+    free(path);
+}
+
+void test_read_last_assistant_no_file(void) {
+    TEST("read_last_assistant from non-existent file returns empty string");
+    char *content = (char *)0x1;
+    int rc = conversation_read_last_assistant("/tmp/nonexistent_xyz789", &content);
+    ASSERT(rc == EXIT_SUCCESS, "returns success");
+    ASSERT(content != NULL, "content set");
+    ASSERT(strcmp(content, "") == 0, "content is empty");
+    free(content);
+}
+
+void test_read_last_assistant_no_assistant(void) {
+    TEST("read_last_assistant with no assistant entries returns empty");
+    char *path = NULL;
+    FILE *fp = tmp_file(&path);
+    ASSERT(fp != NULL, "tmp file");
+    if (fp) fclose(fp);
+
+    fp = path ? fopen(path, "a") : NULL;
+    conversation_write_meta(fp, "h", "r");
+    conversation_write_entry(fp, ENTRY_USER, "Hi", "cli");
+    if (fp) fclose(fp);
+
+    char *content = (char *)0x1;
+    int rc = conversation_read_last_assistant(path, &content);
+    ASSERT(rc == EXIT_SUCCESS, "returns success");
+    ASSERT(content != NULL, "content set");
+    ASSERT(strcmp(content, "") == 0, "content is empty");
+    free(content);
+    remove(path);
+    free(path);
 }

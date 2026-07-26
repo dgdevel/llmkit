@@ -5,6 +5,7 @@
 #include "config.h"
 #include "agent.h"
 #include "proxy.h"
+#include "conversation.h"
 #include "util.h"
 
 static void print_usage(void) {
@@ -14,10 +15,12 @@ static void print_usage(void) {
             "Usage:\n"
             "  llmkit agent -c <config.yml> -o <conversation.jsonl> -p <prompt|prompt_file>\n"
             "  llmkit proxy -c <config.yml> [-l <host:port>]\n"
+            "  llmkit response -f <conversation.jsonl>\n"
             "\n"
             "Commands:\n"
-            "  agent   Run LLM conversation agent with MCP tool support\n"
-            "  proxy   Run MCP proxy server (stdio or HTTP)\n");
+            "  agent     Run LLM conversation agent with MCP tool support\n"
+            "  proxy     Run MCP proxy server (stdio or HTTP)\n"
+            "  response  Print the last LLM response from a conversation\n");
 }
 
 /* Read a config value from argv for a given flag.
@@ -109,6 +112,29 @@ int main(int argc, char **argv) {
         rc = proxy_run(&ctx, listen_addr);
         config_free(&ctx);
         return rc;
+    }
+
+    /* ---- response ---- */
+    if (strcmp(argv[1], "response") == 0) {
+        const char *file_path = get_flag(argc, argv, "-f");
+
+        if (file_path == NULL) {
+            fprintf(stderr, "error: response requires -f <conversation.jsonl>\n");
+            return EXIT_ARGS_ERR;
+        }
+
+        char *content = NULL;
+        int rc = conversation_read_last_assistant(file_path, &content);
+        if (rc != EXIT_SUCCESS) {
+            free(content);
+            return rc;
+        }
+
+        printf("%s", content);
+        /* Print trailing newline only when content is non-empty. */
+        if (content[0] != '\0') printf("\n");
+        free(content);
+        return EXIT_SUCCESS;
     }
 
     fprintf(stderr, "error: unknown command '%s'\n", argv[1]);
