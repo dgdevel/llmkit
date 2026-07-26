@@ -1,0 +1,26 @@
+# llmkit proxy — complete configuration example
+# Proxy mode only uses the `mcps` key; `llm` and `agent` are ignored.
+
+mcps:
+  # Exposed backend — tools listed and callable by clients
+  - name: "filesystem"
+    cmdline: "npx -y @modelcontextprotocol/server-filesystem /mnt/data"
+    namespace: "fs"
+    whitelist:
+      - "fs.read_file"
+      - "fs.list_directory"
+    rename:
+      fs.read_file: "fs.cat"
+
+  # Hidden backend — initialized but never listed or callable through proxy
+  - name: "internal-db"
+    type: http
+    url: "http://localhost:9000/mcp"
+    hide: true
+
+  # SSE backend with reconnect tuning
+  - name: "streaming-logs"
+    type: sse
+    url: "http://localhost:9090/mcp/sse"
+    max_reconnect: 10
+    reconnect_delay: "500ms"

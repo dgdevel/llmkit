@@ -1,0 +1,9 @@
+# llmkit agent — minimal configuration
+# Only the required fields. All other fields use their defaults.
+
+llm:
+  api_base: "http://localhost:11434/v1"   # Required for agent mode
+
+mcps:
+  - name: "fs"                            # Required
+    cmdline: "npx -y @modelcontextprotocol/server-filesystem /tmp"

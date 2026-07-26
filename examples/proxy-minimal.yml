@@ -1,0 +1,6 @@
+# llmkit proxy — minimal configuration
+# Proxy mode requires only `mcps` with at least one server entry.
+
+mcps:
+  - name: "fs"                            # Required
+    cmdline: "npx -y @modelcontextprotocol/server-filesystem /tmp"

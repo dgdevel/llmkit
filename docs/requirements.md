@@ -120,12 +120,12 @@ Array of MCP server configurations. Each entry:
 | `headers` | map<string,string> | No | Additional headers for HTTP requests |
 
 **sse:**
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `url` | string | Yes | SSE endpoint URL (e.g., `http://localhost:8080/mcp/sse`) |
-| `headers` | map<string,string> | No | Additional headers for SSE connection |
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `url` | string | Yes | - | SSE endpoint URL (e.g., `http://localhost:8080/mcp/sse`) |
+| `headers` | map<string,string> | No | `{}` | Additional headers for SSE connection |
 | `reconnect_delay` | string (duration) | No | `"1s"` | Wait time between SSE reconnect attempts |
-| `max_reconnect_attempts` | int | No | `3` | Maximum SSE reconnection attempts before giving up |
+| `max_reconnect` | int | No | `3` | Maximum SSE reconnection attempts before giving up |
 
 ### 2.3 Agent Configuration (`agent`)
 

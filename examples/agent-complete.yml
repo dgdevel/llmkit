@@ -1,0 +1,50 @@
+# llmkit agent — complete configuration example
+# Shows every supported field with its default where applicable.
+
+llm:
+  api_base: "http://localhost:11434/v1"        # Required for agent mode
+  api_key: "sk-..."                            # Optional, defaults to none
+  model: "gpt-4o-mini"                         # Optional, defaults to "gpt-4o-mini"
+  headers:                                     # Optional, defaults to {}
+    X-Custom: "value1"
+    X-Other: "value2"
+
+agent:
+  system_prompt: "You are a helpful assistant."  # Optional, defaults to empty
+
+mcps:
+  # stdio server — spawns a local process
+  - name: "fs"
+    type: stdio                                   # Optional, defaults to stdio
+    cmdline: "npx -y @modelcontextprotocol/server-filesystem /tmp"
+    init_timeout: "30s"                           # Optional, defaults to "30s"
+    call_timeout: "10m"                           # Optional, defaults to "10m"
+    call_timeout_behavior: "fail"                 # Optional, "fail" or "continue"
+    namespace: "fs"                               # Proxy only, defaults to server name
+    hide: false                                   # Proxy only, defaults to false
+    rename:                                       # Proxy only, defaults to {}
+      fs.old_tool: "fs.new_tool"                  # key: namespaced original → value: exposed name
+    redefine:                                     # Proxy only, defaults to {}
+      fs.tool1: "New description for tool1"       # key: namespaced name → value: new description
+    whitelist:                                    # Proxy only, defaults to [] (all)
+      - "fs.list_files"
+    blacklist:                                    # Proxy only, defaults to [] (none)
+      - "fs.delete_file"
+
+  # http server — connects to an HTTP MCP endpoint
+  - name: "weather"
+    type: http
+    url: "http://localhost:9000/mcp"
+    headers:                                      # Optional, defaults to {}
+      Authorization: "Bearer token123"
+
+  # sse server — connects via Server-Sent Events
+  - name: "logs"
+    type: sse
+    url: "http://localhost:9090/mcp/sse"
+    init_timeout: "60s"
+    call_timeout: "30s"
+    call_timeout_behavior: "continue"
+    max_reconnect: 5                              # SSE only, defaults to 3
+    reconnect_delay: "2s"                         # SSE only, defaults to "1s"
+    hide: true                                    # Server is internal, not exposed by proxy
