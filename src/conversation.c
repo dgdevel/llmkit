@@ -436,7 +436,7 @@ int conversation_read_last_assistant(const char *path, char **out_content) {
 
     char *content = util_read_file(path);
     if (content == NULL) {
-        /* File does not exist or is empty — no assistant found. */
+        /* File does not exist or is empty -- no assistant found. */
         *out_content = util_strdup("");
         return *out_content ? EXIT_SUCCESS : EXIT_INTERNAL_ERR;
     }
