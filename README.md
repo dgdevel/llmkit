@@ -1,6 +1,6 @@
 # llmkit
 
-A lightweight C CLI tool with two modes of operation:
+A lightweight C CLI tool with three modes of operation:
 
 - **`llmkit agent`** -- Runs an LLM conversation loop with MCP tool support.
   Reads a YAML config, loads conversation history from JSONL, calls the LLM
@@ -8,6 +8,9 @@ A lightweight C CLI tool with two modes of operation:
 - **`llmkit proxy`** -- Runs an MCP proxy server that fronts one or more
   backend MCP servers, providing namespace isolation, rename/redefine, and
   whitelist/blacklist filtering over a single MCP endpoint (stdio or HTTP).
+- **`llmkit response`** -- Reads a conversation JSONL file and prints the
+  last LLM assistant response to stdout. Useful for extracting the final
+  answer from a completed conversation.
 
 The binary is statically linkable, has zero runtime language dependencies,
 and targets Linux, macOS, and Windows (via MinGW-w64 cross-compilation).
@@ -17,10 +20,15 @@ and targets Linux, macOS, and Windows (via MinGW-w64 cross-compilation).
 ```
 llmkit agent -c <agent_config.yml> -o <convo.jsonl> -p <prompt|prompt_file>
 llmkit proxy -c <proxy_config.yml> [-l <host:port>]
+llmkit response -f <conversation.jsonl>
 ```
 
 If `-l` is omitted from `proxy`, it runs as a stdio MCP server (reads
 JSON-RPC from stdin, writes to stdout). With `-l host:port` it serves HTTP.
+
+The `response` command reads the given JSONL file, finds the last
+`"type":"assistant"` entry, and prints its `content` field to stdout.
+Returns empty output if no assistant entry exists.
 
 ### Prompt resolution (`agent`)
 
@@ -100,16 +108,16 @@ mcps:
 
 Both commands use the same numeric scheme:
 
-| Code | Meaning (agent)              | Meaning (proxy)                          |
-|------|------------------------------|------------------------------------------|
-| 0    | Success                      | Success                                  |
-| 1    | Configuration error          | Configuration error                      |
-| 2    | Invalid arguments            | Invalid arguments / listen address       |
-| 3    | Conversation file error      | Server error (bind failure)              |
-| 4    | LLM API error                | MCP connection error                     |
-| 5    | MCP error                    | MCP error                                |
-| 6    | MCP init timeout             | MCP init timeout                         |
-| 7    | Internal error               | Internal error                           |
+| Code | Meaning (agent)              | Meaning (proxy)                          | Meaning (response)                   |
+|------|------------------------------|------------------------------------------|--------------------------------------|
+| 0    | Success                      | Success                                  | Success (content printed, may be empty) |
+| 1    | Configuration error          | Configuration error                      | -                                    |
+| 2    | Invalid arguments            | Invalid arguments / listen address       | Invalid argument (missing `-f`)      |
+| 3    | Conversation file error      | Server error (bind failure)              | File error (cannot read, invalid JSON) |
+| 4    | LLM API error                | MCP connection error                     | -                                    |
+| 5    | MCP error                    | MCP error                                | -                                    |
+| 6    | MCP init timeout             | MCP init timeout                         | -                                    |
+| 7    | Internal error               | Internal error                           | Internal error                       |
 
 ## Building
 
