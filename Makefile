@@ -63,7 +63,7 @@ TIDY_FLAGS := -std=c17 -D_DEFAULT_SOURCE -I $(SRCDIR) \
 .PHONY: all debug profile test clean install uninstall dist check-ascii \
         vendors check-deps test_utf8 test_util test_config test_jsonrpc test_transport \
         test_mcp test_conversation test_llm test_cli test_agent test_proxy \
-        format format-check lint
+        format format-check lint lint-analyzer
 
 # The build phase runs the ASCII check, the format check, and the linter
 # before compiling. Skip with `make $(TARGET)` if you only need the binary.
@@ -92,18 +92,31 @@ format-check:
 	@$(CLANG_FORMAT) --dry-run --Werror $(FORMAT_SOURCES)
 
 # --- Static analysis (clang-tidy) ---------------------------------------
-# Runs clang-tidy over every translation unit in src/ and tests/. Warnings
-# are promoted to errors via --warnings-as-errors so the build fails on any
-# lint violation. The checks and naming rules live in .clang-tidy at the
-# project root. Run `make lint` directly to see full diagnostics.
+# Runs clang-tidy in parallel over every translation unit in src/ and tests/.
+# Warnings are promoted to errors via --warnings-as-errors so the build fails
+# on any lint violation. The checks and naming rules live in .clang-tidy at the
+# project root.
+#
+# `clang-analyzer-*` checks are *expensive* (path-sensitive symbolic execution)
+# and are excluded from the default lint target. Run `make lint-analyzer` to
+# include them (e.g. pre-commit or CI on-demand).
+#
+#   make lint          -- fast: all checks except clang-analyzer
+#   make lint-analyzer -- deep: full checks including clang-analyzer
+#
 lint:
-	@set -e; \
-	for src in $(LINT_SOURCES); do \
-		printf "[clang-tidy] %s\n" "$$src"; \
-		$(CLANG_TIDY) --quiet --warnings-as-errors='*' \
-		              --config-file=.clang-tidy \
-		              "$$src" -- $(TIDY_FLAGS); \
-	done
+	@printf "%s\n" $(LINT_SOURCES) | \
+	  xargs -P $$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2) -r -I{} \
+	    $(CLANG_TIDY) --quiet --warnings-as-errors='*' \
+	      --config-file=.clang-tidy --checks='-clang-analyzer-*' \
+	      "{}" -- $(TIDY_FLAGS)
+
+lint-analyzer:
+	@printf "%s\n" $(LINT_SOURCES) | \
+	  xargs -P $$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2) -r -I{} \
+	    $(CLANG_TIDY) --quiet --warnings-as-errors='*' \
+	      --config-file=.clang-tidy \
+	      "{}" -- $(TIDY_FLAGS)
 
 $(TARGET): $(OBJS) $(if $(CJSON_SRC),$(OBJDIR)/cJSON.o)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LIBS)
