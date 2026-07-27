@@ -1,6 +1,30 @@
 # llmkit
 
-A lightweight C CLI tool with three modes of operation:
+A lightweight CLI tool to interact with LLMs and MCP from shell applications, for Windows, Linux and MacOS.
+
+A quick example:
+```
+$ cat config.yml
+llm:
+  api_base: "http://127.0.0.1:8000/v1"
+agent:
+  system_prompt: "You are a helpful assistant. Use the calculator to do your math."
+mcps:
+  - name: "calculator"
+    cmdline: "uvx mcp-server-calculator"
+
+$ llmkit agent -c config.yml -o convo.jsonl -p "How much is 3 + 3?"
+[...]
+$ llmkit response -f convo.jsonl
+3 + 3 is 6.
+$ llmkit agent -c config.yml -o convo.jsonl -p "And if you add 4?"
+[...]
+$ llmkit response -f convo.jsonl
+If you add 4, the total is 10.
+
+```
+
+## Modes of operation
 
 - **`llmkit agent`** -- Runs an LLM conversation loop with MCP tool support.
   Reads a YAML config, loads conversation history from JSONL, calls the LLM
