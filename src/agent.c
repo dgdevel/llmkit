@@ -3,6 +3,7 @@
 #include "mcp.h"
 #include "llm.h"
 #include "util.h"
+#include "platform.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -161,10 +162,13 @@ static int conversation_loop(runtime_ctx *ctx, FILE *fp) {
         tool_call *calls = NULL;
         int call_count = 0;
         usage_info usage;
+        int64_t t0 = platform_now_ms();
 
         rc = llm_chat_complete(ctx, msgs, msg_count, ctx->tools, ctx->tool_count, &content, &model,
                                &calls, &call_count, &usage);
         conversation_free_messages(msgs, msg_count);
+
+        int64_t elapsed_ms = platform_now_ms() - t0;
 
         if (rc != EXIT_SUCCESS) {
             log_activity("[error] LLM API call failed");
@@ -172,6 +176,16 @@ static int conversation_loop(runtime_ctx *ctx, FILE *fp) {
             free(model);
             free(calls);
             return EXIT_LLM_ERR;
+        }
+
+        /* ---- Print response stats to stderr ---- */
+        if (usage.total_tokens > 0) {
+            fprintf(stderr, "[stats] %s | %d tokens (prompt=%d + completion=%d) in %.2fs\n",
+                    model ? model : "?", usage.total_tokens, usage.prompt_tokens,
+                    usage.completion_tokens, (double)elapsed_ms / 1000.0);
+        } else {
+            fprintf(stderr, "[stats] %s | tokens N/A in %.2fs\n", model ? model : "?",
+                    (double)elapsed_ms / 1000.0);
         }
 
         /* ---- Write assistant entry ---- */

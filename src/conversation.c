@@ -430,22 +430,25 @@ int conversation_reconstruct(const char *path, json_message **out_msgs, int *out
 /*  conversation_read_last_assistant                                  */
 /* ------------------------------------------------------------------ */
 
-int conversation_read_last_assistant(const char *path, char **out_content) {
+int conversation_read_last_assistant(const char *path, char **out_content, char **out_model,
+                                     usage_info *out_usage) {
     if (path == NULL || out_content == NULL) return EXIT_INTERNAL_ERR;
     *out_content = NULL;
+    if (out_model) *out_model = NULL;
+    if (out_usage) memset(out_usage, 0, sizeof(usage_info));
 
-    char *content = util_read_file(path);
-    if (content == NULL) {
+    char *content_buf = util_read_file(path);
+    if (content_buf == NULL) {
         /* File does not exist or is empty -- no assistant found. */
         *out_content = util_strdup("");
         return *out_content ? EXIT_SUCCESS : EXIT_INTERNAL_ERR;
     }
 
-    /* Walk lines in reverse to find the last "assistant" entry. */
+    /* Walk lines to find the last "assistant" entry. */
     char *last_content = NULL;
+    char *last_model = NULL;
 
-    /* Split into lines.  We'll scan forward and overwrite the last match. */
-    char *line = content;
+    char *line = content_buf;
     while (line != NULL && *line != '\0') {
         char *next = strchr(line, '\n');
         if (next != NULL) *next = '\0';
@@ -465,10 +468,31 @@ int conversation_read_last_assistant(const char *path, char **out_content) {
                     last_content = util_strdup(val);
                     if (last_content == NULL) {
                         cJSON_Delete(j);
-                        free(content);
+                        free(content_buf);
                         free(last_content);
+                        free(last_model);
                         *out_content = NULL;
                         return EXIT_INTERNAL_ERR;
+                    }
+
+                    /* Extract model. */
+                    cJSON *mj = cJSON_GetObjectItem(j, "model");
+                    const char *mv = (mj && cJSON_IsString(mj)) ? mj->valuestring : "";
+                    free(last_model);
+                    last_model = util_strdup(mv);
+
+                    /* Extract usage. */
+                    if (out_usage) {
+                        cJSON *uj = cJSON_GetObjectItem(j, "usage");
+                        if (uj && cJSON_IsObject(uj)) {
+                            cJSON *pt = cJSON_GetObjectItem(uj, "prompt_tokens");
+                            cJSON *ct = cJSON_GetObjectItem(uj, "completion_tokens");
+                            cJSON *tt = cJSON_GetObjectItem(uj, "total_tokens");
+                            if (pt && cJSON_IsNumber(pt)) out_usage->prompt_tokens = pt->valueint;
+                            if (ct && cJSON_IsNumber(ct))
+                                out_usage->completion_tokens = ct->valueint;
+                            if (tt && cJSON_IsNumber(tt)) out_usage->total_tokens = tt->valueint;
+                        }
                     }
                 }
                 cJSON_Delete(j);
@@ -477,11 +501,20 @@ int conversation_read_last_assistant(const char *path, char **out_content) {
         line = next ? next + 1 : NULL;
     }
 
-    free(content);
+    free(content_buf);
 
     if (last_content == NULL) {
         last_content = util_strdup("");
-        if (last_content == NULL) return EXIT_INTERNAL_ERR;
+        if (last_content == NULL) {
+            free(last_model);
+            return EXIT_INTERNAL_ERR;
+        }
+    }
+
+    if (out_model) {
+        *out_model = last_model ? last_model : util_strdup("");
+    } else {
+        free(last_model);
     }
 
     *out_content = last_content;

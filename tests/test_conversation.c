@@ -423,7 +423,7 @@ void test_read_last_assistant_empty(void) {
     if (fp) fclose(fp);
 
     char *content = NULL;
-    int rc = conversation_read_last_assistant(path, &content);
+    int rc = conversation_read_last_assistant(path, &content, NULL, NULL);
     ASSERT(rc == EXIT_SUCCESS, "returns success");
     if (content != NULL) {
         ASSERT(strcmp(content, "") == 0, "content is empty");
@@ -448,7 +448,7 @@ void test_read_last_assistant_simple(void) {
     if (fp) fclose(fp);
 
     char *content = NULL;
-    int rc = conversation_read_last_assistant(path, &content);
+    int rc = conversation_read_last_assistant(path, &content, NULL, NULL);
     ASSERT(rc == EXIT_SUCCESS, "returns success");
     if (content != NULL) {
         ASSERT(strcmp(content, "Hello there!") == 0, "content matches last assistant");
@@ -477,7 +477,7 @@ void test_read_last_assistant_multiple(void) {
     if (fp) fclose(fp);
 
     char *content = NULL;
-    int rc = conversation_read_last_assistant(path, &content);
+    int rc = conversation_read_last_assistant(path, &content, NULL, NULL);
     ASSERT(rc == EXIT_SUCCESS, "returns success");
     if (content != NULL) {
         ASSERT(strcmp(content, "Final answer") == 0, "last assistant content");
@@ -490,7 +490,7 @@ void test_read_last_assistant_multiple(void) {
 void test_read_last_assistant_no_file(void) {
     TEST("read_last_assistant from non-existent file returns empty string");
     char *content = NULL;
-    int rc = conversation_read_last_assistant("/tmp/nonexistent_xyz789", &content);
+    int rc = conversation_read_last_assistant("/tmp/nonexistent_xyz789", &content, NULL, NULL);
     ASSERT(rc == EXIT_SUCCESS, "returns success");
     if (content != NULL) {
         ASSERT(strcmp(content, "") == 0, "content is empty");
@@ -511,7 +511,7 @@ void test_read_last_assistant_no_assistant(void) {
     if (fp) fclose(fp);
 
     char *content = NULL;
-    int rc = conversation_read_last_assistant(path, &content);
+    int rc = conversation_read_last_assistant(path, &content, NULL, NULL);
     ASSERT(rc == EXIT_SUCCESS, "returns success");
     if (content != NULL) {
         ASSERT(strcmp(content, "") == 0, "content is empty");

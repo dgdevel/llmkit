@@ -124,11 +124,21 @@ int main(int argc, char **argv) {
         }
 
         char *content = NULL;
-        int rc = conversation_read_last_assistant(file_path, &content);
+        char *model = NULL;
+        usage_info usage;
+        int rc = conversation_read_last_assistant(file_path, &content, &model, &usage);
         if (rc != EXIT_SUCCESS) {
             free(content);
+            free(model);
             return rc;
         }
+
+        if (usage.total_tokens > 0) {
+            fprintf(stderr, "[stats] %s | %d tokens (prompt=%d + completion=%d)\n",
+                    model && model[0] ? model : "?", usage.total_tokens, usage.prompt_tokens,
+                    usage.completion_tokens);
+        }
+        free(model);
 
         printf("%s", content);
         /* Print trailing newline only when content is non-empty. */

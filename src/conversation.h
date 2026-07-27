@@ -56,6 +56,7 @@ void conversation_free_messages(json_message *msgs, int count);
  * If no assistant entry exists, *out_content is set to an empty string.
  * Returns EXIT_SUCCESS or EXIT_FILE_ERR / EXIT_INTERNAL_ERR.
  */
-int conversation_read_last_assistant(const char *path, char **out_content);
+int conversation_read_last_assistant(const char *path, char **out_content, char **out_model,
+                                     usage_info *out_usage);
 
 #endif /* CONVERSATION_H */
