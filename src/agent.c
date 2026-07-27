@@ -4,10 +4,14 @@
 #include "llm.h"
 #include "util.h"
 #include "platform.h"
+#include <cJSON.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+
+/* File-scope stream flag, set by agent_run(). */
+static bool g_stream = false;
 
 /* ------------------------------------------------------------------ */
 /*  Prompt resolution                                                  */
@@ -43,6 +47,123 @@ static const tool_def *find_tool(const tool_def *tools, int tool_count,
         }
     }
     return NULL;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Stdout emit helpers                                                */
+/* ------------------------------------------------------------------ */
+
+/* Write a JSONL event to stdout (stream mode only). */
+static void emit_event(cJSON *event) {
+    if (!g_stream) return;
+    char *json = cJSON_PrintUnformatted(event);
+    if (json) {
+        fputs(json, stdout);
+        fputc('\n', stdout);
+        fflush(stdout);
+        free(json);
+    }
+}
+
+/* Write plain text to stdout (non-stream mode only). */
+static void emit_text(const char *text) {
+    if (g_stream) return;
+    if (text && text[0] != '\0') {
+        fputs(text, stdout);
+        fputc('\n', stdout);
+        fflush(stdout);
+    }
+}
+
+static void emit_turn_start(int turn) {
+    if (!g_stream) return;
+    char ts[64];
+    util_timestamp_now(ts, sizeof(ts));
+    cJSON *event = cJSON_CreateObject();
+    cJSON_AddStringToObject(event, "type", "turn_start");
+    cJSON_AddNumberToObject(event, "turn", turn);
+    cJSON_AddStringToObject(event, "timestamp", ts);
+    emit_event(event);
+    cJSON_Delete(event);
+}
+
+static void emit_assistant_event(const char *content, const char *model, const usage_info *usage) {
+    if (!g_stream) return;
+    char ts[64];
+    util_timestamp_now(ts, sizeof(ts));
+    cJSON *event = cJSON_CreateObject();
+    cJSON_AddStringToObject(event, "type", "assistant");
+    cJSON_AddStringToObject(event, "content", content ? content : "");
+    cJSON_AddStringToObject(event, "model", model ? model : "");
+    cJSON_AddStringToObject(event, "timestamp", ts);
+    if (usage && usage->total_tokens > 0) {
+        cJSON *u = cJSON_CreateObject();
+        cJSON_AddNumberToObject(u, "prompt_tokens", usage->prompt_tokens);
+        cJSON_AddNumberToObject(u, "completion_tokens", usage->completion_tokens);
+        cJSON_AddNumberToObject(u, "total_tokens", usage->total_tokens);
+        cJSON_AddItemToObject(event, "usage", u);
+    }
+    emit_event(event);
+    cJSON_Delete(event);
+}
+
+static void emit_tool_call_event(const char *id, const char *name, const char *arguments,
+                                 const char *mcp_server) {
+    if (!g_stream) return;
+    char ts[64];
+    util_timestamp_now(ts, sizeof(ts));
+    cJSON *event = cJSON_CreateObject();
+    cJSON_AddStringToObject(event, "type", "tool_call");
+    cJSON_AddStringToObject(event, "id", id ? id : "");
+    cJSON_AddStringToObject(event, "name", name ? name : "");
+    cJSON_AddStringToObject(event, "arguments", arguments ? arguments : "");
+    cJSON_AddStringToObject(event, "mcp_server", mcp_server ? mcp_server : "");
+    cJSON_AddStringToObject(event, "timestamp", ts);
+    emit_event(event);
+    cJSON_Delete(event);
+}
+
+static void emit_tool_result_event(const char *call_id, const char *name, const char *result,
+                                   int is_error, int is_timeout, const char *mcp_server) {
+    if (!g_stream) return;
+    char ts[64];
+    util_timestamp_now(ts, sizeof(ts));
+    cJSON *event = cJSON_CreateObject();
+    cJSON_AddStringToObject(event, "type", "tool_result");
+    cJSON_AddStringToObject(event, "call_id", call_id ? call_id : "");
+    cJSON_AddStringToObject(event, "name", name ? name : "");
+    cJSON_AddStringToObject(event, "result", result ? result : "");
+    cJSON_AddBoolToObject(event, "is_error", is_error ? 1 : 0);
+    cJSON_AddBoolToObject(event, "is_timeout", is_timeout ? 1 : 0);
+    cJSON_AddStringToObject(event, "mcp_server", mcp_server ? mcp_server : "");
+    cJSON_AddStringToObject(event, "timestamp", ts);
+    emit_event(event);
+    cJSON_Delete(event);
+}
+
+static void emit_done(int turns) {
+    if (!g_stream) return;
+    char ts[64];
+    util_timestamp_now(ts, sizeof(ts));
+    cJSON *event = cJSON_CreateObject();
+    cJSON_AddStringToObject(event, "type", "done");
+    cJSON_AddNumberToObject(event, "turns", turns);
+    cJSON_AddStringToObject(event, "timestamp", ts);
+    emit_event(event);
+    cJSON_Delete(event);
+}
+
+static void emit_error_event(int code, const char *message) {
+    if (!g_stream) return;
+    char ts[64];
+    util_timestamp_now(ts, sizeof(ts));
+    cJSON *event = cJSON_CreateObject();
+    cJSON_AddStringToObject(event, "type", "error");
+    cJSON_AddNumberToObject(event, "code", code);
+    cJSON_AddStringToObject(event, "message", message ? message : "");
+    cJSON_AddStringToObject(event, "timestamp", ts);
+    emit_event(event);
+    cJSON_Delete(event);
 }
 
 /* ------------------------------------------------------------------ */
@@ -113,6 +234,8 @@ static int conversation_loop(runtime_ctx *ctx, FILE *fp) {
     int max_turns = 50; /* safety limit */
 
     for (int turn = 0; turn < max_turns; turn++) {
+        emit_turn_start(turn + 1);
+
         /* ---- Reconstruct message history ---- */
         json_message *msgs = NULL;
         int msg_count = 0;
@@ -172,11 +295,16 @@ static int conversation_loop(runtime_ctx *ctx, FILE *fp) {
 
         if (rc != EXIT_SUCCESS) {
             log_activity("[error] LLM API call failed");
+            emit_error_event(EXIT_LLM_ERR, "LLM API call failed");
             free(content);
             free(model);
             free(calls);
             return EXIT_LLM_ERR;
         }
+
+        /* ---- Emit assistant output to stdout ---- */
+        emit_text(content);
+        emit_assistant_event(content, model, &usage);
 
         /* ---- Print response stats to stderr ---- */
         if (usage.total_tokens > 0) {
@@ -195,6 +323,7 @@ static int conversation_loop(runtime_ctx *ctx, FILE *fp) {
         /* ---- No tool calls: conversation complete ---- */
         if (call_count == 0) {
             log_activity("[done] Conversation complete");
+            emit_done(turn + 1);
             free(content);
             free(model);
             free(calls);
@@ -215,6 +344,8 @@ static int conversation_loop(runtime_ctx *ctx, FILE *fp) {
                 log_activity("[error] Tool '%s' not found in tool definitions", tc_name);
                 /* Write tool_call + error result and continue. */
                 conversation_write_entry(fp, ENTRY_TOOL_CALL, tc_id, tc_name, tc_args, "");
+                emit_tool_call_event(tc_id, tc_name, tc_args, "");
+                emit_tool_result_event(tc_id, tc_name, "Tool definition not found", 1, 0, "");
                 conversation_write_entry(fp, ENTRY_TOOL_RESULT, tc_id, tc_name,
                                          "Tool definition not found", 1, 0, "");
                 continue;
@@ -222,6 +353,7 @@ static int conversation_loop(runtime_ctx *ctx, FILE *fp) {
 
             /* Write tool_call entry. */
             conversation_write_entry(fp, ENTRY_TOOL_CALL, tc_id, tc_name, tc_args, td->mcp_server);
+            emit_tool_call_event(tc_id, tc_name, tc_args, td->mcp_server);
 
             /* Execute via MCP. */
             char *result = NULL;
@@ -230,6 +362,8 @@ static int conversation_loop(runtime_ctx *ctx, FILE *fp) {
 
             if (mrc == EXIT_MCP_ERR) {
                 /* Timeout with fail behavior - stop the conversation. */
+                emit_tool_result_event(tc_id, tc_name, result ? result : "Tool call failed", 1, 0,
+                                       td->mcp_server);
                 conversation_write_entry(fp, ENTRY_TOOL_RESULT, tc_id, tc_name,
                                          result ? result : "Tool call failed", 1, 0,
                                          td->mcp_server);
@@ -238,12 +372,15 @@ static int conversation_loop(runtime_ctx *ctx, FILE *fp) {
                 free(model);
                 free(calls);
                 log_activity("[error] Tool call failed, stopping conversation");
+                emit_error_event(EXIT_MCP_ERR, "Tool call failed");
                 return EXIT_MCP_ERR;
             }
 
             /* Write tool_result entry. */
             conversation_write_entry(fp, ENTRY_TOOL_RESULT, tc_id, tc_name, result ? result : "",
                                      (int)is_error, 0, td->mcp_server);
+            emit_tool_result_event(tc_id, tc_name, result ? result : "", (int)is_error, 0,
+                                   td->mcp_server);
             free(result);
         }
 
@@ -259,6 +396,7 @@ static int conversation_loop(runtime_ctx *ctx, FILE *fp) {
     }
 
     log_activity("[error] Conversation reached maximum turn limit (%d)", max_turns);
+    emit_error_event(EXIT_INTERNAL_ERR, "Conversation reached maximum turn limit");
     return EXIT_SUCCESS;
 }
 
@@ -266,8 +404,10 @@ static int conversation_loop(runtime_ctx *ctx, FILE *fp) {
 /*  agent_run                                                          */
 /* ------------------------------------------------------------------ */
 
-int agent_run(runtime_ctx *ctx, const char *convo_path, const char *prompt) {
+int agent_run(runtime_ctx *ctx, const char *convo_path, const char *prompt, bool stream) {
     if (ctx == NULL || convo_path == NULL || prompt == NULL) return EXIT_INTERNAL_ERR;
+
+    g_stream = stream;
 
     /* Store convo_path in ctx so conversation_loop can use it for reconstruction. */
     ctx->convo_path = util_strdup(convo_path);

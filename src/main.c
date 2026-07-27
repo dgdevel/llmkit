@@ -9,18 +9,21 @@
 #include "util.h"
 
 static void print_usage(void) {
-    fprintf(stderr,
-            "llmkit v" LLMKIT_VERSION "\n"
-            "\n"
-            "Usage:\n"
-            "  llmkit agent -c <config.yml> -o <conversation.jsonl> -p <prompt|prompt_file>\n"
-            "  llmkit proxy -c <config.yml> [-l <host:port>]\n"
-            "  llmkit response -f <conversation.jsonl>\n"
-            "\n"
-            "Commands:\n"
-            "  agent     Run LLM conversation agent with MCP tool support\n"
-            "  proxy     Run MCP proxy server (stdio or HTTP)\n"
-            "  response  Print the last LLM response from a conversation\n");
+    fprintf(stderr, "llmkit v" LLMKIT_VERSION "\n"
+                    "\n"
+                    "Usage:\n"
+                    "  llmkit agent -c <config.yml> -o <conversation.jsonl> -p "
+                    "<prompt|prompt_file> [--stream]\n"
+                    "  llmkit proxy -c <config.yml> [-l <host:port>]\n"
+                    "  llmkit response -f <conversation.jsonl>\n"
+                    "\n"
+                    "Commands:\n"
+                    "  agent     Run LLM conversation agent with MCP tool support\n"
+                    "  proxy     Run MCP proxy server (stdio or HTTP)\n"
+                    "  response  Print the last LLM response from a conversation\n"
+                    "\n"
+                    "Flags:\n"
+                    "  --stream  Emit JSONL events to stdout (agent only)\n");
 }
 
 /* Read a config value from argv for a given flag.
@@ -62,6 +65,14 @@ int main(int argc, char **argv) {
         const char *config_path = get_flag(argc, argv, "-c");
         const char *output_path = get_flag(argc, argv, "-o");
         const char *prompt_arg = get_flag(argc, argv, "-p");
+        bool stream = false;
+
+        for (int i = 1; i < argc; i++) {
+            if (strcmp(argv[i], "--stream") == 0 || strcmp(argv[i], "-s") == 0) {
+                stream = true;
+                break;
+            }
+        }
 
         if (config_path == NULL || output_path == NULL || prompt_arg == NULL) {
             fprintf(stderr, "error: agent requires -c <config> -o <output> -p <prompt>\n");
@@ -85,7 +96,7 @@ int main(int argc, char **argv) {
             return rc;
         }
 
-        rc = agent_run(&ctx, output_path, prompt_arg);
+        rc = agent_run(&ctx, output_path, prompt_arg, stream);
         config_free(&ctx);
         return rc;
     }

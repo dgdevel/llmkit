@@ -160,5 +160,107 @@ Every entry has a `timestamp` field in ISO 8601 UTC format generated at write ti
 
 ## Reading the file
 
-- Use **`llmkit response -f <file>`** to print the last assistant's text content to stdout (with token stats on stderr).
 - Use **`llmkit agent`** to replay and continue a conversation — it reconstructs the full message history from the JSONL and passes it to the LLM, preserving tool-call groupings.
+
+## Stdout streaming (`--stream` flag)
+
+When `llmkit agent` is invoked with the `--stream` (or `-s`) flag, it emits real-time JSONL events to stdout in addition to writing to the conversation file. Each event is a single JSON line, newline-terminated, flushed immediately. An invoker can read stdout line-by-line as the agent runs.
+
+Without `--stream`, the agent prints only assistant text content to stdout (one block per turn), which is useful for simple consumption.
+
+### Stream event types
+
+#### `turn_start`
+
+Emitted at the beginning of each conversation turn.
+
+| Field       | Type   | Description                        |
+|-------------|--------|------------------------------------|
+| `type`      | string | Always `"turn_start"`              |
+| `turn`      | number | 1-based turn number                |
+| `timestamp` | string | ISO 8601 UTC timestamp             |
+
+```json
+{"type":"turn_start","turn":1,"timestamp":"2026-07-27T14:30:01Z"}
+```
+
+#### `assistant`
+
+Emitted when the LLM responds (mirrors the file entry).
+
+| Field       | Type              | Description                              |
+|-------------|-------------------|------------------------------------------|
+| `type`      | string            | Always `"assistant"`                      |
+| `content`   | string            | Response text (may be empty)             |
+| `model`     | string            | Model identifier                         |
+| `usage`     | object (optional) | Token usage, present when the API provides it |
+| `timestamp` | string            | ISO 8601 UTC timestamp                   |
+
+```json
+{"type":"assistant","content":"Hello!","model":"gpt-4o","usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15},"timestamp":"2026-07-27T14:30:02Z"}
+```
+
+#### `tool_call`
+
+Emitted before executing a tool.
+
+| Field        | Type   | Description                             |
+|--------------|--------|-----------------------------------------|
+| `type`       | string | Always `"tool_call"`                     |
+| `id`         | string | Tool call ID from the LLM               |
+| `name`       | string | Namespaced tool name                    |
+| `arguments`  | string | JSON string of tool arguments           |
+| `mcp_server` | string | MCP server that provides this tool      |
+| `timestamp`  | string | ISO 8601 UTC timestamp                  |
+
+```json
+{"type":"tool_call","id":"call_1","name":"weather.get","arguments":"{\"city\":\"London\"}","mcp_server":"weather-srv","timestamp":"2026-07-27T14:30:03Z"}
+```
+
+#### `tool_result`
+
+Emitted after a tool completes.
+
+| Field        | Type    | Description                              |
+|--------------|---------|------------------------------------------|
+| `type`       | string  | Always `"tool_result"`                    |
+| `call_id`    | string  | Matches the originating `tool_call` id   |
+| `name`       | string  | Tool name                                |
+| `result`     | string  | JSON string of tool output or error text |
+| `is_error`   | boolean | `true` if the tool returned an error     |
+| `is_timeout` | boolean | `true` if the call timed out             |
+| `mcp_server` | string  | MCP server that executed the call        |
+| `timestamp`  | string  | ISO 8601 UTC timestamp                   |
+
+```json
+{"type":"tool_result","call_id":"call_1","name":"weather.get","result":"{\"temp\":15}","is_error":false,"is_timeout":false,"mcp_server":"weather-srv","timestamp":"2026-07-27T14:30:04Z"}
+```
+
+#### `done`
+
+Emitted when the conversation completes successfully.
+
+| Field       | Type   | Description                        |
+|-------------|--------|------------------------------------|
+| `type`      | string | Always `"done"`                    |
+| `turns`     | number | Total number of turns executed     |
+| `timestamp` | string | ISO 8601 UTC timestamp             |
+
+```json
+{"type":"done","turns":2,"timestamp":"2026-07-27T14:30:05Z"}
+```
+
+#### `error`
+
+Emitted on a fatal error that stops the conversation.
+
+| Field       | Type   | Description                        |
+|-------------|--------|------------------------------------|
+| `type`      | string | Always `"error"`                   |
+| `code`      | number | Exit code (see exit code table)    |
+| `message`   | string | Human-readable error description   |
+| `timestamp` | string | ISO 8601 UTC timestamp             |
+
+```json
+{"type":"error","code":4,"message":"LLM API call failed","timestamp":"2026-07-27T14:30:02Z"}
+```

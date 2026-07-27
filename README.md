@@ -18,7 +18,7 @@ and targets Linux, macOS, and Windows (via MinGW-w64 cross-compilation).
 ## Usage
 
 ```
-llmkit agent -c <agent_config.yml> -o <convo.jsonl> -p <prompt|prompt_file>
+llmkit agent -c <agent_config.yml> -o <convo.jsonl> -p <prompt|prompt_file> [--stream]
 llmkit proxy -c <proxy_config.yml> [-l <host:port>]
 llmkit response -f <conversation.jsonl>
 ```
@@ -35,6 +35,17 @@ Returns empty output if no assistant entry exists.
 The `-p` argument is treated as a file path if the file exists; otherwise it
 is used as the literal prompt text. An empty or whitespace-only prompt exits
 with code 2.
+
+### Stdout streaming
+
+The `--stream` (or `-s`) flag enables real-time output on stdout:
+
+- **Without `--stream`** (default): assistant text content is printed to stdout
+  as plain text, one block per turn. Useful for simple piping.
+- **With `--stream`**: structured JSONL events are emitted to stdout in addition
+  to the conversation file. Each line is a JSON event (`turn_start`, `assistant`,
+  `tool_call`, `tool_result`, `done`, `error`). See
+  [docs/conversation-format.md](docs/conversation-format.md) for the full schema.
 
 ## Configuration
 
