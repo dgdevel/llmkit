@@ -57,7 +57,7 @@ Checks: >
 
 # Only lint our own headers; system/third-party headers are skipped.
 # Path is matched against the header location as seen by the compiler.
-HeaderFilterRegex: 'src/.*\.h$'
+HeaderFilterRegex: 'src/(?!vendor/).*\.h$'
 
 CheckOptions:
   # ----- identifier naming (matches existing codebase) -----
