@@ -162,13 +162,20 @@ Every entry has a `timestamp` field in ISO 8601 UTC format generated at write ti
 
 - Use **`llmkit agent`** to replay and continue a conversation — it reconstructs the full message history from the JSONL and passes it to the LLM, preserving tool-call groupings.
 
-## Stdout streaming (`--stream` flag)
+## Stdout output modes (`--output` flag)
 
-When `llmkit agent` is invoked with the `--stream` (or `-s`) flag, it emits real-time JSONL events to stdout in addition to writing to the conversation file. Each event is a single JSON line, newline-terminated, flushed immediately. An invoker can read stdout line-by-line as the agent runs.
+When `llmkit agent` is invoked with `--output stream`, it emits real-time JSONL
+events to stdout in addition to writing to the conversation file. Each event is
+a single JSON line, newline-terminated, flushed immediately. An invoker can read
+stdout line-by-line as the agent runs.
 
-Without `--stream`, the agent prints only assistant text content to stdout (one block per turn), which is useful for simple consumption.
+With `--output debug`, timestamped human-readable lines are printed instead of
+JSONL, allowing easy monitoring during development.
 
-### Stream event types
+With `--output quiet` (the default), only the final assistant response text (or
+errors) is printed to stdout — nothing else.
+
+### Stream event types (JSONL — `--output stream`)
 
 #### `turn_start`
 

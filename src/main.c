@@ -13,7 +13,7 @@ static void print_usage(void) {
                     "\n"
                     "Usage:\n"
                     "  llmkit agent -c <config.yml> -o <conversation.jsonl> -p "
-                    "<prompt|prompt_file> [--stream]\n"
+                    "<prompt|prompt_file> [--output <type>]\n"
                     "  llmkit proxy -c <config.yml> [-l <host:port>]\n"
                     "  llmkit response -f <conversation.jsonl>\n"
                     "\n"
@@ -23,7 +23,10 @@ static void print_usage(void) {
                     "  response  Print the last LLM response from a conversation\n"
                     "\n"
                     "Flags:\n"
-                    "  --stream  Emit JSONL events to stdout (agent only)\n");
+                    "  --output <type>  Stdout output mode (agent only)\n"
+                    "                   quiet  (default) print only the final response\n"
+                    "                   debug  timestamped event lines\n"
+                    "                   stream JSONL event stream\n");
 }
 
 /* Read a config value from argv for a given flag.
@@ -65,12 +68,18 @@ int main(int argc, char **argv) {
         const char *config_path = get_flag(argc, argv, "-c");
         const char *output_path = get_flag(argc, argv, "-o");
         const char *prompt_arg = get_flag(argc, argv, "-p");
-        bool stream = false;
+        const char *output_mode = get_flag(argc, argv, "--output");
 
-        for (int i = 1; i < argc; i++) {
-            if (strcmp(argv[i], "--stream") == 0 || strcmp(argv[i], "-s") == 0) {
-                stream = true;
-                break;
+        /* Default output mode. */
+        if (output_mode == NULL) {
+            output_mode = OUTPUT_MODE_QUIET;
+        } else {
+            if (strcmp(output_mode, OUTPUT_MODE_QUIET) != 0 &&
+                strcmp(output_mode, OUTPUT_MODE_DEBUG) != 0 &&
+                strcmp(output_mode, OUTPUT_MODE_STREAM) != 0) {
+                fprintf(stderr, "error: invalid --output mode '%s' (valid: quiet, debug, stream)\n",
+                        output_mode);
+                return EXIT_ARGS_ERR;
             }
         }
 
@@ -96,7 +105,7 @@ int main(int argc, char **argv) {
             return rc;
         }
 
-        rc = agent_run(&ctx, output_path, prompt_arg, stream);
+        rc = agent_run(&ctx, output_path, prompt_arg, output_mode);
         config_free(&ctx);
         return rc;
     }

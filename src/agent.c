@@ -9,9 +9,25 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <stdarg.h>
 
-/* File-scope stream flag, set by agent_run(). */
-static bool g_stream = false;
+/* File-scope output mode. Maps to OUTPUT_MODE_QUIET/DEBUG/STREAM strings. */
+static const char *g_output_mode = OUTPUT_MODE_QUIET;
+
+/* For OUTPUT_QUIET: stores the last assistant content to print at end. */
+static char *g_last_content = NULL;
+
+/* Output-mode constants for internal dispatch. */
+#define OM_QUIET  0
+#define OM_DEBUG  1
+#define OM_STREAM 2
+
+static int resolve_output_mode(const char *mode) {
+    if (mode == NULL) return OM_QUIET;
+    if (strcmp(mode, OUTPUT_MODE_DEBUG) == 0) return OM_DEBUG;
+    if (strcmp(mode, OUTPUT_MODE_STREAM) == 0) return OM_STREAM;
+    return OM_QUIET;
+}
 
 /* ------------------------------------------------------------------ */
 /*  Prompt resolution                                                  */
@@ -53,9 +69,12 @@ static const tool_def *find_tool(const tool_def *tools, int tool_count,
 /*  Stdout emit helpers                                                */
 /* ------------------------------------------------------------------ */
 
+/* Resolve the mode integer once at startup. */
+static int g_om = OM_QUIET;
+
 /* Write a JSONL event to stdout (stream mode only). */
 static void emit_event(cJSON *event) {
-    if (!g_stream) return;
+    if (g_om != OM_STREAM) return;
     char *json = cJSON_PrintUnformatted(event);
     if (json) {
         fputs(json, stdout);
@@ -65,105 +84,174 @@ static void emit_event(cJSON *event) {
     }
 }
 
-/* Write plain text to stdout (non-stream mode only). */
-static void emit_text(const char *text) {
-    if (g_stream) return;
-    if (text && text[0] != '\0') {
-        fputs(text, stdout);
-        fputc('\n', stdout);
-        fflush(stdout);
+/* Write a timestamped human-readable line to stdout (debug mode only). */
+static void emit_debug(const char *format, ...) {
+    if (g_om != OM_DEBUG) return;
+    char ts[64];
+    util_timestamp_now(ts, sizeof(ts));
+    fprintf(stdout, "[%s] ", ts);
+    va_list args;
+    va_start(args, format);
+    vfprintf(stdout, format, args);
+    va_end(args);
+    fputc('\n', stdout);
+    fflush(stdout);
+}
+
+/* Store assistant content for quiet mode, print it in debug/stream modes. */
+static void emit_assistant_content(const char *content) {
+    /* Quiet: store for final print. */
+    if (g_om == OM_QUIET) {
+        free(g_last_content);
+        g_last_content = content ? util_strdup(content) : NULL;
+        return;
     }
+    /* Debug: print as human-readable line. */
+    if (g_om == OM_DEBUG) {
+        emit_debug("assistant: %s", content ? content : "");
+        return;
+    }
+    /* Stream: handled via emit_assistant_event below -- no plain-text. */
 }
 
 static void emit_turn_start(int turn) {
-    if (!g_stream) return;
-    char ts[64];
-    util_timestamp_now(ts, sizeof(ts));
-    cJSON *event = cJSON_CreateObject();
-    cJSON_AddStringToObject(event, "type", "turn_start");
-    cJSON_AddNumberToObject(event, "turn", turn);
-    cJSON_AddStringToObject(event, "timestamp", ts);
-    emit_event(event);
-    cJSON_Delete(event);
+    int om = g_om;
+    if (om == OM_STREAM) {
+        char ts[64];
+        util_timestamp_now(ts, sizeof(ts));
+        cJSON *event = cJSON_CreateObject();
+        cJSON_AddStringToObject(event, "type", "turn_start");
+        cJSON_AddNumberToObject(event, "turn", turn);
+        cJSON_AddStringToObject(event, "timestamp", ts);
+        emit_event(event);
+        cJSON_Delete(event);
+    } else if (om == OM_DEBUG) {
+        emit_debug("turn_start turn=%d", turn);
+    }
+    /* quiet: nothing */
 }
 
 static void emit_assistant_event(const char *content, const char *model, const usage_info *usage) {
-    if (!g_stream) return;
-    char ts[64];
-    util_timestamp_now(ts, sizeof(ts));
-    cJSON *event = cJSON_CreateObject();
-    cJSON_AddStringToObject(event, "type", "assistant");
-    cJSON_AddStringToObject(event, "content", content ? content : "");
-    cJSON_AddStringToObject(event, "model", model ? model : "");
-    cJSON_AddStringToObject(event, "timestamp", ts);
-    if (usage && usage->total_tokens > 0) {
-        cJSON *u = cJSON_CreateObject();
-        cJSON_AddNumberToObject(u, "prompt_tokens", usage->prompt_tokens);
-        cJSON_AddNumberToObject(u, "completion_tokens", usage->completion_tokens);
-        cJSON_AddNumberToObject(u, "total_tokens", usage->total_tokens);
-        cJSON_AddItemToObject(event, "usage", u);
+    int om = g_om;
+    if (om == OM_STREAM) {
+        char ts[64];
+        util_timestamp_now(ts, sizeof(ts));
+        cJSON *event = cJSON_CreateObject();
+        cJSON_AddStringToObject(event, "type", "assistant");
+        cJSON_AddStringToObject(event, "content", content ? content : "");
+        cJSON_AddStringToObject(event, "model", model ? model : "");
+        cJSON_AddStringToObject(event, "timestamp", ts);
+        if (usage && usage->total_tokens > 0) {
+            cJSON *u = cJSON_CreateObject();
+            cJSON_AddNumberToObject(u, "prompt_tokens", usage->prompt_tokens);
+            cJSON_AddNumberToObject(u, "completion_tokens", usage->completion_tokens);
+            cJSON_AddNumberToObject(u, "total_tokens", usage->total_tokens);
+            cJSON_AddItemToObject(event, "usage", u);
+        }
+        emit_event(event);
+        cJSON_Delete(event);
+    } else if (om == OM_DEBUG) {
+        emit_debug("assistant: %s", content ? content : "");
     }
-    emit_event(event);
-    cJSON_Delete(event);
+    /* quiet: assistant_content is stored via emit_assistant_content */
 }
 
 static void emit_tool_call_event(const char *id, const char *name, const char *arguments,
                                  const char *mcp_server) {
-    if (!g_stream) return;
-    char ts[64];
-    util_timestamp_now(ts, sizeof(ts));
-    cJSON *event = cJSON_CreateObject();
-    cJSON_AddStringToObject(event, "type", "tool_call");
-    cJSON_AddStringToObject(event, "id", id ? id : "");
-    cJSON_AddStringToObject(event, "name", name ? name : "");
-    cJSON_AddStringToObject(event, "arguments", arguments ? arguments : "");
-    cJSON_AddStringToObject(event, "mcp_server", mcp_server ? mcp_server : "");
-    cJSON_AddStringToObject(event, "timestamp", ts);
-    emit_event(event);
-    cJSON_Delete(event);
+    int om = g_om;
+    if (om == OM_STREAM) {
+        char ts[64];
+        util_timestamp_now(ts, sizeof(ts));
+        cJSON *event = cJSON_CreateObject();
+        cJSON_AddStringToObject(event, "type", "tool_call");
+        cJSON_AddStringToObject(event, "id", id ? id : "");
+        cJSON_AddStringToObject(event, "name", name ? name : "");
+        cJSON_AddStringToObject(event, "arguments", arguments ? arguments : "");
+        cJSON_AddStringToObject(event, "mcp_server", mcp_server ? mcp_server : "");
+        cJSON_AddStringToObject(event, "timestamp", ts);
+        emit_event(event);
+        cJSON_Delete(event);
+    } else if (om == OM_DEBUG) {
+        emit_debug("tool_call: %s(%s)", name ? name : "", arguments ? arguments : "");
+    }
+    /* quiet: nothing */
 }
 
 static void emit_tool_result_event(const char *call_id, const char *name, const char *result,
                                    int is_error, int is_timeout, const char *mcp_server) {
-    if (!g_stream) return;
-    char ts[64];
-    util_timestamp_now(ts, sizeof(ts));
-    cJSON *event = cJSON_CreateObject();
-    cJSON_AddStringToObject(event, "type", "tool_result");
-    cJSON_AddStringToObject(event, "call_id", call_id ? call_id : "");
-    cJSON_AddStringToObject(event, "name", name ? name : "");
-    cJSON_AddStringToObject(event, "result", result ? result : "");
-    cJSON_AddBoolToObject(event, "is_error", is_error ? 1 : 0);
-    cJSON_AddBoolToObject(event, "is_timeout", is_timeout ? 1 : 0);
-    cJSON_AddStringToObject(event, "mcp_server", mcp_server ? mcp_server : "");
-    cJSON_AddStringToObject(event, "timestamp", ts);
-    emit_event(event);
-    cJSON_Delete(event);
+    int om = g_om;
+    if (om == OM_STREAM) {
+        char ts[64];
+        util_timestamp_now(ts, sizeof(ts));
+        cJSON *event = cJSON_CreateObject();
+        cJSON_AddStringToObject(event, "type", "tool_result");
+        cJSON_AddStringToObject(event, "call_id", call_id ? call_id : "");
+        cJSON_AddStringToObject(event, "name", name ? name : "");
+        cJSON_AddStringToObject(event, "result", result ? result : "");
+        cJSON_AddBoolToObject(event, "is_error", is_error ? 1 : 0);
+        cJSON_AddBoolToObject(event, "is_timeout", is_timeout ? 1 : 0);
+        cJSON_AddStringToObject(event, "mcp_server", mcp_server ? mcp_server : "");
+        cJSON_AddStringToObject(event, "timestamp", ts);
+        emit_event(event);
+        cJSON_Delete(event);
+    } else if (om == OM_DEBUG) {
+        const char *status;
+        if (is_error) {
+            status = is_timeout ? "TIMEOUT" : "ERROR";
+        } else {
+            status = "ok";
+        }
+        emit_debug("tool_result: %s -> %s", name ? name : "", status);
+    }
+    /* quiet: nothing */
 }
 
 static void emit_done(int turns) {
-    if (!g_stream) return;
-    char ts[64];
-    util_timestamp_now(ts, sizeof(ts));
-    cJSON *event = cJSON_CreateObject();
-    cJSON_AddStringToObject(event, "type", "done");
-    cJSON_AddNumberToObject(event, "turns", turns);
-    cJSON_AddStringToObject(event, "timestamp", ts);
-    emit_event(event);
-    cJSON_Delete(event);
+    int om = g_om;
+    if (om == OM_STREAM) {
+        char ts[64];
+        util_timestamp_now(ts, sizeof(ts));
+        cJSON *event = cJSON_CreateObject();
+        cJSON_AddStringToObject(event, "type", "done");
+        cJSON_AddNumberToObject(event, "turns", turns);
+        cJSON_AddStringToObject(event, "timestamp", ts);
+        emit_event(event);
+        cJSON_Delete(event);
+    } else if (om == OM_DEBUG) {
+        emit_debug("done turns=%d", turns);
+    }
+    /* quiet: nothing */
 }
 
 static void emit_error_event(int code, const char *message) {
-    if (!g_stream) return;
-    char ts[64];
-    util_timestamp_now(ts, sizeof(ts));
-    cJSON *event = cJSON_CreateObject();
-    cJSON_AddStringToObject(event, "type", "error");
-    cJSON_AddNumberToObject(event, "code", code);
-    cJSON_AddStringToObject(event, "message", message ? message : "");
-    cJSON_AddStringToObject(event, "timestamp", ts);
-    emit_event(event);
-    cJSON_Delete(event);
+    int om = g_om;
+    if (om == OM_STREAM) {
+        char ts[64];
+        util_timestamp_now(ts, sizeof(ts));
+        cJSON *event = cJSON_CreateObject();
+        cJSON_AddStringToObject(event, "type", "error");
+        cJSON_AddNumberToObject(event, "code", code);
+        cJSON_AddStringToObject(event, "message", message ? message : "");
+        cJSON_AddStringToObject(event, "timestamp", ts);
+        emit_event(event);
+        cJSON_Delete(event);
+    } else if (om == OM_DEBUG) {
+        emit_debug("error code=%d %s", code, message ? message : "");
+    } else if (om == OM_QUIET) {
+        /* Quiet mode: print error to stdout so the caller sees it. */
+        fprintf(stdout, "error: %s\n", message ? message : "");
+        fflush(stdout);
+    }
+}
+
+/* Print the final assistant content (quiet mode only). */
+static void emit_quiet_final(void) {
+    if (g_om != OM_QUIET) return;
+    if (g_last_content && g_last_content[0] != '\0') {
+        fputs(g_last_content, stdout);
+        fputc('\n', stdout);
+        fflush(stdout);
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -303,7 +391,7 @@ static int conversation_loop(runtime_ctx *ctx, FILE *fp) {
         }
 
         /* ---- Emit assistant output to stdout ---- */
-        emit_text(content);
+        emit_assistant_content(content);
         emit_assistant_event(content, model, &usage);
 
         /* ---- Print response stats to stderr ---- */
@@ -404,10 +492,18 @@ static int conversation_loop(runtime_ctx *ctx, FILE *fp) {
 /*  agent_run                                                          */
 /* ------------------------------------------------------------------ */
 
-int agent_run(runtime_ctx *ctx, const char *convo_path, const char *prompt, bool stream) {
+int agent_run(runtime_ctx *ctx, const char *convo_path, const char *prompt,
+              const char *output_mode) {
     if (ctx == NULL || convo_path == NULL || prompt == NULL) return EXIT_INTERNAL_ERR;
 
-    g_stream = stream;
+    g_output_mode = output_mode ? output_mode : OUTPUT_MODE_QUIET;
+    g_om = resolve_output_mode(g_output_mode);
+    g_last_content = NULL;
+
+    /* Debug mode: emit a begin event. */
+    if (g_om == OM_DEBUG) {
+        emit_debug("begin output_mode=%s", g_output_mode);
+    }
 
     /* Store convo_path in ctx so conversation_loop can use it for reconstruction. */
     ctx->convo_path = util_strdup(convo_path);
@@ -424,7 +520,13 @@ int agent_run(runtime_ctx *ctx, const char *convo_path, const char *prompt, bool
     /* ---- Conversation loop ---- */
     rc = conversation_loop(ctx, fp);
 
+    /* Quiet mode: print the final assistant content. */
+    emit_quiet_final();
+
     /* ---- Cleanup ---- */
+    free(g_last_content);
+    g_last_content = NULL;
+
     mcp_disconnect_all(ctx);
     if (fp) fclose(fp);
 

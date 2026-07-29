@@ -42,7 +42,7 @@ and targets Linux, macOS, and Windows (via MinGW-w64 cross-compilation).
 ## Usage
 
 ```
-llmkit agent -c <agent_config.yml> -o <convo.jsonl> -p <prompt|prompt_file> [--stream]
+llmkit agent -c <agent_config.yml> -o <convo.jsonl> -p <prompt|prompt_file> [--output <type>]
 llmkit proxy -c <proxy_config.yml> [-l <host:port>]
 llmkit response -f <conversation.jsonl>
 ```
@@ -60,16 +60,18 @@ The `-p` argument is treated as a file path if the file exists; otherwise it
 is used as the literal prompt text. An empty or whitespace-only prompt exits
 with code 2.
 
-### Stdout streaming
+### Stdout output modes
 
-The `--stream` (or `-s`) flag enables real-time output on stdout:
+The `--output <type>` flag controls stdout output:
 
-- **Without `--stream`** (default): assistant text content is printed to stdout
-  as plain text, one block per turn. Useful for simple piping.
-- **With `--stream`**: structured JSONL events are emitted to stdout in addition
-  to the conversation file. Each line is a JSON event (`turn_start`, `assistant`,
-  `tool_call`, `tool_result`, `done`, `error`). See
-  [docs/conversation-format.md](docs/conversation-format.md) for the full schema.
+- **`quiet`** (default): only the final assistant response text is printed to
+  stdout (plus errors). Nothing else. Ideal for scripting.
+- **`debug`**: timestamped, human-readable lines for each event (`begin`,
+  `turn_start`, `assistant`, `tool_call`, `tool_result`, `done`, `error`).
+- **`stream`**: structured JSONL events emitted to stdout. Each line is a
+  JSON event (`turn_start`, `assistant`, `tool_call`, `tool_result`, `done`,
+  `error`). See [docs/conversation-format.md](docs/conversation-format.md)
+  for the full schema.
 
 ## Configuration
 
