@@ -11,21 +11,21 @@
 #include <ctype.h>
 #include <stdarg.h>
 
-/* File-scope output mode. Maps to OUTPUT_MODE_QUIET/DEBUG/STREAM strings. */
-static const char *g_output_mode = OUTPUT_MODE_QUIET;
+/* File-scope run mode. Maps to RUN_MODE_QUIET/DEBUG/STREAM strings. */
+static const char *g_run_mode = RUN_MODE_QUIET;
 
-/* For OUTPUT_QUIET: stores the last assistant content to print at end. */
+/* For OM_QUIET: stores the last assistant content to print at end. */
 static char *g_last_content = NULL;
 
-/* Output-mode constants for internal dispatch. */
+/* Run-mode constants for internal dispatch. */
 #define OM_QUIET  0
 #define OM_DEBUG  1
 #define OM_STREAM 2
 
-static int resolve_output_mode(const char *mode) {
+static int resolve_run_mode(const char *mode) {
     if (mode == NULL) return OM_QUIET;
-    if (strcmp(mode, OUTPUT_MODE_DEBUG) == 0) return OM_DEBUG;
-    if (strcmp(mode, OUTPUT_MODE_STREAM) == 0) return OM_STREAM;
+    if (strcmp(mode, RUN_MODE_DEBUG) == 0) return OM_DEBUG;
+    if (strcmp(mode, RUN_MODE_STREAM) == 0) return OM_STREAM;
     return OM_QUIET;
 }
 
@@ -394,14 +394,16 @@ static int conversation_loop(runtime_ctx *ctx, FILE *fp) {
         emit_assistant_content(content);
         emit_assistant_event(content, model, &usage);
 
-        /* ---- Print response stats to stderr ---- */
-        if (usage.total_tokens > 0) {
-            fprintf(stderr, "[stats] %s | %d tokens (prompt=%d + completion=%d) in %.2fs\n",
-                    model ? model : "?", usage.total_tokens, usage.prompt_tokens,
-                    usage.completion_tokens, (double)elapsed_ms / 1000.0);
-        } else {
-            fprintf(stderr, "[stats] %s | tokens N/A in %.2fs\n", model ? model : "?",
-                    (double)elapsed_ms / 1000.0);
+        /* ---- Print response stats to stderr (not in quiet mode) ---- */
+        if (g_om != OM_QUIET) {
+            if (usage.total_tokens > 0) {
+                fprintf(stderr, "[stats] %s | %d tokens (prompt=%d + completion=%d) in %.2fs\n",
+                        model ? model : "?", usage.total_tokens, usage.prompt_tokens,
+                        usage.completion_tokens, (double)elapsed_ms / 1000.0);
+            } else {
+                fprintf(stderr, "[stats] %s | tokens N/A in %.2fs\n", model ? model : "?",
+                        (double)elapsed_ms / 1000.0);
+            }
         }
 
         /* ---- Write assistant entry ---- */
@@ -492,17 +494,21 @@ static int conversation_loop(runtime_ctx *ctx, FILE *fp) {
 /*  agent_run                                                          */
 /* ------------------------------------------------------------------ */
 
-int agent_run(runtime_ctx *ctx, const char *convo_path, const char *prompt,
-              const char *output_mode) {
+int agent_run(runtime_ctx *ctx, const char *convo_path, const char *prompt, const char *run_mode) {
     if (ctx == NULL || convo_path == NULL || prompt == NULL) return EXIT_INTERNAL_ERR;
 
-    g_output_mode = output_mode ? output_mode : OUTPUT_MODE_QUIET;
-    g_om = resolve_output_mode(g_output_mode);
+    g_run_mode = run_mode ? run_mode : RUN_MODE_QUIET;
+    g_om = resolve_run_mode(g_run_mode);
     g_last_content = NULL;
+
+    /* Quiet mode: silence all progress diagnostics so the agent prints only
+     * the final answer. Debug/stream modes route their own structured output
+     * to stdout, so keep the stderr chatter there too for interactive use. */
+    log_activity_set_enabled(g_om != OM_QUIET);
 
     /* Debug mode: emit a begin event. */
     if (g_om == OM_DEBUG) {
-        emit_debug("begin output_mode=%s", g_output_mode);
+        emit_debug("begin run_mode=%s", g_run_mode);
     }
 
     /* Store convo_path in ctx so conversation_loop can use it for reconstruction. */

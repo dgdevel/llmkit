@@ -196,24 +196,24 @@ test_util: tests/test_util.c src/util.c src/utf8.c src/platform.c
 	$(CC) $(CFLAGS) -Isrc -o tests/test_util tests/test_util.c src/util.c src/utf8.c src/platform.c $(LIBS)
 	./tests/test_util
 
-test_jsonrpc: tests/test_jsonrpc.c src/jsonrpc.c src/util.c src/utf8.c src/platform.c
-	$(CC) $(CFLAGS) -Isrc -o tests/test_jsonrpc tests/test_jsonrpc.c src/jsonrpc.c src/util.c src/utf8.c src/platform.c $(LIBS)
+test_jsonrpc: tests/test_jsonrpc.c src/jsonrpc.c src/util.c src/utf8.c src/platform.c $(CJSON_SRC)
+	$(CC) $(CFLAGS) -Isrc -o tests/test_jsonrpc tests/test_jsonrpc.c src/jsonrpc.c src/util.c src/utf8.c src/platform.c $(CJSON_SRC) $(LIBS)
 	./tests/test_jsonrpc
 
 test_transport: tests/test_transport.c src/mcp_transport.c src/util.c src/utf8.c src/platform.c
 	$(CC) $(CFLAGS) -Isrc -o tests/test_transport tests/test_transport.c src/mcp_transport.c src/util.c src/utf8.c src/platform.c $(LIBS)
 	./tests/test_transport
 
-test_mcp: tests/test_mcp.c src/mcp.c src/mcp_transport.c src/util.c src/utf8.c src/platform.c src/jsonrpc.c
-	$(CC) $(CFLAGS) -Isrc -o tests/test_mcp tests/test_mcp.c src/mcp.c src/mcp_transport.c src/util.c src/utf8.c src/platform.c src/jsonrpc.c $(LIBS)
+test_mcp: tests/test_mcp.c src/mcp.c src/mcp_transport.c src/util.c src/utf8.c src/platform.c src/jsonrpc.c $(CJSON_SRC)
+	$(CC) $(CFLAGS) -Isrc -o tests/test_mcp tests/test_mcp.c src/mcp.c src/mcp_transport.c src/util.c src/utf8.c src/platform.c src/jsonrpc.c $(CJSON_SRC) $(LIBS)
 	./tests/test_mcp
 
-test_conversation: tests/test_conversation.c src/conversation.c src/util.c src/utf8.c src/platform.c
-	$(CC) $(CFLAGS) -Isrc -o tests/test_conversation tests/test_conversation.c src/conversation.c src/util.c src/utf8.c src/platform.c $(LIBS)
+test_conversation: tests/test_conversation.c src/conversation.c src/util.c src/utf8.c src/platform.c $(CJSON_SRC)
+	$(CC) $(CFLAGS) -Isrc -o tests/test_conversation tests/test_conversation.c src/conversation.c src/util.c src/utf8.c src/platform.c $(CJSON_SRC) $(LIBS)
 	./tests/test_conversation
 
-test_llm: tests/test_llm.c src/llm.c src/util.c src/utf8.c src/platform.c
-	$(CC) $(CFLAGS) -Isrc -o tests/test_llm tests/test_llm.c src/llm.c src/util.c src/utf8.c src/platform.c $(LIBS)
+test_llm: tests/test_llm.c src/llm.c src/util.c src/utf8.c src/platform.c $(CJSON_SRC)
+	$(CC) $(CFLAGS) -Isrc -o tests/test_llm tests/test_llm.c src/llm.c src/util.c src/utf8.c src/platform.c $(CJSON_SRC) $(LIBS)
 	./tests/test_llm
 
 # --- Integration tests (Phase 12) --------------------------------------

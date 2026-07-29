@@ -12,10 +12,10 @@ static void print_usage(void) {
     fprintf(stderr, "llmkit v" LLMKIT_VERSION "\n"
                     "\n"
                     "Usage:\n"
-                    "  llmkit agent -c <config.yml> -o <conversation.jsonl> -p "
-                    "<prompt|prompt_file> [--output <type>]\n"
+                    "  llmkit agent -c <config.yml> --conversation <convo.jsonl> "
+                    "-p <prompt|prompt_file> [--mode <type>]\n"
                     "  llmkit proxy -c <config.yml> [-l <host:port>]\n"
-                    "  llmkit response -f <conversation.jsonl>\n"
+                    "  llmkit response --conversation <conversation.jsonl>\n"
                     "\n"
                     "Commands:\n"
                     "  agent     Run LLM conversation agent with MCP tool support\n"
@@ -23,17 +23,27 @@ static void print_usage(void) {
                     "  response  Print the last LLM response from a conversation\n"
                     "\n"
                     "Flags:\n"
-                    "  --output <type>  Stdout output mode (agent only)\n"
-                    "                   quiet  (default) print only the final response\n"
-                    "                   debug  timestamped event lines\n"
-                    "                   stream JSONL event stream\n");
+                    "  -c, --config <file>        YAML configuration file (agent, proxy)\n"
+                    "  --conversation <file>      Conversation JSONL file. The agent\n"
+                    "                             appends to it and continues prior turns;\n"
+                    "                             response reads it\n"
+                    "  -p, --prompt <text|file>   Prompt text, or path to a file with it\n"
+                    "                             (agent)\n"
+                    "  --mode <type>              Stdout output mode (agent only)\n"
+                    "                             quiet  (default) print only the final response\n"
+                    "                             debug  timestamped event lines\n"
+                    "                             stream JSONL event stream\n"
+                    "  -l, --listen <host:port>   Listen address; omit for stdio mode (proxy)\n"
+                    "  -h, --help                 Print this help and exit\n"
+                    "  -V, --version              Print version and exit\n");
 }
 
-/* Read a config value from argv for a given flag.
- * Returns the value pointer or NULL if not found. */
-static const char *get_flag(int argc, char **argv, const char *flag) {
+/* Read a value from argv for a given flag, accepting both a short and a long
+ * form (either may be NULL). Returns the value pointer or NULL if not found. */
+static const char *get_flag(int argc, char **argv, const char *short_flag, const char *long_flag) {
     for (int i = 1; i < argc - 1; i++) {
-        if (strcmp(argv[i], flag) == 0) {
+        if ((short_flag != NULL && strcmp(argv[i], short_flag) == 0) ||
+            (long_flag != NULL && strcmp(argv[i], long_flag) == 0)) {
             return argv[i + 1];
         }
     }
@@ -63,28 +73,34 @@ int main(int argc, char **argv) {
         return EXIT_SUCCESS;
     }
 
+    if (strcmp(argv[1], "--version") == 0 || strcmp(argv[1], "-V") == 0) {
+        printf("llmkit v" LLMKIT_VERSION "\n");
+        return EXIT_SUCCESS;
+    }
+
     /* ---- agent ---- */
     if (strcmp(argv[1], "agent") == 0) {
-        const char *config_path = get_flag(argc, argv, "-c");
-        const char *output_path = get_flag(argc, argv, "-o");
-        const char *prompt_arg = get_flag(argc, argv, "-p");
-        const char *output_mode = get_flag(argc, argv, "--output");
+        const char *config_path = get_flag(argc, argv, "-c", "--config");
+        const char *convo_path = get_flag(argc, argv, NULL, "--conversation");
+        const char *prompt_arg = get_flag(argc, argv, "-p", "--prompt");
+        const char *output_mode = get_flag(argc, argv, NULL, "--mode");
 
         /* Default output mode. */
         if (output_mode == NULL) {
-            output_mode = OUTPUT_MODE_QUIET;
+            output_mode = RUN_MODE_QUIET;
         } else {
-            if (strcmp(output_mode, OUTPUT_MODE_QUIET) != 0 &&
-                strcmp(output_mode, OUTPUT_MODE_DEBUG) != 0 &&
-                strcmp(output_mode, OUTPUT_MODE_STREAM) != 0) {
-                fprintf(stderr, "error: invalid --output mode '%s' (valid: quiet, debug, stream)\n",
+            if (strcmp(output_mode, RUN_MODE_QUIET) != 0 &&
+                strcmp(output_mode, RUN_MODE_DEBUG) != 0 &&
+                strcmp(output_mode, RUN_MODE_STREAM) != 0) {
+                fprintf(stderr, "error: invalid --mode '%s' (valid: quiet, debug, stream)\n",
                         output_mode);
                 return EXIT_ARGS_ERR;
             }
         }
 
-        if (config_path == NULL || output_path == NULL || prompt_arg == NULL) {
-            fprintf(stderr, "error: agent requires -c <config> -o <output> -p <prompt>\n");
+        if (config_path == NULL || convo_path == NULL || prompt_arg == NULL) {
+            fprintf(stderr, "error: agent requires -c <config> --conversation <file> -p "
+                            "<prompt>\n");
             return EXIT_ARGS_ERR;
         }
 
@@ -105,15 +121,15 @@ int main(int argc, char **argv) {
             return rc;
         }
 
-        rc = agent_run(&ctx, output_path, prompt_arg, output_mode);
+        rc = agent_run(&ctx, convo_path, prompt_arg, output_mode);
         config_free(&ctx);
         return rc;
     }
 
     /* ---- proxy ---- */
     if (strcmp(argv[1], "proxy") == 0) {
-        const char *config_path = get_flag(argc, argv, "-c");
-        const char *listen_addr = get_flag(argc, argv, "-l");
+        const char *config_path = get_flag(argc, argv, "-c", "--config");
+        const char *listen_addr = get_flag(argc, argv, "-l", "--listen");
 
         if (config_path == NULL) {
             fprintf(stderr, "error: proxy requires -c <config>\n");
@@ -136,10 +152,10 @@ int main(int argc, char **argv) {
 
     /* ---- response ---- */
     if (strcmp(argv[1], "response") == 0) {
-        const char *file_path = get_flag(argc, argv, "-f");
+        const char *file_path = get_flag(argc, argv, NULL, "--conversation");
 
         if (file_path == NULL) {
-            fprintf(stderr, "error: response requires -f <conversation.jsonl>\n");
+            fprintf(stderr, "error: response requires --conversation <conversation.jsonl>\n");
             return EXIT_ARGS_ERR;
         }
 

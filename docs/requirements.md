@@ -13,28 +13,29 @@
 
 ### Usage
 ```
-llmkit agent -c <agent_config.yml> -o <convo.jsonl> -p <prompt|prompt_file>
+llmkit agent -c <agent_config.yml> --conversation <convo.jsonl> -p <prompt|prompt_file> [--mode <type>]
 
-llmkit proxy -c <proxy_config.yml> -l <host:port>
+llmkit proxy -c <proxy_config.yml> [-l <host:port>]
 
-llmkit response -f <conversation.jsonl>
+llmkit response --conversation <conversation.jsonl>
 
 ```
 
 ### `agent` Arguments
 
-| Flag | Short | Long | Required | Description |
-|------|-------|------|----------|-------------|
-| `-c` | `--config` | Yes | Path to YAML configuration file |
-| `-o` | `--output` | Yes | Path to conversation JSONL file (created if not exists) |
-| `-p` | `--prompt` | Yes | User prompt text OR path to file containing prompt |
+| Flag | Required | Description |
+|------|----------|-------------|
+| `-c`, `--config` | Yes | Path to YAML configuration file |
+| `--conversation` | Yes | Path to conversation JSONL file. The agent appends to it and continues prior turns |
+| `-p`, `--prompt` | Yes | User prompt text OR path to file containing prompt |
+| `--mode` | No | Stdout output mode: `quiet` (default), `debug`, or `stream` |
 
 ### `proxy` Arguments
 
-| Flag | Short | Long | Required | Description |
-|------|-------|------|----------|-------------|
-| `-c` | `--config` | Yes | Path to YAML configuration file |
-| `-l` | `--listen` | No | Hostname and port to expose as HTTP MCP server. If omitted, proxy runs as stdio MCP server (reads from stdin, writes to stdout) |
+| Flag | Required | Description |
+|------|----------|-------------|
+| `-c`, `--config` | Yes | Path to YAML configuration file |
+| `-l`, `--listen` | No | Hostname and port to expose as HTTP MCP server. If omitted, proxy runs as stdio MCP server (reads from stdin, writes to stdout) |
 
 ### `proxy` Exit Codes
 
@@ -51,9 +52,9 @@ llmkit response -f <conversation.jsonl>
 
 ### `response` Arguments
 
-| Flag | Short | Long | Required | Description |
-|------|-------|------|----------|-------------|
-| `-f` | `--file` | Yes | Path to conversation JSONL file |
+| Flag | Required | Description |
+|------|----------|-------------|
+| `--conversation` | Yes | Path to conversation JSONL file |
 
 Reads a conversation JSONL file and prints the `content` field of the **last** `"type":"assistant"` entry to stdout. Returns empty string if no assistant entry exists.
 
@@ -404,6 +405,8 @@ The program writes progress/status lines to stderr so stdout/pipes remain clean:
 - `[done] Conversation complete`
 
 All stderr output is plain ASCII, one line per event, newline-terminated. stderr is not used for structured data — only the JSONL file and exit codes carry program results. Activity lines may be suppressed when stderr is not a TTY.
+
+**Quiet mode (`--mode quiet`):** all progress/stats lines are suppressed entirely — even when stderr is a TTY — so the agent prints only the final assistant response on stdout and nothing on stderr. This is the default mode and is intended for scripting. Use `--mode debug` or `--mode stream` to keep progress output during a run.
 
 ---
 

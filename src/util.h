@@ -12,5 +12,6 @@ void util_sha256(const char *data, size_t len, char *hex_out);
 char *util_read_file(const char *path);
 char *util_strdup(const char *s);
 void log_activity(const char *fmt, ...);
+void log_activity_set_enabled(bool enabled);
 
 #endif

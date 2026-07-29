@@ -101,7 +101,18 @@ char *util_strdup(const char *s) {
     return copy;
 }
 
+/* Runtime kill-switch for log_activity(). When disabled, it emits nothing
+ * regardless of TTY status. Used to silence progress diagnostics in quiet
+ * run mode (where only the final answer should appear). Defaults to enabled
+ * so non-agent entry points (proxy) and error paths keep their diagnostics. */
+static bool g_log_enabled = true;
+
+void log_activity_set_enabled(bool enabled) {
+    g_log_enabled = enabled;
+}
+
 void log_activity(const char *fmt, ...) {
+    if (!g_log_enabled) return;
     if (!platform_stderr_is_tty()) return;
 
     va_list args;

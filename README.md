@@ -13,13 +13,13 @@ mcps:
   - name: "calculator"
     cmdline: "uvx mcp-server-calculator"
 
-$ llmkit agent -c config.yml -o convo.jsonl -p "How much is 3 + 3?"
+$ llmkit agent -c config.yml --conversation convo.jsonl -p "How much is 3 + 3?"
 [...]
-$ llmkit response -f convo.jsonl
+$ llmkit response --conversation convo.jsonl
 3 + 3 is 6.
-$ llmkit agent -c config.yml -o convo.jsonl -p "And if you add 4?"
+$ llmkit agent -c config.yml --conversation convo.jsonl -p "And if you add 4?"
 [...]
-$ llmkit response -f convo.jsonl
+$ llmkit response --conversation convo.jsonl
 If you add 4, the total is 10.
 
 ```
@@ -42,27 +42,27 @@ and targets Linux, macOS, and Windows (via MinGW-w64 cross-compilation).
 ## Usage
 
 ```
-llmkit agent -c <agent_config.yml> -o <convo.jsonl> -p <prompt|prompt_file> [--output <type>]
+llmkit agent -c <agent_config.yml> --conversation <convo.jsonl> -p <prompt|prompt_file> [--mode <type>]
 llmkit proxy -c <proxy_config.yml> [-l <host:port>]
-llmkit response -f <conversation.jsonl>
+llmkit response --conversation <conversation.jsonl>
 ```
 
-If `-l` is omitted from `proxy`, it runs as a stdio MCP server (reads
+If `-l` (or `--listen`) is omitted from `proxy`, it runs as a stdio MCP server (reads
 JSON-RPC from stdin, writes to stdout). With `-l host:port` it serves HTTP.
 
-The `response` command reads the given JSONL file, finds the last
+The `response` command reads the given `--conversation` JSONL file, finds the last
 `"type":"assistant"` entry, and prints its `content` field to stdout.
 Returns empty output if no assistant entry exists.
 
 ### Prompt resolution (`agent`)
 
-The `-p` argument is treated as a file path if the file exists; otherwise it
+The `-p` (or `--prompt`) argument is treated as a file path if the file exists; otherwise it
 is used as the literal prompt text. An empty or whitespace-only prompt exits
 with code 2.
 
 ### Stdout output modes
 
-The `--output <type>` flag controls stdout output:
+The `--mode <type>` flag controls stdout output:
 
 - **`quiet`** (default): only the final assistant response text is printed to
   stdout (plus errors). Nothing else. Ideal for scripting.
@@ -188,6 +188,12 @@ target directly: `make llmkit`.
 Progress lines (`[init]`, `[progress]`, `[tool]`, `[done]`, `[error]`) are
 written to stderr and are automatically suppressed when stderr is not a TTY,
 keeping stdout/stderr pipes clean for the JSONL file and exit codes.
+
+In **quiet mode** (`--mode quiet`, the default), these progress lines are
+suppressed entirely — even when stderr is a TTY — so only the final assistant
+response appears on stdout and nothing else is printed. The `[stats]` token
+summary is likewise silenced. Use `--mode debug` or `--mode stream` if you want
+the progress lines while the agent runs.
 
 ## Project layout
 
