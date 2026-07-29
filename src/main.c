@@ -33,6 +33,9 @@ static void print_usage(void) {
                     "                             quiet  (default) print only the final response\n"
                     "                             debug  timestamped event lines\n"
                     "                             stream JSONL event stream\n"
+                    "  --steer                    Enable steering: read additional user messages\n"
+                    "                             from stdin during the run and inject them into\n"
+                    "                             the conversation at the next turn (agent only)\n"
                     "  -l, --listen <host:port>   Listen address; omit for stdio mode (proxy)\n"
                     "  -h, --help                 Print this help and exit\n"
                     "  -V, --version              Print version and exit\n");
@@ -48,6 +51,18 @@ static const char *get_flag(int argc, char **argv, const char *short_flag, const
         }
     }
     return NULL;
+}
+
+/* Test for a boolean (valueless) flag, accepting both a short and a long
+ * form (either may be NULL). Returns true if present. */
+static bool has_flag(int argc, char **argv, const char *short_flag, const char *long_flag) {
+    for (int i = 1; i < argc; i++) {
+        if ((short_flag != NULL && strcmp(argv[i], short_flag) == 0) ||
+            (long_flag != NULL && strcmp(argv[i], long_flag) == 0)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 /* Hash the contents of a file and store the hex digest in out[65]. */
@@ -84,6 +99,7 @@ int main(int argc, char **argv) {
         const char *convo_path = get_flag(argc, argv, NULL, "--conversation");
         const char *prompt_arg = get_flag(argc, argv, "-p", "--prompt");
         const char *output_mode = get_flag(argc, argv, NULL, "--mode");
+        bool steering = has_flag(argc, argv, NULL, "--steer");
 
         /* Default output mode. */
         if (output_mode == NULL) {
@@ -121,7 +137,7 @@ int main(int argc, char **argv) {
             return rc;
         }
 
-        rc = agent_run(&ctx, convo_path, prompt_arg, output_mode);
+        rc = agent_run(&ctx, convo_path, prompt_arg, output_mode, steering);
         config_free(&ctx);
         return rc;
     }

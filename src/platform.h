@@ -51,4 +51,13 @@ int64_t platform_now_ms(void);
 /* Sleep for the given number of milliseconds. */
 void platform_sleep_ms(int64_t ms);
 
+/* Read up to `size` bytes from the process's own stdin without blocking.
+ * Returns the number of bytes read (>= 0), or -1 on error. Sets *out_eof
+ * to 1 if stdin reached end-of-file. When no data is available and stdin
+ * is still open, returns 0 with *out_eof = 0. `out_eof` may be NULL.
+ *
+ * Note: on Windows only pipe-backed stdin is supported (console stdin is
+ * reported as never-ready). */
+int platform_stdin_read_nonblocking(char *buf, size_t size, int *out_eof);
+
 #endif

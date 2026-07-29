@@ -4,6 +4,7 @@
 #include "llm.h"
 #include "util.h"
 #include "platform.h"
+#include "steering.h"
 #include <cJSON.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -16,6 +17,9 @@ static const char *g_run_mode = RUN_MODE_QUIET;
 
 /* For OM_QUIET: stores the last assistant content to print at end. */
 static char *g_last_content = NULL;
+
+/* Whether steering (--steer) is active for this run. */
+static bool g_steering = false;
 
 /* Run-mode constants for internal dispatch. */
 #define OM_QUIET  0
@@ -254,6 +258,46 @@ static void emit_quiet_final(void) {
     }
 }
 
+/* Emit a steer event: a steering user message was injected into the
+ * conversation. Stream mode emits a JSONL event; debug mode a timestamped
+ * line; quiet mode is silent. */
+static void emit_steer_event(const char *content) {
+    int om = g_om;
+    if (om == OM_STREAM) {
+        char ts[64];
+        util_timestamp_now(ts, sizeof(ts));
+        cJSON *event = cJSON_CreateObject();
+        cJSON_AddStringToObject(event, "type", "steer");
+        cJSON_AddStringToObject(event, "content", content ? content : "");
+        cJSON_AddStringToObject(event, "timestamp", ts);
+        emit_event(event);
+        cJSON_Delete(event);
+    } else if (om == OM_DEBUG) {
+        emit_debug("steer: %s", content ? content : "");
+    }
+    /* quiet: nothing */
+}
+
+/* Drain any pending steering messages from stdin and append each as a user
+ * entry to the conversation file. Returns the number of messages injected.
+ * A no-op when steering is disabled. */
+static int drain_steering(FILE *fp) {
+    if (!g_steering) return 0;
+
+    steering_poll();
+
+    int count = 0;
+    char *msg = NULL;
+    while ((msg = steering_take()) != NULL) {
+        conversation_write_entry(fp, ENTRY_USER, msg, "steer");
+        emit_steer_event(msg);
+        log_activity("[steer] injected user message");
+        free(msg);
+        count++;
+    }
+    return count;
+}
+
 /* ------------------------------------------------------------------ */
 /*  Startup sequence                                                   */
 /* ------------------------------------------------------------------ */
@@ -323,6 +367,13 @@ static int conversation_loop(runtime_ctx *ctx, FILE *fp) {
 
     for (int turn = 0; turn < max_turns; turn++) {
         emit_turn_start(turn + 1);
+
+        /* ---- Drain any pending steering messages from stdin ---- */
+        /* Written as user entries here so the reconstruct below includes them
+         * in the very next LLM call. This is the earliest legal injection
+         * point: the OpenAI API forbids interleaving a user message between
+         * an assistant's tool_calls and their tool results. */
+        drain_steering(fp);
 
         /* ---- Reconstruct message history ---- */
         json_message *msgs = NULL;
@@ -412,6 +463,15 @@ static int conversation_loop(runtime_ctx *ctx, FILE *fp) {
 
         /* ---- No tool calls: conversation complete ---- */
         if (call_count == 0) {
+            /* Drain point B: a steering message may have arrived during the
+             * final LLM call. If so, keep the loop going so it is processed
+             * rather than dropped. */
+            if (drain_steering(fp) > 0) {
+                free(content);
+                free(model);
+                free(calls);
+                continue;
+            }
             log_activity("[done] Conversation complete");
             emit_done(turn + 1);
             free(content);
@@ -494,12 +554,14 @@ static int conversation_loop(runtime_ctx *ctx, FILE *fp) {
 /*  agent_run                                                          */
 /* ------------------------------------------------------------------ */
 
-int agent_run(runtime_ctx *ctx, const char *convo_path, const char *prompt, const char *run_mode) {
+int agent_run(runtime_ctx *ctx, const char *convo_path, const char *prompt, const char *run_mode,
+              bool steering) {
     if (ctx == NULL || convo_path == NULL || prompt == NULL) return EXIT_INTERNAL_ERR;
 
     g_run_mode = run_mode ? run_mode : RUN_MODE_QUIET;
     g_om = resolve_run_mode(g_run_mode);
     g_last_content = NULL;
+    g_steering = steering;
 
     /* Quiet mode: silence all progress diagnostics so the agent prints only
      * the final answer. Debug/stream modes route their own structured output

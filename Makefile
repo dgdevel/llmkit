@@ -133,7 +133,8 @@ $(OBJDIR):
 	mkdir -p $(OBJDIR)
 
 TEST_BINS := tests/test_utf8 tests/test_util tests/test_config tests/test_jsonrpc \
-             tests/test_transport tests/test_mcp tests/test_conversation tests/test_llm
+             tests/test_transport tests/test_mcp tests/test_conversation tests/test_llm \
+             tests/test_steering
 
 clean:
 	rm -rf $(OBJDIR) $(TARGET) build-win llmkit.exe $(TEST_BINS)
@@ -181,7 +182,7 @@ check-deps:
 	@echo "Done."
 
 test: test_utf8 test_util test_config test_jsonrpc test_transport test_mcp test_conversation test_llm \
-       test_cli test_agent test_proxy
+       test_steering test_cli test_agent test_proxy
 	@echo "All tests passed."
 
 test_utf8: tests/test_utf8.c src/utf8.c
@@ -215,6 +216,10 @@ test_conversation: tests/test_conversation.c src/conversation.c src/util.c src/u
 test_llm: tests/test_llm.c src/llm.c src/util.c src/utf8.c src/platform.c $(CJSON_SRC)
 	$(CC) $(CFLAGS) -Isrc -o tests/test_llm tests/test_llm.c src/llm.c src/util.c src/utf8.c src/platform.c $(CJSON_SRC) $(LIBS)
 	./tests/test_llm
+
+test_steering: tests/test_steering.c src/steering.c src/platform.c src/util.c
+	$(CC) $(CFLAGS) -Isrc -o tests/test_steering tests/test_steering.c src/steering.c src/platform.c src/util.c $(LIBS)
+	./tests/test_steering
 
 # --- Integration tests (Phase 12) --------------------------------------
 # These exercise the compiled binary end-to-end. They require python3

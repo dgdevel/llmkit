@@ -20,6 +20,7 @@
 #include <poll.h>
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <errno.h>
 #endif
 
 int platform_process_spawn(const char *cmdline, platform_process *out_proc, platform_pipe *in_pipe,
@@ -409,5 +410,69 @@ void platform_sleep_ms(int64_t ms) {
     ts.tv_sec = (time_t)(ms / 1000);
     ts.tv_nsec = (long)((ms % 1000) * 1000000L);
     nanosleep(&ts, NULL);
+#endif
+}
+
+int platform_stdin_read_nonblocking(char *buf, size_t size, int *out_eof) {
+    if (out_eof != NULL) *out_eof = 0;
+    if (buf == NULL || size == 0) return 0;
+
+#ifdef _WIN32
+    /* Windows console handles do not support a reliable ready-check; only
+     * pipe-backed stdin (the common case for wrappers) works here. */
+    HANDLE h = GetStdHandle(STD_INPUT_HANDLE);
+    if (h == NULL || h == INVALID_HANDLE_VALUE) return -1;
+
+    DWORD avail = 0;
+    if (!PeekNamedPipe(h, NULL, 0, NULL, &avail, NULL)) {
+        /* PeekNamedPipe fails on non-pipe handles (console). Treat as
+         * never-ready rather than an error, so steering is simply inert
+         * on console-stdin Windows builds. */
+        return 0;
+    }
+    if (avail == 0) return 0;
+
+    DWORD to_read = (avail < size) ? avail : (DWORD)size;
+    DWORD nread = 0;
+    if (!ReadFile(h, buf, to_read, &nread, NULL)) {
+        DWORD err = GetLastError();
+        if (err == ERROR_HANDLE_EOF || err == ERROR_BROKEN_PIPE) {
+            if (out_eof != NULL) *out_eof = 1;
+            return 0;
+        }
+        return -1;
+    }
+    if (nread == 0 && avail > 0) {
+        if (out_eof != NULL) *out_eof = 1;
+    }
+    return (int)nread;
+#else
+    struct pollfd pfd = {.fd = STDIN_FILENO, .events = POLLIN};
+    int ret = poll(&pfd, 1, 0);
+    if (ret < 0) {
+        if (errno == EINTR) return 0;
+        return -1;
+    }
+    if (ret == 0) return 0; /* nothing ready */
+
+    /* POLLHUP/POLLERR without POLLIN: peer closed with nothing left. */
+    if ((pfd.revents & (POLLIN)) == 0) {
+        if ((pfd.revents & (POLLHUP | POLLERR)) != 0) {
+            if (out_eof != NULL) *out_eof = 1;
+        }
+        return 0;
+    }
+
+    ssize_t n = read(STDIN_FILENO, buf, size);
+    if (n < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) return 0;
+        return -1;
+    }
+    if (n == 0) {
+        /* read() returning 0 on a readable fd means EOF. */
+        if (out_eof != NULL) *out_eof = 1;
+        return 0;
+    }
+    return (int)n;
 #endif
 }

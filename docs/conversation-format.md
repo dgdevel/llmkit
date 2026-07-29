@@ -37,7 +37,7 @@ A prompt or question from the user.
 | `type`      | string | Always `"user"`                          |
 | `timestamp` | string | ISO 8601 UTC timestamp                   |
 | `content`   | string | The prompt text                          |
-| `source`    | string | `"cli"` if passed on the command line, `"file"` if read from a file |
+| `source`    | string | `"cli"` if passed on the command line, `"file"` if read from a file, `"steer"` if injected via the `--steer` stdin channel mid-run |
 
 ```json
 {"type":"user","timestamp":"2026-07-27T14:30:01Z","content":"What is the weather in London?","source":"cli"}
@@ -189,6 +189,23 @@ Emitted at the beginning of each conversation turn.
 
 ```json
 {"type":"turn_start","turn":1,"timestamp":"2026-07-27T14:30:01Z"}
+```
+
+#### `steer`
+
+Emitted when a steering user message is injected from stdin (requires the
+`--steer` flag). Fires at the top of a turn, before the `turn_start` LLM
+call, when the message is written to the conversation. Not emitted in quiet
+mode.
+
+| Field       | Type   | Description                                |
+|-------------|--------|--------------------------------------------|
+| `type`      | string | Always `"steer"`                           |
+| `content`   | string | The steering message text                  |
+| `timestamp` | string | ISO 8601 UTC timestamp                     |
+
+```json
+{"type":"steer","content":"Focus only on pricing.","timestamp":"2026-07-27T14:30:01Z"}
 ```
 
 #### `assistant`

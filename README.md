@@ -42,7 +42,7 @@ and targets Linux, macOS, and Windows (via MinGW-w64 cross-compilation).
 ## Usage
 
 ```
-llmkit agent -c <agent_config.yml> --conversation <convo.jsonl> -p <prompt|prompt_file> [--mode <type>]
+llmkit agent -c <agent_config.yml> --conversation <convo.jsonl> -p <prompt|prompt_file> [--mode <type>] [--steer]
 llmkit proxy -c <proxy_config.yml> [-l <host:port>]
 llmkit response --conversation <conversation.jsonl>
 ```
@@ -72,6 +72,45 @@ The `--mode <type>` flag controls stdout output:
   JSON event (`turn_start`, `assistant`, `tool_call`, `tool_result`, `done`,
   `error`). See [docs/conversation-format.md](docs/conversation-format.md)
   for the full schema.
+
+### Steering (`agent`)
+
+The `--steer` flag enables **steering**: while the agent runs, it reads
+additional user messages from **stdin** and injects them into the
+conversation at the next turn boundary — the earliest point the LLM can
+legally see them. This lets you course-correct a running agent (e.g. "stop
+searching, just summarize what you have").
+
+**Wire format:** messages are separated by a **blank line** (`\n\n`). A
+message may span multiple lines. Carriage returns (`\r`) are stripped, so
+both `\n\n` and `\r\n\r\n` work as delimiters. Anything after the last
+delimiter is held until more input arrives, or flushed when stdin closes.
+
+```
+# In one shell: pipe steering messages to the running agent
+(echo "Focus only on the pricing section."; echo) | llmkit agent --steer -c cfg.yml ...
+```
+
+```python
+# Programmatically: write to the agent's stdin
+proc = subprocess.Popen(["llmkit", "agent", "--steer", ...], stdin=PIPE)
+proc.stdin.write(b"Change direction: only summarize.\n\n")
+proc.stdin.flush()
+```
+
+**Delivery semantics:** the agent polls stdin once at the top of every turn
+(before reconstructing the conversation and calling the LLM) and again just
+before the run would complete. Messages typed during a blocking LLM call or
+a tool call simply queue in the stdin buffer and are delivered at the next
+turn. The OpenAI API forbids interleaving a user message between an
+assistant's `tool_calls` and their `tool_results`, so mid-turn injection is
+not possible — the turn boundary *is* the earliest legal and practical
+delivery point.
+
+Injected messages are written to the conversation JSONL as `"user"` entries
+with `"source":"steer"`. In `debug` mode a `steer:` line is emitted; in
+`stream` mode a `{"type":"steer",...}` JSONL event is emitted. Steering is
+silent in `quiet` mode.
 
 ## Configuration
 
