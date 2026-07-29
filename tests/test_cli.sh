@@ -107,7 +107,7 @@ mcps:
     init_timeout: "1s"
 EOF
 out="$TMP/convo_init.jsonl"
-"$BIN" agent -c "$cfg" -o "$out" -p "hello" >/dev/null 2>&1
+"$BIN" agent -c "$cfg" --conversation "$out" -p "hello" >/dev/null 2>&1
 assert_exit "MCP init timeout -> exit 6" 6 $?
 
 # ----------------------------------------------------------------------
@@ -119,23 +119,23 @@ llm:
   api_base: "http://127.0.0.1:1/v1"
 EOF
 out2="$TMP/convo_empty.jsonl"
-"$BIN" agent -c "$cfg2" -o "$out2" -p "   " >/dev/null 2>&1
+"$BIN" agent -c "$cfg2" --conversation "$out2" -p "   " >/dev/null 2>&1
 assert_exit "empty prompt -> exit 2" 2 $?
 
 # Whitespace-only prompt file should also be rejected.
 pf="$TMP/blank.txt"
 printf '   \n\n  ' >"$pf"
-"$BIN" agent -c "$cfg2" -o "$out2" -p "$pf" >/dev/null 2>&1
+"$BIN" agent -c "$cfg2" --conversation "$out2" -p "$pf" >/dev/null 2>&1
 assert_exit "blank prompt file -> exit 2" 2 $?
 
 # Empty-string prompt argument.
-"$BIN" agent -c "$cfg2" -o "$out2" -p "" >/dev/null 2>&1
+"$BIN" agent -c "$cfg2" --conversation "$out2" -p "" >/dev/null 2>&1
 assert_exit "empty literal prompt -> exit 2" 2 $?
 
 # ----------------------------------------------------------------------
 # 8. Config file does not exist -> exit 1 (config error)
 # ----------------------------------------------------------------------
-"$BIN" agent -c "$TMP/nope.yml" -o "$out2" -p "hi" >/dev/null 2>&1
+"$BIN" agent -c "$TMP/nope.yml" --conversation "$out2" -p "hi" >/dev/null 2>&1
 assert_exit "missing config -> exit 1" 1 $?
 
 # ----------------------------------------------------------------------
@@ -199,7 +199,7 @@ printf '{"type":"meta","version":1,"timestamp":"2026-01-01T00:00:00Z","config_ha
 {"type":"user","timestamp":"2026-01-01T00:00:01Z","content":"Hello","source":"cli"}
 {"type":"assistant","timestamp":"2026-01-01T00:00:02Z","content":"Hi there!","model":"gpt-4o","usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8}}' >"$convo"
 
-out=$("$BIN" response -f "$convo" 2>/dev/null)
+out=$("$BIN" response --conversation "$convo" 2>/dev/null)
 rc=$?
 assert_exit "response basic -> exit 0" 0 $rc
 if [ "$out" = "Hi there!" ]; then
@@ -221,7 +221,7 @@ printf '{"type":"meta","version":1,"timestamp":"2026-01-01T00:00:00Z","config_ha
 {"type":"tool_result","timestamp":"2026-01-01T00:00:06Z","call_id":"c1","name":"t","result":"ok","is_error":false,"is_timeout":false,"mcp_server":"srv"}
 {"type":"assistant","timestamp":"2026-01-01T00:00:07Z","content":"Final answer","model":"gpt-4o","usage":{"prompt_tokens":2,"completion_tokens":2,"total_tokens":4}}' >"$convo2"
 
-out=$("$BIN" response -f "$convo2" 2>/dev/null)
+out=$("$BIN" response --conversation "$convo2" 2>/dev/null)
 rc=$?
 assert_exit "response multiple assistants -> exit 0" 0 $rc
 if [ "$out" = "Final answer" ]; then
@@ -237,7 +237,7 @@ convo3="$TMP/response_test3.jsonl"
 printf '{"type":"meta","version":1,"timestamp":"2026-01-01T00:00:00Z","config_hash":"sha256:abc","run_id":"r3"}
 {"type":"user","timestamp":"2026-01-01T00:00:01Z","content":"Hello","source":"cli"}' >"$convo3"
 
-out=$("$BIN" response -f "$convo3" 2>/dev/null)
+out=$("$BIN" response --conversation "$convo3" 2>/dev/null)
 rc=$?
 assert_exit "response no assistant -> exit 0" 0 $rc
 if [ -z "$out" ]; then
@@ -249,15 +249,15 @@ fi
 # ----------------------------------------------------------------------
 # 14. response command — missing file -> exit 3
 # ----------------------------------------------------------------------
-"$BIN" response -f "$TMP/nonexistent_response.jsonl" >/dev/null 2>&1
+"$BIN" response --conversation "$TMP/nonexistent_response.jsonl" >/dev/null 2>&1
 rc=$?
 assert_exit "response missing file -> exit 0" 0 $rc
 
 # ----------------------------------------------------------------------
-# 15. response command — missing -f flag -> exit 2
+# 15. response command — missing --conversation flag -> exit 2
 # ----------------------------------------------------------------------
 "$BIN" response >/dev/null 2>&1
-assert_exit "response without -f -> exit 2" 2 $?
+assert_exit "response without --conversation -> exit 2" 2 $?
 
 echo ""
 echo "$tests tests, $failed failed"

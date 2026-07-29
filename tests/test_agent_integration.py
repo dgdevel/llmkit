@@ -152,7 +152,7 @@ def main():
         )
 
     proc = subprocess.run(
-        [BIN, "agent", "-c", cfg_path, "-o", convo, "-p", "What time is it?"],
+        [BIN, "agent", "-c", cfg_path, "--conversation", convo, "-p", "What time is it?"],
         capture_output=True, text=True, timeout=30, cwd=ROOT,
     )
     check("agent exit code 0", proc.returncode == 0,
