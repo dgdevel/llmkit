@@ -14,12 +14,8 @@ mcps:
     cmdline: "uvx mcp-server-calculator"
 
 $ llmkit agent -c config.yml --conversation convo.jsonl -p "How much is 3 + 3?"
-[...]
-$ llmkit response --conversation convo.jsonl
 3 + 3 is 6.
 $ llmkit agent -c config.yml --conversation convo.jsonl -p "And if you add 4?"
-[...]
-$ llmkit response --conversation convo.jsonl
 If you add 4, the total is 10.
 
 ```
