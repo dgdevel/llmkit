@@ -3,7 +3,7 @@
 A lightweight CLI tool to interact with LLMs and MCP from shell applications, for Windows, Linux and MacOS.
 
 A quick example:
-```
+```bash
 $ cat config.yml
 llm:
   api_base: "http://127.0.0.1:8000/v1"
@@ -37,7 +37,7 @@ and targets Linux, macOS, and Windows (via MinGW-w64 cross-compilation).
 
 ## Usage
 
-```
+```bash
 llmkit agent -c <agent_config.yml> --conversation <convo.jsonl> -p <prompt|prompt_file> [--mode <type>] [--steer]
 llmkit proxy -c <proxy_config.yml> [-l <host:port>]
 llmkit response --conversation <conversation.jsonl>
@@ -82,7 +82,7 @@ message may span multiple lines. Carriage returns (`\r`) are stripped, so
 both `\n\n` and `\r\n\r\n` work as delimiters. Anything after the last
 delimiter is held until more input arrives, or flushed when stdin closes.
 
-```
+```bash
 # In one shell: pipe steering messages to the running agent
 (echo "Focus only on the pricing section."; echo) | llmkit agent --steer -c cfg.yml ...
 ```
@@ -146,7 +146,7 @@ Run `make check-deps` to verify required libraries are detected.
 
 ### Build
 
-```sh
+```bash
 make            # native binary -> ./llmkit
 make debug      # ASAN + debug symbols
 make test       # all unit + integration tests
