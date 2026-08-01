@@ -104,6 +104,7 @@ int conversation_write_entry(FILE *fp, entry_type type, ...) {
 
     case ENTRY_ASSISTANT: {
         const char *content = va_arg(args, const char *);
+        const char *reasoning = va_arg(args, const char *);
         const char *model = va_arg(args, const char *);
         const usage_info *usage = va_arg(args, const usage_info *);
         root = make_entry_base("assistant");
@@ -112,6 +113,9 @@ int conversation_write_entry(FILE *fp, entry_type type, ...) {
             break;
         }
         cJSON_AddStringToObject(root, "content", content ? content : "");
+        if (reasoning != NULL && reasoning[0] != '\0') {
+            cJSON_AddStringToObject(root, "reasoning", reasoning);
+        }
         cJSON_AddStringToObject(root, "model", model ? model : "");
         if (usage != NULL) {
             cJSON *u = cJSON_CreateObject();
@@ -366,6 +370,7 @@ int conversation_reconstruct(const char *path, json_message **out_msgs, int *out
             json_message *m = &msgs[msg_count++];
             m->role = util_strdup("assistant");
             m->content = util_strdup(json_str(re->json, "content", ""));
+            m->reasoning = util_strdup(json_str(re->json, "reasoning", ""));
             int asst_idx = msg_count - 1;
             i++;
 
@@ -526,6 +531,7 @@ void conversation_free_messages(json_message *msgs, int count) {
     for (int i = 0; i < count; i++) {
         free(msgs[i].role);
         free(msgs[i].content);
+        free(msgs[i].reasoning);
         free(msgs[i].tool_call_id);
         if (msgs[i].tool_calls != NULL) {
             for (int j = 0; j < msgs[i].tool_call_count; j++) {

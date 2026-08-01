@@ -135,7 +135,8 @@ static void emit_turn_start(int turn) {
     /* quiet: nothing */
 }
 
-static void emit_assistant_event(const char *content, const char *model, const usage_info *usage) {
+static void emit_assistant_event(const char *content, const char *reasoning, const char *model,
+                                 const usage_info *usage) {
     int om = g_om;
     if (om == OM_STREAM) {
         char ts[64];
@@ -143,6 +144,9 @@ static void emit_assistant_event(const char *content, const char *model, const u
         cJSON *event = cJSON_CreateObject();
         cJSON_AddStringToObject(event, "type", "assistant");
         cJSON_AddStringToObject(event, "content", content ? content : "");
+        if (reasoning != NULL && reasoning[0] != '\0') {
+            cJSON_AddStringToObject(event, "reasoning", reasoning);
+        }
         cJSON_AddStringToObject(event, "model", model ? model : "");
         cJSON_AddStringToObject(event, "timestamp", ts);
         if (usage && usage->total_tokens > 0) {
@@ -155,6 +159,9 @@ static void emit_assistant_event(const char *content, const char *model, const u
         emit_event(event);
         cJSON_Delete(event);
     } else if (om == OM_DEBUG) {
+        if (reasoning != NULL && reasoning[0] != '\0') {
+            emit_debug("reasoning: %s", reasoning);
+        }
         emit_debug("assistant: %s", content ? content : "");
     }
     /* quiet: assistant_content is stored via emit_assistant_content */
@@ -420,14 +427,15 @@ static int conversation_loop(runtime_ctx *ctx, FILE *fp) {
 
         /* ---- Call LLM ---- */
         char *content = NULL;
+        char *reasoning = NULL;
         char *model = NULL;
         tool_call *calls = NULL;
         int call_count = 0;
         usage_info usage;
         int64_t t0 = platform_now_ms();
 
-        rc = llm_chat_complete(ctx, msgs, msg_count, ctx->tools, ctx->tool_count, &content, &model,
-                               &calls, &call_count, &usage);
+        rc = llm_chat_complete(ctx, msgs, msg_count, ctx->tools, ctx->tool_count, &content,
+                               &reasoning, &model, &calls, &call_count, &usage);
         conversation_free_messages(msgs, msg_count);
 
         int64_t elapsed_ms = platform_now_ms() - t0;
@@ -436,6 +444,7 @@ static int conversation_loop(runtime_ctx *ctx, FILE *fp) {
             log_activity("[error] LLM API call failed");
             emit_error_event(EXIT_LLM_ERR, "LLM API call failed");
             free(content);
+            free(reasoning);
             free(model);
             free(calls);
             return EXIT_LLM_ERR;
@@ -443,7 +452,7 @@ static int conversation_loop(runtime_ctx *ctx, FILE *fp) {
 
         /* ---- Emit assistant output to stdout ---- */
         emit_assistant_content(content);
-        emit_assistant_event(content, model, &usage);
+        emit_assistant_event(content, reasoning, model, &usage);
 
         /* ---- Print response stats to stderr (not in quiet mode) ---- */
         if (g_om != OM_QUIET) {
@@ -458,8 +467,8 @@ static int conversation_loop(runtime_ctx *ctx, FILE *fp) {
         }
 
         /* ---- Write assistant entry ---- */
-        conversation_write_entry(fp, ENTRY_ASSISTANT, content ? content : "", model ? model : "",
-                                 &usage);
+        conversation_write_entry(fp, ENTRY_ASSISTANT, content ? content : "",
+                                 reasoning ? reasoning : "", model ? model : "", &usage);
 
         /* ---- No tool calls: conversation complete ---- */
         if (call_count == 0) {
@@ -468,6 +477,7 @@ static int conversation_loop(runtime_ctx *ctx, FILE *fp) {
              * rather than dropped. */
             if (drain_steering(fp) > 0) {
                 free(content);
+                free(reasoning);
                 free(model);
                 free(calls);
                 continue;
@@ -475,6 +485,7 @@ static int conversation_loop(runtime_ctx *ctx, FILE *fp) {
             log_activity("[done] Conversation complete");
             emit_done(turn + 1);
             free(content);
+            free(reasoning);
             free(model);
             free(calls);
             return EXIT_SUCCESS;
@@ -519,6 +530,7 @@ static int conversation_loop(runtime_ctx *ctx, FILE *fp) {
                                          td->mcp_server);
                 free(result);
                 free(content);
+                free(reasoning);
                 free(model);
                 free(calls);
                 log_activity("[error] Tool call failed, stopping conversation");
@@ -535,6 +547,7 @@ static int conversation_loop(runtime_ctx *ctx, FILE *fp) {
         }
 
         free(content);
+        free(reasoning);
         free(model);
         free(calls);
 

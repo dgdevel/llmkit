@@ -15,6 +15,28 @@ root keys are accepted.
 | `api_key`  | No       | `""`           | API key for Authorization header     |
 | `model`    | No       | `gpt-4o-mini`  | Model identifier                     |
 | `headers`  | No       | `{}`           | Additional HTTP headers              |
+| `retain_reasoning` | No | `false` | Re-send reasoning on later turns (see below) |
+
+### `retain_reasoning`
+
+Some models (e.g. DeepSeek-R1, Qwen3-thinking, OpenAI o-series) return a
+`reasoning_content` field alongside `content` — the model's chain-of-thought.
+llmkit always captures this reasoning and stores it in the conversation file
+(as a `reasoning` field on assistant entries), and surfaces it in `--stream`
+events and `--debug` output.
+
+By default, reasoning is **discarded** when building the next request: the
+assistant message is sent back with only its `content`, not its reasoning.
+Set `retain_reasoning: true` to re-send the `reasoning_content` field to the
+model on subsequent turns (useful for models that benefit from reasoning
+context across turns, at the cost of extra tokens).
+
+```yaml
+llm:
+  api_base: "https://api.deepseek.com/v1"
+  model: "deepseek-reasoner"
+  retain_reasoning: true
+```
 
 ## MCP servers (`mcps`)
 

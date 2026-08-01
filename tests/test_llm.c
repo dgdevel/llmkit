@@ -46,13 +46,13 @@ int main(void) {
 
 void test_chat_null_ctx(void) {
     TEST("chat_complete with NULL ctx returns error");
-    char *content = NULL, *model = NULL;
+    char *content = NULL, *reasoning = NULL, *model = NULL;
     tool_call *calls = NULL;
     int call_count = 0;
     usage_info usage;
 
-    int rc =
-        llm_chat_complete(NULL, NULL, 0, NULL, 0, &content, &model, &calls, &call_count, &usage);
+    int rc = llm_chat_complete(NULL, NULL, 0, NULL, 0, &content, &reasoning, &model, &calls,
+                               &call_count, &usage);
     ASSERT(rc == EXIT_INTERNAL_ERR, "returns internal error");
 }
 
@@ -62,7 +62,7 @@ void test_chat_null_output_ptrs(void) {
     memset(&ctx, 0, sizeof(ctx));
     ctx.llm.api_base = util_strdup("http://localhost:9999/v1");
 
-    int rc = llm_chat_complete(&ctx, NULL, 0, NULL, 0, NULL, NULL, NULL, NULL, NULL);
+    int rc = llm_chat_complete(&ctx, NULL, 0, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL);
     ASSERT(rc == EXIT_INTERNAL_ERR, "returns internal error");
 
     free(ctx.llm.api_base);
@@ -74,16 +74,17 @@ void test_chat_no_api_base(void) {
     memset(&ctx, 0, sizeof(ctx));
     /* api_base is NULL */
 
-    char *content = NULL, *model = NULL;
+    char *content = NULL, *reasoning = NULL, *model = NULL;
     tool_call *calls = NULL;
     int call_count = 0;
     usage_info usage;
 
-    int rc =
-        llm_chat_complete(&ctx, NULL, 0, NULL, 0, &content, &model, &calls, &call_count, &usage);
+    int rc = llm_chat_complete(&ctx, NULL, 0, NULL, 0, &content, &reasoning, &model, &calls,
+                               &call_count, &usage);
     ASSERT(rc == EXIT_LLM_ERR, "returns LLM error");
 
     free(content);
+    free(reasoning);
     free(model);
     free(calls);
 }
@@ -95,17 +96,18 @@ void test_chat_empty_messages(void) {
     ctx.llm.api_base = util_strdup("http://localhost:1/v1");
     ctx.llm.model = util_strdup("gpt-4o-mini");
 
-    char *content = NULL, *model = NULL;
+    char *content = NULL, *reasoning = NULL, *model = NULL;
     tool_call *calls = NULL;
     int call_count = 0;
     usage_info usage;
 
     /* Will attempt HTTP call and fail with EXIT_LLM_ERR. */
-    int rc =
-        llm_chat_complete(&ctx, NULL, 0, NULL, 0, &content, &model, &calls, &call_count, &usage);
+    int rc = llm_chat_complete(&ctx, NULL, 0, NULL, 0, &content, &reasoning, &model, &calls,
+                               &call_count, &usage);
     ASSERT(rc == EXIT_LLM_ERR, "fails with LLM error (no server)");
 
     free(content);
+    free(reasoning);
     free(model);
     free(calls);
     free(ctx.llm.api_base);
@@ -124,16 +126,17 @@ void test_chat_empty_tools(void) {
     msgs[0].role = util_strdup("user");
     msgs[0].content = util_strdup("Hi");
 
-    char *content = NULL, *model = NULL;
+    char *content = NULL, *reasoning = NULL, *model = NULL;
     tool_call *calls = NULL;
     int call_count = 0;
     usage_info usage;
 
-    int rc =
-        llm_chat_complete(&ctx, msgs, 1, NULL, 0, &content, &model, &calls, &call_count, &usage);
+    int rc = llm_chat_complete(&ctx, msgs, 1, NULL, 0, &content, &reasoning, &model, &calls,
+                               &call_count, &usage);
     ASSERT(rc == EXIT_LLM_ERR, "fails with LLM error (no server)");
 
     free(content);
+    free(reasoning);
     free(model);
     free(calls);
     free(msgs[0].role);

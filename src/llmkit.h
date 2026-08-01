@@ -66,6 +66,7 @@ typedef struct {
     char *api_key;
     char *model;
     char **headers;
+    int retain_reasoning; /* if true, send reasoning_content back to the model on later requests */
 } llm_cfg;
 
 /* Agent configuration */
@@ -100,6 +101,7 @@ typedef struct {
 typedef struct {
     char *role;            /* "system", "user", "assistant", "tool" */
     char *content;         /* text content (may be NULL/empty) */
+    char *reasoning;       /* reasoning/thinking content (assistant only, may be NULL/empty) */
     tool_call *tool_calls; /* for assistant messages with tool_calls */
     int tool_call_count;
     char *tool_call_id; /* for tool result messages */

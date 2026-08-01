@@ -590,6 +590,23 @@ static int cfg_parse_llm(cfg_parse *p, runtime_ctx *ctx) {
             cfg_event_done(p);
             if (cfg_parse_headers(p, &ctx->llm.headers) != 0) goto err;
 
+        } else if (strcmp(key, "retain_reasoning") == 0) {
+            cfg_event_done(p);
+            char *v = NULL;
+            if (cfg_read_scalar(p, &v) != 0) goto err;
+            if (strcmp(v, "true") == 0 || strcmp(v, "yes") == 0) {
+                ctx->llm.retain_reasoning = true;
+            } else if (strcmp(v, "false") == 0 || strcmp(v, "no") == 0) {
+                ctx->llm.retain_reasoning = false;
+            } else {
+                snprintf(p->error_msg, sizeof(p->error_msg),
+                         "Invalid boolean '%s' for retain_reasoning", v);
+                free(v);
+                p->error_code = EXIT_CONFIG_ERR;
+                goto err;
+            }
+            free(v);
+
         } else {
             cfg_event_done(p);
             if (cfg_skip_value(p) != 0) goto err;

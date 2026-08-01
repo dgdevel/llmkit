@@ -20,8 +20,8 @@ int conversation_write_meta(FILE *fp, const char *config_hash, const char *run_i
  * Write one entry of the given type.  Variadic arguments depend on type:
  *
  *   ENTRY_USER:       content (const char*), source (const char*)
- *   ENTRY_ASSISTANT:  content (const char*), model (const char*),
- *                     usage (const usage_info* - may be NULL)
+ *   ENTRY_ASSISTANT:  content (const char*), reasoning (const char*),
+ *                     model (const char*), usage (const usage_info* - may be NULL)
  *   ENTRY_TOOL_CALL:  id (const char*), name (const char*),
  *                     arguments (const char*), mcp_server (const char*)
  *   ENTRY_TOOL_RESULT: call_id (const char*), name (const char*),

@@ -52,8 +52,20 @@ An assistant reply from the LLM. May be followed by `tool_call` and `tool_result
 | `type`      | string            | Always `"assistant"`                             |
 | `timestamp` | string            | ISO 8601 UTC timestamp                           |
 | `content`   | string            | Response text (may be empty if only tool calls)  |
+| `reasoning` | string (optional) | Model chain-of-thought, present only for reasoning-capable models and when non-empty |
 | `model`     | string            | Model identifier returned by the API, e.g. `"gpt-4o"` |
 | `usage`     | object (optional) | Token usage, present when the API provides it    |
+
+**`reasoning` field:**
+
+Some models (e.g. DeepSeek-R1, Qwen3-thinking, OpenAI o-series) return a
+`reasoning_content` field alongside `content`. llmkit captures this and stores
+it as the `reasoning` field on the assistant entry. It is omitted entirely
+(absent from the JSON) when the model returns no reasoning or an empty string.
+
+By default, reasoning is **not** re-sent to the model on subsequent turns.
+To retain it in the reconstructed request history, set `retain_reasoning: true`
+in the `llm` config (see `docs/configuration.md`).
 
 **`usage` sub-object:**
 

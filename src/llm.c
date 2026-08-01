@@ -107,6 +107,12 @@ static char *build_request_body(const json_message *msgs, int msg_count, const t
             cJSON_AddStringToObject(mj, "content", "");
         }
 
+        /* reasoning_content for assistant messages, only when retain_reasoning is set */
+        if (strcmp(role, "assistant") == 0 && cfg->retain_reasoning && m->reasoning != NULL &&
+            m->reasoning[0] != '\0') {
+            cJSON_AddStringToObject(mj, "reasoning_content", m->reasoning);
+        }
+
         /* tool_call_id for tool messages */
         if (strcmp(role, "tool") == 0 && m->tool_call_id != NULL) {
             cJSON_AddStringToObject(mj, "tool_call_id", m->tool_call_id);
@@ -194,8 +200,9 @@ static char *build_request_body(const json_message *msgs, int msg_count, const t
 /*  Response parser                                                    */
 /* ------------------------------------------------------------------ */
 
-static int parse_response(const char *body, char **out_content, char **out_model,
-                          tool_call **out_calls, int *out_call_count, usage_info *usage) {
+static int parse_response(const char *body, char **out_content, char **out_reasoning,
+                          char **out_model, tool_call **out_calls, int *out_call_count,
+                          usage_info *usage) {
     if (body == NULL) return EXIT_LLM_ERR;
 
     cJSON *root = cJSON_Parse(body);
@@ -241,6 +248,14 @@ static int parse_response(const char *body, char **out_content, char **out_model
         *out_content = util_strdup(content_j->valuestring);
     } else {
         *out_content = util_strdup("");
+    }
+
+    /* reasoning_content (nullable; emitted by reasoning-capable models) */
+    cJSON *reasoning_j = cJSON_GetObjectItem(message, "reasoning_content");
+    if (reasoning_j != NULL && cJSON_IsString(reasoning_j) && reasoning_j->valuestring != NULL) {
+        *out_reasoning = util_strdup(reasoning_j->valuestring);
+    } else {
+        *out_reasoning = util_strdup("");
     }
 
     /* tool_calls */
@@ -297,13 +312,16 @@ static int parse_response(const char *body, char **out_content, char **out_model
 /* ------------------------------------------------------------------ */
 
 int llm_chat_complete(runtime_ctx *ctx, const json_message *messages, int msg_count,
-                      const tool_def *tools, int tool_count, char **out_content, char **out_model,
-                      tool_call **out_calls, int *out_call_count, usage_info *usage) {
+                      const tool_def *tools, int tool_count, char **out_content,
+                      char **out_reasoning, char **out_model, tool_call **out_calls,
+                      int *out_call_count, usage_info *usage) {
     if (ctx == NULL) return EXIT_INTERNAL_ERR;
-    if (out_content == NULL || out_model == NULL || out_calls == NULL || out_call_count == NULL)
+    if (out_content == NULL || out_reasoning == NULL || out_model == NULL || out_calls == NULL ||
+        out_call_count == NULL)
         return EXIT_INTERNAL_ERR;
 
     *out_content = NULL;
+    *out_reasoning = NULL;
     *out_model = NULL;
     *out_calls = NULL;
     *out_call_count = 0;
@@ -391,8 +409,8 @@ int llm_chat_complete(runtime_ctx *ctx, const json_message *messages, int msg_co
     }
 
     /* Parse the response body. */
-    int rc = parse_response(gb.data ? gb.data : "", out_content, out_model, out_calls,
-                            out_call_count, usage);
+    int rc = parse_response(gb.data ? gb.data : "", out_content, out_reasoning, out_model,
+                            out_calls, out_call_count, usage);
     growbuf_free(&gb);
     return rc;
 }

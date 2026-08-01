@@ -63,6 +63,7 @@ static void test_full_config(void) {
                        "  headers:\n"
                        "    X-Custom: \"value1\"\n"
                        "    X-Other: \"value2\"\n"
+                       "  retain_reasoning: true\n"
                        "\n"
                        "mcps:\n"
                        "  - name: \"srv1\"\n"
@@ -110,6 +111,7 @@ static void test_full_config(void) {
     CHECK_STR_EQ(ctx.llm.api_base, "http://localhost:11434/v1", "llm.api_base");
     CHECK_STR_EQ(ctx.llm.api_key, "sk-test-key", "llm.api_key");
     CHECK_STR_EQ(ctx.llm.model, "llama3", "llm.model");
+    CHECK_EQ(ctx.llm.retain_reasoning, 1, "llm.retain_reasoning");
 
     CHECK(ctx.llm.headers != NULL, "llm.headers should be set");
     CHECK_STR_EQ(ctx.llm.headers[0], "X-Custom=value1", "llm.headers[0]");
@@ -184,6 +186,7 @@ static void test_defaults(void) {
 
     CHECK_STR_EQ(ctx.llm.model, "gpt-4o-mini", "default model");
     CHECK_STR_NULL(ctx.llm.api_key, "default api_key NULL");
+    CHECK_EQ(ctx.llm.retain_reasoning, 0, "default retain_reasoning false");
 
     CHECK_EQ(ctx.mcp_count, 1, "one MCP server");
     CHECK_STR_EQ(ctx.mcps[0].name, "defaults", "server name");

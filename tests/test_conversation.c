@@ -39,6 +39,9 @@ static void test_open_utf8_invalid(void);
 static void test_write_meta(void);
 static void test_write_user(void);
 static void test_write_assistant(void);
+static void test_write_assistant_with_reasoning(void);
+static void test_write_assistant_empty_reasoning_omitted(void);
+static void test_reconstruct_reasoning(void);
 static void test_write_tool_call(void);
 static void test_write_tool_result(void);
 static void test_write_error(void);
@@ -61,6 +64,9 @@ int main(void) {
     test_write_meta();
     test_write_user();
     test_write_assistant();
+    test_write_assistant_with_reasoning();
+    test_write_assistant_empty_reasoning_omitted();
+    test_reconstruct_reasoning();
     test_write_tool_call();
     test_write_tool_result();
     test_write_error();
@@ -190,7 +196,7 @@ void test_write_assistant(void) {
     fp = path ? fopen(path, "a") : NULL;
     ASSERT(fp != NULL, "reopen");
     usage_info usage = {10, 5, 15};
-    int rc = conversation_write_entry(fp, ENTRY_ASSISTANT, "Hello back", "gpt-4o", &usage);
+    int rc = conversation_write_entry(fp, ENTRY_ASSISTANT, "Hello back", "", "gpt-4o", &usage);
     ASSERT(rc == EXIT_SUCCESS, "write success");
     if (fp) fclose(fp);
 
@@ -207,6 +213,88 @@ void test_write_assistant(void) {
     ASSERT(cJSON_GetObjectItem(u, "total_tokens")->valueint == 15, "total_tokens");
     cJSON_Delete(j);
     free(content);
+    remove(path);
+    free(path);
+}
+
+void test_write_assistant_with_reasoning(void) {
+    TEST("write_entry(ASSISTANT) with reasoning field");
+    char *path = NULL;
+    FILE *fp = tmp_file(&path);
+    ASSERT(fp != NULL, "tmp file");
+    if (fp) fclose(fp);
+
+    fp = path ? fopen(path, "a") : NULL;
+    ASSERT(fp != NULL, "reopen");
+    usage_info usage = {10, 5, 15};
+    int rc = conversation_write_entry(fp, ENTRY_ASSISTANT, "The answer is 42",
+                                      "Let me think... 6*7=42.", "gpt-4o", &usage);
+    ASSERT(rc == EXIT_SUCCESS, "write success");
+    if (fp) fclose(fp);
+
+    char *content = util_read_file(path);
+    cJSON *j = cJSON_Parse(content);
+    ASSERT(j != NULL, "valid JSON");
+    ASSERT(strcmp(cJSON_GetObjectItem(j, "type")->valuestring, "assistant") == 0, "type=assistant");
+    ASSERT(strcmp(cJSON_GetObjectItem(j, "content")->valuestring, "The answer is 42") == 0,
+           "content");
+    ASSERT(strcmp(cJSON_GetObjectItem(j, "reasoning")->valuestring, "Let me think... 6*7=42.") == 0,
+           "reasoning field present and correct");
+    ASSERT(strcmp(cJSON_GetObjectItem(j, "model")->valuestring, "gpt-4o") == 0, "model");
+    cJSON_Delete(j);
+    free(content);
+    remove(path);
+    free(path);
+}
+
+void test_write_assistant_empty_reasoning_omitted(void) {
+    TEST("write_entry(ASSISTANT) with empty reasoning omits the field");
+    char *path = NULL;
+    FILE *fp = tmp_file(&path);
+    ASSERT(fp != NULL, "tmp file");
+    if (fp) fclose(fp);
+
+    fp = path ? fopen(path, "a") : NULL;
+    ASSERT(fp != NULL, "reopen");
+    int rc = conversation_write_entry(fp, ENTRY_ASSISTANT, "Hello", "", "gpt-4o",
+                                      (const usage_info *)NULL);
+    ASSERT(rc == EXIT_SUCCESS, "write success");
+    if (fp) fclose(fp);
+
+    char *content = util_read_file(path);
+    cJSON *j = cJSON_Parse(content);
+    ASSERT(j != NULL, "valid JSON");
+    ASSERT(cJSON_GetObjectItem(j, "reasoning") == NULL, "reasoning field absent when empty");
+    cJSON_Delete(j);
+    free(content);
+    remove(path);
+    free(path);
+}
+
+void test_reconstruct_reasoning(void) {
+    TEST("reconstruct loads reasoning into json_message");
+    char *path = NULL;
+    FILE *fp = tmp_file(&path);
+    ASSERT(fp != NULL, "tmp file");
+    if (fp) fclose(fp);
+
+    fp = path ? fopen(path, "a") : NULL;
+    conversation_write_meta(fp, "h", "r");
+    conversation_write_entry(fp, ENTRY_USER, "Hi", "cli");
+    usage_info u = {5, 10, 15};
+    conversation_write_entry(fp, ENTRY_ASSISTANT, "Hello!", "Thinking about it...", "gpt-4o", &u);
+    if (fp) fclose(fp);
+
+    json_message *msgs = NULL;
+    int count = 0;
+    int rc = conversation_reconstruct(path, &msgs, &count);
+    ASSERT(rc == EXIT_SUCCESS, "reconstruct success");
+    ASSERT(count == 2, "2 messages");
+    ASSERT(strcmp(msgs[1].role, "assistant") == 0, "msg[1] role=assistant");
+    ASSERT(strcmp(msgs[1].content, "Hello!") == 0, "msg[1] content");
+    ASSERT(msgs[1].reasoning != NULL, "msg[1] reasoning non-NULL");
+    ASSERT(strcmp(msgs[1].reasoning, "Thinking about it...") == 0, "msg[1] reasoning loaded");
+    conversation_free_messages(msgs, count);
     remove(path);
     free(path);
 }
@@ -312,7 +400,7 @@ void test_reconstruct_simple(void) {
     conversation_write_meta(fp, "h", "r");
     conversation_write_entry(fp, ENTRY_USER, "Hi", "cli");
     usage_info u = {5, 10, 15};
-    conversation_write_entry(fp, ENTRY_ASSISTANT, "Hello!", "gpt-4o", &u);
+    conversation_write_entry(fp, ENTRY_ASSISTANT, "Hello!", "", "gpt-4o", &u);
     if (fp) fclose(fp);
 
     json_message *msgs = NULL;
@@ -338,12 +426,13 @@ void test_reconstruct_with_tools(void) {
 
     fp = path ? fopen(path, "a") : NULL;
     conversation_write_entry(fp, ENTRY_USER, "Weather?", "cli");
-    conversation_write_entry(fp, ENTRY_ASSISTANT, "", "gpt-4o", (const usage_info *)NULL);
+    conversation_write_entry(fp, ENTRY_ASSISTANT, "", "", "gpt-4o", (const usage_info *)NULL);
     conversation_write_entry(fp, ENTRY_TOOL_CALL, "call_1", "get_weather", "{\"loc\":\"Paris\"}",
                              "wsrv");
     conversation_write_entry(fp, ENTRY_TOOL_RESULT, "call_1", "get_weather", "{\"temp\":22}", 0, 0,
                              "wsrv");
-    conversation_write_entry(fp, ENTRY_ASSISTANT, "It's 22C.", "gpt-4o", (const usage_info *)NULL);
+    conversation_write_entry(fp, ENTRY_ASSISTANT, "It's 22C.", "", "gpt-4o",
+                             (const usage_info *)NULL);
     if (fp) fclose(fp);
 
     json_message *msgs = NULL;
@@ -373,14 +462,14 @@ void test_reconstruct_roundtrip(void) {
     conversation_write_meta(fp, "h", "r");
     conversation_write_entry(fp, ENTRY_USER, "Q1", "cli");
     usage_info u1 = {1, 1, 2};
-    conversation_write_entry(fp, ENTRY_ASSISTANT, "A1", "m1", &u1);
+    conversation_write_entry(fp, ENTRY_ASSISTANT, "A1", "", "m1", &u1);
     conversation_write_entry(fp, ENTRY_USER, "Q2", "cli");
-    conversation_write_entry(fp, ENTRY_ASSISTANT, "", "m2", (const usage_info *)NULL);
+    conversation_write_entry(fp, ENTRY_ASSISTANT, "", "", "m2", (const usage_info *)NULL);
     conversation_write_entry(fp, ENTRY_TOOL_CALL, "c1", "tool1", "{}", "srv");
     conversation_write_entry(fp, ENTRY_TOOL_RESULT, "c1", "tool1", "ok", 0, 0, "srv");
     conversation_write_entry(fp, ENTRY_TOOL_CALL, "c2", "tool2", "{}", "srv");
     conversation_write_entry(fp, ENTRY_TOOL_RESULT, "c2", "tool2", "ok2", 0, 0, "srv");
-    conversation_write_entry(fp, ENTRY_ASSISTANT, "A3", "m2", &u1);
+    conversation_write_entry(fp, ENTRY_ASSISTANT, "A3", "", "m2", &u1);
     if (fp) fclose(fp);
 
     json_message *msgs = NULL;
@@ -444,7 +533,7 @@ void test_read_last_assistant_simple(void) {
     conversation_write_meta(fp, "h", "r");
     conversation_write_entry(fp, ENTRY_USER, "Hi", "cli");
     usage_info u = {5, 10, 15};
-    conversation_write_entry(fp, ENTRY_ASSISTANT, "Hello there!", "gpt-4o", &u);
+    conversation_write_entry(fp, ENTRY_ASSISTANT, "Hello there!", "", "gpt-4o", &u);
     if (fp) fclose(fp);
 
     char *content = NULL;
@@ -468,12 +557,12 @@ void test_read_last_assistant_multiple(void) {
     fp = path ? fopen(path, "a") : NULL;
     conversation_write_entry(fp, ENTRY_USER, "Q1", "cli");
     usage_info u = {5, 10, 15};
-    conversation_write_entry(fp, ENTRY_ASSISTANT, "Answer 1", "gpt-4o", &u);
+    conversation_write_entry(fp, ENTRY_ASSISTANT, "Answer 1", "", "gpt-4o", &u);
     conversation_write_entry(fp, ENTRY_USER, "Q2", "cli");
-    conversation_write_entry(fp, ENTRY_ASSISTANT, "", "gpt-4o", (const usage_info *)NULL);
+    conversation_write_entry(fp, ENTRY_ASSISTANT, "", "", "gpt-4o", (const usage_info *)NULL);
     conversation_write_entry(fp, ENTRY_TOOL_CALL, "c1", "t1", "{}", "srv");
     conversation_write_entry(fp, ENTRY_TOOL_RESULT, "c1", "t1", "ok", 0, 0, "srv");
-    conversation_write_entry(fp, ENTRY_ASSISTANT, "Final answer", "gpt-4o", &u);
+    conversation_write_entry(fp, ENTRY_ASSISTANT, "Final answer", "", "gpt-4o", &u);
     if (fp) fclose(fp);
 
     char *content = NULL;
