@@ -189,4 +189,6 @@ and phased work plan.
 
 ## License
 
-See the project repository for license information.
+This project is licensed under the GNU General Public License v3.0 or later - see the [LICENSE](LICENSE.md) file for details.
+
+Copyright (C) 2026 Daniele Guttuso
