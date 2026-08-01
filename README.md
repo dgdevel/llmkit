@@ -73,7 +73,7 @@ The `--mode <type>` flag controls stdout output:
 
 The `--steer` flag enables **steering**: while the agent runs, it reads
 additional user messages from **stdin** and injects them into the
-conversation at the next turn boundary — the earliest point the LLM can
+conversation at the next turn boundary - the earliest point the LLM can
 legally see them. This lets you course-correct a running agent (e.g. "stop
 searching, just summarize what you have").
 
@@ -100,7 +100,7 @@ before the run would complete. Messages typed during a blocking LLM call or
 a tool call simply queue in the stdin buffer and are delivered at the next
 turn. The OpenAI API forbids interleaving a user message between an
 assistant's `tool_calls` and their `tool_results`, so mid-turn injection is
-not possible — the turn boundary *is* the earliest legal and practical
+not possible - the turn boundary *is* the earliest legal and practical
 delivery point.
 
 Injected messages are written to the conversation JSONL as `"user"` entries
@@ -114,13 +114,13 @@ llmkit is driven by a single YAML config file passed via `-c <config.yml>`.
 Both modes (`agent` and `proxy`) share the same schema; the difference is which
 root keys are accepted.
 
-See **[docs/configuration.md](docs/configuration.md)** for the full reference:
+See [docs/configuration.md](docs/configuration.md) for the full reference:
 the `llm`, `mcps`, and `agent` fields, all MCP server options, and example
 agent/proxy configs.
 
 ## Exit codes
 
-Both commands use the same numeric scheme:
+All commands use the same numeric scheme:
 
 | Code | Meaning (agent)              | Meaning (proxy)                          | Meaning (response)                   |
 |------|------------------------------|------------------------------------------|--------------------------------------|
@@ -167,7 +167,7 @@ written to stderr and are automatically suppressed when stderr is not a TTY,
 keeping stdout/stderr pipes clean for the JSONL file and exit codes.
 
 In **quiet mode** (`--mode quiet`, the default), these progress lines are
-suppressed entirely — even when stderr is a TTY — so only the final assistant
+suppressed entirely - even when stderr is a TTY - so only the final assistant
 response appears on stdout and nothing else is printed. The `[stats]` token
 summary is likewise silenced. Use `--mode debug` or `--mode stream` if you want
 the progress lines while the agent runs.
