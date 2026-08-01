@@ -63,7 +63,7 @@ TIDY_FLAGS := -std=c17 -D_DEFAULT_SOURCE -I $(SRCDIR) \
 .PHONY: all debug profile test clean install uninstall dist check-ascii \
         vendors check-deps test_utf8 test_util test_config test_jsonrpc test_transport \
         test_mcp test_conversation test_llm test_cli test_agent test_proxy \
-        format format-check lint lint-analyzer
+        format format-check lint lint-analyzer windows windows32 clean-win
 
 # The build phase runs the ASCII check, the format check, and the linter
 # before compiling. Skip with `make $(TARGET)` if you only need the binary.
@@ -144,6 +144,18 @@ install: $(TARGET)
 
 uninstall:
 	rm -f $(DESTDIR)/usr/local/bin/$(TARGET)
+
+# --- Cross-compilation (Linux -> Windows via MinGW-w64) --------------------
+# The cross-build logic lives in Makefile.cross. These targets delegate to it
+# so `make windows` / `make windows32` work from the project root.
+windows:
+	$(MAKE) -f Makefile.cross windows
+
+windows32:
+	$(MAKE) -f Makefile.cross windows32
+
+clean-win:
+	$(MAKE) -f Makefile.cross clean-win
 
 dist: all
 	strip $(TARGET)

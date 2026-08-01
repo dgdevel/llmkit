@@ -56,7 +56,7 @@ endif
 override MINGW_CFLAGS += $(MINGW_YAML_CFLAGS) $(MINGW_CURL_CFLAGS) $(MINGW_CRYPTO_CFLAGS) $(MINGW_CJSON_CFLAGS)
 MINGW_ALL_LIBS := $(MINGW_YAML_LIBS) $(MINGW_CURL_LIBS) $(MINGW_CRYPTO_LIBS) $(MINGW_SSL_LIBS) $(MINGW_CJSON_LIBS) -lws2_32 -lbcrypt
 
-.PHONY: windows windows64 windows32 clean-win check-ascii format format-check lint
+.PHONY: windows windows64 windows32 clean-win check-ascii format format-check lint lint-analyzer
 
 # Cross build runs the same host-side gates (ASCII / format / lint) as the
 # native build, then cross-compiles. clang-tidy is host-only - it never
@@ -112,11 +112,29 @@ TIDY_FLAGS := -std=c17 -D_DEFAULT_SOURCE -I $(SRCDIR) \
               $(HOST_YAML_CFLAGS) $(HOST_CURL_CFLAGS) \
               $(HOST_CRYPTO_CFLAGS) $(HOST_CJSON_CFLAGS)
 
+# --- Static analysis (clang-tidy) ---------------------------------------
+# Runs clang-tidy in parallel over every translation unit in src/ and tests/.
+# Warnings are promoted to errors via --warnings-as-errors so the build fails
+# on any lint violation. The checks and naming rules live in .clang-tidy at the
+# project root. This is a host-side gate identical to the main Makefile's.
+#
+# `clang-analyzer-*` checks are *expensive* (path-sensitive symbolic execution)
+# and are excluded from the default lint target. Run `make -f Makefile.cross
+# lint-analyzer` to include them (e.g. pre-commit or CI on-demand).
+#
+#   make -f Makefile.cross lint          -- fast: all checks except clang-analyzer
+#   make -f Makefile.cross lint-analyzer -- deep: full checks including clang-analyzer
+#
 lint:
-	@set -e; \
-	for src in $(LINT_SOURCES); do \
-		printf "[clang-tidy] %s\n" "$$src"; \
-		$(CLANG_TIDY) --quiet --warnings-as-errors='*' \
-		              --config-file=.clang-tidy \
-		              "$$src" -- $(TIDY_FLAGS); \
-	done
+	@printf "%s\n" $(LINT_SOURCES) | \
+	  xargs -P $$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2) -r -I{} \
+	    $(CLANG_TIDY) --quiet --warnings-as-errors='*' \
+	      --config-file=.clang-tidy --checks='-clang-analyzer-*' \
+	      "{}" -- $(TIDY_FLAGS)
+
+lint-analyzer:
+	@printf "%s\n" $(LINT_SOURCES) | \
+	  xargs -P $$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2) -r -I{} \
+	    $(CLANG_TIDY) --quiet --warnings-as-errors='*' \
+	      --config-file=.clang-tidy \
+	      "{}" -- $(TIDY_FLAGS)
