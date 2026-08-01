@@ -2,9 +2,9 @@
 
 A lightweight CLI tool to interact with LLMs and MCP from shell applications, for Windows, Linux and MacOS.
 
-A quick example:
-```bash
-$ cat config.yml
+A quick example `config.yml`:
+
+```yaml
 llm:
   api_base: "http://127.0.0.1:8000/v1"
 agent:
@@ -12,7 +12,11 @@ agent:
 mcps:
   - name: "calculator"
     cmdline: "uvx mcp-server-calculator"
+```
 
+Usage:
+
+```bash
 $ llmkit agent -c config.yml --conversation convo.jsonl -p "How much is 3 + 3?"
 3 + 3 is 6.
 $ llmkit agent -c config.yml --conversation convo.jsonl -p "And if you add 4?"
@@ -23,7 +27,7 @@ If you add 4, the total is 10.
 ## Modes of operation
 
 - **`llmkit agent`** -- Runs an LLM conversation loop with MCP tool support.
-  Reads a YAML config, loads conversation history from JSONL, calls the LLM
+  Reads a YAML config, loads conversation history from JSONL (if existing, otherwise it will create it), calls the LLM
   API, executes MCP tool calls, and writes results back to the JSONL file.
 - **`llmkit proxy`** -- Runs an MCP proxy server that fronts one or more
   backend MCP servers, providing namespace isolation, rename/redefine, and
