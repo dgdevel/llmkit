@@ -221,6 +221,34 @@ def main():
           meta.get("config_hash", "").startswith("sha256:"), f"meta={meta}")
     check("meta run_id is uuid", len(meta.get("run_id", "")) == 36, f"meta={meta}")
 
+    # -------------------------------------------------------------------
+    # Scenario B: agent without --conversation (ephemeral, discarded).
+    # The conversation still runs to completion but the temp JSONL file is
+    # deleted at the end. We use a private TMPDIR so the discard is
+    # observable and deterministic.
+    # -------------------------------------------------------------------
+    eph_tmp = os.path.join(tmp, "ephemeral_tmpdir")
+    os.makedirs(eph_tmp, exist_ok=True)
+    # Clear any pre-existing entries (e.g. from a prior run).
+    for f in os.listdir(eph_tmp):
+        os.unlink(os.path.join(eph_tmp, f))
+    check("ephemeral tempdir empty before run", os.listdir(eph_tmp) == [],
+          f"before={os.listdir(eph_tmp)}")
+
+    env = os.environ.copy()
+    env["TMPDIR"] = eph_tmp
+
+    proc2 = subprocess.run(
+        [BIN, "agent", "-c", cfg_path, "-p", "What time is it?"],
+        capture_output=True, text=True, timeout=30, cwd=ROOT, env=env,
+    )
+    check("ephemeral agent exit code 0", proc2.returncode == 0,
+          f"exit={proc2.returncode} stderr={proc2.stderr[-400:]}")
+    check("ephemeral agent prints final answer",
+          "Done" in (proc2.stdout or ""), f"stdout={proc2.stdout!r}")
+    check("ephemeral conversation discarded (tempdir empty)",
+          os.listdir(eph_tmp) == [], f"after={os.listdir(eph_tmp)}")
+
     print(f"\n{tests_run} checks, {len(tests_failed)} failed")
     return 1 if tests_failed else 0
 

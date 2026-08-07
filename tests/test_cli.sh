@@ -160,6 +160,35 @@ case "$helptxt" in
 esac
 
 # ----------------------------------------------------------------------
+# 8c. agent: --conversation is optional and discarded when omitted
+#     - --help documents the discard behavior
+#     - without --conversation the agent still runs; the temp JSONL is
+#       deleted afterward. Verified via a private TMPDIR.
+# ----------------------------------------------------------------------
+case "$helptxt" in
+    *"--conversation"*"discarded"*) ok "--help documents conversation discard" ;;
+    *) fail "--help documents conversation discard" "not mentioned" ;;
+esac
+
+# Missing -p still errors even without --conversation.
+"$BIN" agent -c "$cfg2" >/dev/null 2>&1
+assert_exit "agent without -p -> exit 2" 2 $?
+
+# Ephemeral run: unreachable LLM (port 1, refused instantly) with no retries.
+# The temp file must be created then deleted; the private TMPDIR ends empty.
+privtmp="$TMP/priv_tmp"
+mkdir -p "$privtmp"
+TMPDIR="$privtmp" "$BIN" agent -c "$cfg2" -p "hi" --max-retries 0 >/dev/null 2>&1
+rc=$?
+assert_exit "ephemeral agent unreachable LLM -> exit 4" 4 $rc
+leftover="$(ls -A "$privtmp" 2>/dev/null)"
+if [ -z "$leftover" ]; then
+    ok "ephemeral conversation discarded (tempdir empty)"
+else
+    fail "ephemeral conversation discarded (tempdir empty)" "leftover: $leftover"
+fi
+
+# ----------------------------------------------------------------------
 # 9. Proxy end-to-end (stdio): namespace + tools/list
 # ----------------------------------------------------------------------
 cfgp="$TMP/proxy_ok.yml"

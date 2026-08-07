@@ -60,4 +60,13 @@ void platform_sleep_ms(int64_t ms);
  * reported as never-ready). */
 int platform_stdin_read_nonblocking(char *buf, size_t size, int *out_eof);
 
+/* Return the system's temporary directory path (e.g. $TMPDIR or "/tmp" on
+ * POSIX, the Windows temp path on Windows). The returned pointer is stable
+ * for the process lifetime and is never NULL. */
+const char *platform_temp_dir(void);
+
+/* Delete the file at the given path. Returns 0 on success or if the file
+ * does not exist; returns -1 on other errors. */
+int platform_delete_file(const char *path);
+
 #endif

@@ -8,12 +8,13 @@
 #include "proxy.h"
 #include "conversation.h"
 #include "util.h"
+#include "platform.h"
 
 static void print_usage(void) {
     fprintf(stderr, "llmkit v" LLMKIT_VERSION "\n"
                     "\n"
                     "Usage:\n"
-                    "  llmkit agent -c <config.yml> --conversation <convo.jsonl> "
+                    "  llmkit agent -c <config.yml> [--conversation <convo.jsonl>] "
                     "-p <prompt|prompt_file> [--mode <type>]\n"
                     "  llmkit proxy -c <config.yml> [-l <host:port>]\n"
                     "  llmkit response --conversation <conversation.jsonl>\n"
@@ -27,7 +28,9 @@ static void print_usage(void) {
                     "  -c, --config <file>        YAML configuration file (agent, proxy)\n"
                     "  --conversation <file>      Conversation JSONL file. The agent\n"
                     "                             appends to it and continues prior turns;\n"
-                    "                             response reads it\n"
+                    "                             optional for agent: if omitted the run\n"
+                    "                             uses a temporary file that is discarded.\n"
+                    "                             Required for response\n"
                     "  -p, --prompt <text|file>   Prompt text, or path to a file with it\n"
                     "                             (agent)\n"
                     "  --mode <type>              Stdout output mode (agent only)\n"
@@ -135,9 +138,8 @@ int main(int argc, char **argv) {
             }
         }
 
-        if (config_path == NULL || convo_path == NULL || prompt_arg == NULL) {
-            fprintf(stderr, "error: agent requires -c <config> --conversation <file> -p "
-                            "<prompt>\n");
+        if (config_path == NULL || prompt_arg == NULL) {
+            fprintf(stderr, "error: agent requires -c <config> -p <prompt>\n");
             return EXIT_ARGS_ERR;
         }
 
@@ -158,8 +160,32 @@ int main(int argc, char **argv) {
             return rc;
         }
 
-        rc = agent_run(&ctx, convo_path, prompt_arg, output_mode, steering, max_retries);
+        /* When no --conversation is given, run against a temporary JSONL file
+         * that is deleted after the run, so the conversation is discarded.
+         * The temp file name embeds the run UUID to avoid collisions. */
+        bool ephemeral = false;
+        char *temp_convo = NULL;
+        const char *convo = convo_path;
+        if (convo == NULL) {
+            const char *tmpdir = platform_temp_dir();
+            size_t n = strlen(tmpdir) + sizeof("/llmkit-.jsonl") + sizeof(ctx.run_id);
+            temp_convo = malloc(n);
+            if (temp_convo == NULL) {
+                config_free(&ctx);
+                return EXIT_INTERNAL_ERR;
+            }
+            snprintf(temp_convo, n, "%s/llmkit-%s.jsonl", tmpdir, ctx.run_id);
+            convo = temp_convo;
+            ephemeral = true;
+        }
+
+        rc = agent_run(&ctx, convo, prompt_arg, output_mode, steering, max_retries);
         config_free(&ctx);
+
+        if (ephemeral) {
+            platform_delete_file(temp_convo);
+            free(temp_convo);
+        }
         return rc;
     }
 

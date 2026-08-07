@@ -132,7 +132,7 @@ typedef struct {
 Logic:
 1. Check `argv[1]` for subcommand (`agent` or `proxy` or `response`)
 2. Parse remaining args with manual loop (no getopt dependency)
-3. For `agent`: load YAML config via `config_load()`, call `agent_run(ctx, convo_path, prompt)`
+3. For `agent`: load YAML config via `config_load()`. If `--conversation` is omitted, synthesize a temporary JSONL path (`<tmpdir>/llmkit-<run_id>.jsonl`) and delete it after the run, so the conversation is discarded. Call `agent_run(ctx, convo_path, prompt)`
 4. For `proxy`: load YAML config via `config_load()`, call `proxy_run(ctx, listen_addr)`
 5. For `response`: parse `-f` flag, call `conversation_read_last_assistant()`, print to stdout
 
@@ -366,6 +366,10 @@ int  platform_tcp_accept(int fd, int64_t timeout_ms);
 
 // TTY check
 bool platform_stderr_is_tty(void);
+
+// Temp filesystem helpers (used by the agent when --conversation is omitted)
+const char *platform_temp_dir(void);   // $TMPDIR or /tmp on POSIX, GetTempPath on Windows
+int platform_delete_file(const char *path);  // unlink()/DeleteFile(); ENOENT is success
 ```
 
 | Function | Linux Implementation | Windows Implementation |
@@ -382,6 +386,8 @@ bool platform_stderr_is_tty(void);
 | `platform_tcp_listen` | `socket()` + `bind()` + `listen()` | `WSASocket()` + `bind()` + `listen()` (WSAStartup on first call) |
 | `platform_tcp_accept` | `accept()` with `poll()` timeout | `WSAAccept()` with `WSAEventSelect()` timeout |
 | `platform_stderr_is_tty` | `isatty(STDERR_FILENO)` | `_isatty(_fileno(stderr))` |
+| `platform_temp_dir` | `getenv("TMPDIR")` else `/tmp` | `GetTempPathA()` |
+| `platform_delete_file` | `unlink()` | `DeleteFileA()` |
 
 The header selects implementation via `#ifdef _WIN32`:
 

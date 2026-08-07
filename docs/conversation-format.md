@@ -2,6 +2,12 @@
 
 LLMKIT records every agent conversation as a **JSONL** (JSON Lines) file — one JSON object per line, terminated by `\n`. Each line is a standalone **entry** typed by a `"type"` field.
 
+The file path is set with `--conversation <file>`; the agent appends to it and
+continues prior turns. When `--conversation` is omitted, the agent runs against a
+temporary file (in the system temp directory) that is deleted when the run ends,
+so the conversation is discarded — useful for one-shot prompts. In both cases the
+on-disk format is identical.
+
 ```plaintext
 {"type":"meta","timestamp":"...","version":1,"config_hash":"sha256:...","run_id":"..."}
 {"type":"user","timestamp":"...","content":"What is the weather?","source":"cli"}

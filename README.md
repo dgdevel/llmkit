@@ -22,6 +22,10 @@ $ llmkit agent -c config.yml --conversation convo.jsonl -p "How much is 3 + 3?"
 $ llmkit agent -c config.yml --conversation convo.jsonl -p "And if you add 4?"
 If you add 4, the total is 10.
 
+# Or run a one-shot conversation with no persisted file (discarded at the end):
+$ llmkit agent -c config.yml -p "How much is 3 + 3?"
+3 + 3 is 6.
+
 ```
 
 ## Modes of operation
@@ -44,7 +48,7 @@ MinGW-w64 cross-compilation).
 ## Usage
 
 ```bash
-llmkit agent -c <agent_config.yml> --conversation <convo.jsonl> -p <prompt|prompt_file> [--mode <type>] [--steer] [--max-retries <n>]
+llmkit agent -c <agent_config.yml> [--conversation <convo.jsonl>] -p <prompt|prompt_file> [--mode <type>] [--steer] [--max-retries <n>]
 llmkit proxy -c <proxy_config.yml> [-l <host:port>]
 llmkit response --conversation <conversation.jsonl>
 ```
@@ -52,9 +56,13 @@ llmkit response --conversation <conversation.jsonl>
 If `-l` (or `--listen`) is omitted from `proxy`, it runs as a stdio MCP server (reads
 JSON-RPC from stdin, writes to stdout). With `-l host:port` it serves HTTP.
 
-The `response` command reads the given `--conversation` JSONL file, finds the last
-`"type":"assistant"` entry, and prints its `content` field to stdout.
-Returns empty output if no assistant entry exists.
+The `--conversation` flag is **optional** for `agent`. When given, the agent
+appends to the JSONL file and continues prior turns; when omitted, the run uses
+a temporary file that is deleted at the end, so the conversation is discarded.
+This is handy for one-shot prompts where you do not need to persist history.
+The `response` command always requires `--conversation` (it reads an existing
+file). It finds the last `"type":"assistant"` entry and prints its `content`
+field to stdout. Returns empty output if no assistant entry exists.
 
 ### Prompt resolution (`agent`)
 

@@ -476,3 +476,31 @@ int platform_stdin_read_nonblocking(char *buf, size_t size, int *out_eof) {
     return (int)n;
 #endif
 }
+
+const char *platform_temp_dir(void) {
+#ifdef _WIN32
+    static char buf[MAX_PATH];
+    DWORD len = GetTempPathA(sizeof(buf), buf);
+    if (len == 0 || len >= sizeof(buf)) return ".";
+    /* GetTempPath returns a trailing separator; strip it. */
+    if (len > 0 && (buf[len - 1] == '\\' || buf[len - 1] == '/')) buf[len - 1] = '\0';
+    return buf;
+#else
+    const char *t = getenv("TMPDIR");
+    if (t != NULL && t[0] != '\0') return t;
+    return "/tmp";
+#endif
+}
+
+int platform_delete_file(const char *path) {
+    if (path == NULL) return -1;
+#ifdef _WIN32
+    if (DeleteFileA(path)) return 0;
+    if (GetLastError() == ERROR_FILE_NOT_FOUND) return 0;
+    return -1;
+#else
+    if (unlink(path) == 0) return 0;
+    if (errno == ENOENT) return 0;
+    return -1;
+#endif
+}

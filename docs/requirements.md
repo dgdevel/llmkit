@@ -13,7 +13,7 @@
 
 ### Usage
 ```
-llmkit agent -c <agent_config.yml> --conversation <convo.jsonl> -p <prompt|prompt_file> [--mode <type>]
+llmkit agent -c <agent_config.yml> [--conversation <convo.jsonl>] -p <prompt|prompt_file> [--mode <type>]
 
 llmkit proxy -c <proxy_config.yml> [-l <host:port>]
 
@@ -26,7 +26,7 @@ llmkit response --conversation <conversation.jsonl>
 | Flag | Required | Description |
 |------|----------|-------------|
 | `-c`, `--config` | Yes | Path to YAML configuration file |
-| `--conversation` | Yes | Path to conversation JSONL file. The agent appends to it and continues prior turns |
+| `--conversation` | No | Path to conversation JSONL file. The agent appends to it and continues prior turns. If omitted, the run uses a temporary file that is deleted at the end, so the conversation is discarded |
 | `-p`, `--prompt` | Yes | User prompt text OR path to file containing prompt |
 | `--mode` | No | Stdout output mode: `quiet` (default), `debug`, or `stream` |
 
@@ -336,7 +336,7 @@ To feed conversation history to LLM:
 1. Parse CLI arguments
 2. Load and parse config YAML
 3. Validate required fields (`llm.api_base`)
-4. Open/create conversation JSONL (append mode)
+4. Open/create conversation JSONL (append mode). If `--conversation` was not supplied, the path is a synthesized temporary file (`<tmpdir>/llmkit-<run_id>.jsonl`) that is deleted when the run ends
 5. Write `meta` entry
 6. Resolve prompt (file or literal)
 7. Write `user` entry
