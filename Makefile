@@ -63,7 +63,8 @@ TIDY_FLAGS := -std=c17 -D_DEFAULT_SOURCE -I $(SRCDIR) \
 .PHONY: all debug profile test clean install uninstall dist check-ascii \
         vendors check-deps test_utf8 test_util test_config test_jsonrpc test_transport \
         test_mcp test_conversation test_llm test_cli test_agent test_proxy \
-        format format-check lint lint-analyzer windows windows32 clean-win
+        format format-check lint lint-analyzer windows windows32 clean-win \
+        macos dist-linux dist-windows dist-macos
 
 # The build phase runs the ASCII check, the format check, and the linter
 # before compiling. Skip with `make $(TARGET)` if you only need the binary.
@@ -137,7 +138,7 @@ TEST_BINS := tests/test_utf8 tests/test_util tests/test_config tests/test_jsonrp
              tests/test_steering
 
 clean:
-	rm -rf $(OBJDIR) $(TARGET) build-win llmkit.exe $(TEST_BINS)
+	rm -rf $(OBJDIR) $(TARGET) build-win llmkit.exe $(TEST_BINS) dist
 
 install: $(TARGET)
 	install -m 755 $(TARGET) $(DESTDIR)/usr/local/bin/$(TARGET)
@@ -157,11 +158,72 @@ windows32:
 clean-win:
 	$(MAKE) -f Makefile.cross clean-win
 
-dist: all
+# --- Native macOS build ------------------------------------------------------
+# macOS ships LibreSSL (no <openssl/sha.h>) and a keg-only Homebrew OpenSSL,
+# so the Homebrew prefix must be on PKG_CONFIG_PATH for the libcrypto probe to
+# succeed. This target finds Homebrew openssl@3 (falling back to openssl) and
+# exports its pkgconfig dir before re-invoking the native build.
+#
+# macOS has NO cross-compile path from Linux (no standard toolchain like
+# MinGW), so this target refuses to run off macOS. Verify macOS builds via a
+# macOS CI runner or by running `make macos` on a real Mac.
+macos:
+	@if [ "$$(uname -s)" != "Darwin" ]; then \
+		echo "Error: 'make macos' builds natively on macOS and cannot be cross-compiled." >&2; \
+		echo "       Run it on a Mac, or verify via a macOS CI runner." >&2; \
+		exit 1; \
+	fi
+	@brew_prefix=$$(brew --prefix openssl@3 2>/dev/null || brew --prefix openssl 2>/dev/null); \
+	if [ -n "$$brew_prefix" ] && [ -d "$$brew_prefix/lib/pkgconfig" ]; then \
+		echo "[macos] using Homebrew OpenSSL at $$brew_prefix"; \
+		export PKG_CONFIG_PATH="$$brew_prefix/lib/pkgconfig:$$PKG_CONFIG_PATH"; \
+	else \
+		echo "[macos] no Homebrew OpenSSL found; assuming libcrypto is already on the pkg-config path"; \
+	fi; \
+	$(MAKE) $(TARGET)
+
+# --- Release archives for all supported platforms ----------------------------
+# `dist` dispatches by host OS:
+#   Linux  -> per-platform archives for Linux (native) + Windows (cross-compiled)
+#   macOS  -> per-platform archive for macOS (native; Linux/Windows not built here)
+# Each archive contains the stripped binary + README + LICENSE + docs/.
+HOST_OS   := $(shell uname -s)
+WIN_TARGET := llmkit.exe
+VERSION    := $(shell git describe --tags 2>/dev/null || echo "dev")
+DIST_DOCS  := README.md LICENSE.md docs/
+
+ifeq ($(HOST_OS),Linux)
+dist: dist-linux dist-windows
+else ifeq ($(HOST_OS),Darwin)
+dist: dist-macos
+else
+dist:
+	@echo "Error: unsupported host OS for 'make dist': $(HOST_OS)" >&2; exit 1
+endif
+
+dist-linux: all
+	@if [ "$(HOST_OS)" != "Linux" ]; then \
+		echo "Error: 'make dist-linux' builds the Linux native binary and must run on Linux." >&2; exit 1; \
+	fi
+	@mkdir -p dist
 	strip $(TARGET)
-	tar czf llmkit-$(shell git describe --tags 2>/dev/null || echo "dev").tar.gz \
-		$(TARGET) README.md docs/ Makefile Makefile.cross \
-		.clang-format .clang-tidy scripts/ src/ tests/
+	tar czf dist/llmkit-linux-x86_64-$(VERSION).tar.gz $(TARGET) $(DIST_DOCS)
+	@echo "[dist] -> dist/llmkit-linux-x86_64-$(VERSION).tar.gz"
+
+dist-windows: windows
+	@if [ "$(HOST_OS)" != "Linux" ]; then \
+		echo "Error: 'make dist-windows' cross-compiles from a Linux host." >&2; exit 1; \
+	fi
+	@mkdir -p dist
+	x86_64-w64-mingw32-strip $(WIN_TARGET)
+	zip -qr dist/llmkit-windows-x86_64-$(VERSION).zip $(WIN_TARGET) $(DIST_DOCS)
+	@echo "[dist] -> dist/llmkit-windows-x86_64-$(VERSION).zip"
+
+dist-macos: macos
+	@mkdir -p dist
+	strip $(TARGET)
+	tar czf dist/llmkit-macos-x86_64-$(VERSION).tar.gz $(TARGET) $(DIST_DOCS)
+	@echo "[dist] -> dist/llmkit-macos-x86_64-$(VERSION).tar.gz"
 
 vendors:
 	@echo "Fetching vendored dependencies..."

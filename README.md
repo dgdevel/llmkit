@@ -36,8 +36,10 @@ If you add 4, the total is 10.
   last LLM assistant response to stdout. Useful for extracting the final
   answer from a completed conversation.
 
-The binary is statically linkable, has zero runtime language dependencies,
-and targets Linux, macOS, and Windows (via MinGW-w64 cross-compilation).
+The binary is statically linkable on Linux and Windows (zero runtime language
+dependencies), and dynamically linked on macOS (static linking is not
+idiomatic on macOS). It targets Linux, macOS, and Windows (Windows via
+MinGW-w64 cross-compilation).
 
 ## Usage
 
@@ -156,13 +158,46 @@ make debug      # ASAN + debug symbols
 make test       # all unit + integration tests
 make windows    # cross-compile 64-bit Windows .exe -> llmkit.exe
 make windows32  # cross-compile 32-bit Windows .exe
-make dist       # release tarball (stripped binary + sources)
+make macos      # native build on macOS (must run on a Mac)
+make dist       # release archives for all platforms buildable on this host
 make install    # copy binary to /usr/local/bin
 ```
 
 The build runs an ASCII-source check, clang-format verification, and
 clang-tidy linting before compiling. These can be skipped by building the
 target directly: `make llmkit`.
+
+#### macOS notes
+
+macOS cannot be cross-compiled from Linux (no standard toolchain like
+MinGW exists for it), so `make macos` runs a **native** build and refuses to
+run anywhere else. To build on a Mac:
+
+```bash
+brew install pkg-config libyaml openssl@3
+make macos          # sets the Homebrew openssl pkg-config path automatically
+```
+
+macOS ships **LibreSSL**, not OpenSSL, and Homebrew's `openssl@3` is
+keg-only, so `<openssl/sha.h>` is only found via `pkg-config`. `make macos`
+handles this for you. Note that the format/lint gates require `clang-format`
+and `clang-tidy` (not in the Xcode Command Line Tools); install LLVM
+(`brew install llvm`) to run the full `make`, or use `make macos` which builds
+the binary directly.
+
+#### Release archives (`make dist`)
+
+`make dist` produces one archive per platform that can be built on the
+current host:
+
+- **Linux host**: `llmkit-linux-x86_64-<ver>.tar.gz` (native) and
+  `llmkit-windows-x86_64-<ver>.zip` (cross-compiled) in `dist/`.
+- **macOS host**: `llmkit-macos-x86_64-<ver>.tar.gz` (native) in `dist/`.
+
+Because the macOS binary can only be built on macOS, produce it from a
+macOS host (`make dist`) or a macOS CI runner and attach it to the same
+release. Archives contain the stripped binary plus `README.md`,
+`LICENSE.md`, and `docs/`.
 
 ## Activity logging
 
