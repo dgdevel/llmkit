@@ -8,6 +8,6 @@
 #define RUN_MODE_STREAM "stream"
 
 int agent_run(runtime_ctx *ctx, const char *convo_path, const char *prompt, const char *run_mode,
-              bool steering);
+              bool steering, int max_retries);
 
 #endif

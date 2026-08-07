@@ -44,7 +44,7 @@ MinGW-w64 cross-compilation).
 ## Usage
 
 ```bash
-llmkit agent -c <agent_config.yml> --conversation <convo.jsonl> -p <prompt|prompt_file> [--mode <type>] [--steer]
+llmkit agent -c <agent_config.yml> --conversation <convo.jsonl> -p <prompt|prompt_file> [--mode <type>] [--steer] [--max-retries <n>]
 llmkit proxy -c <proxy_config.yml> [-l <host:port>]
 llmkit response --conversation <conversation.jsonl>
 ```
@@ -113,6 +113,27 @@ Injected messages are written to the conversation JSONL as `"user"` entries
 with `"source":"steer"`. In `debug` mode a `steer:` line is emitted; in
 `stream` mode a `{"type":"steer",...}` JSONL event is emitted. Steering is
 silent in `quiet` mode.
+
+### Retries (`agent`)
+
+The `--max-retries <n>` flag controls how many times the agent retries a
+failed LLM request before giving up (default: **5**). `n` is a
+non-negative integer; `0` disables retries entirely and fails immediately,
+while an invalid value (non-numeric or negative) exits with code 2.
+
+Between retries the agent waits a number of seconds that follows the
+**Fibonacci sequence** — the *k*-th retry waits `fib(k)` seconds:
+
+| Retry | 1 | 2 | 3 | 4 | 5 | 6  | 7  | 8  | 9  | 10 |
+|-------|---|---|---|---|---|----|----|----|----|-----|
+| Delay | 1 | 1 | 2 | 3 | 5 | 8  | 13 | 21 | 34 | 55  |
+
+so the cumulative wait grows as 1, 2, 4, 7, 12, 20, ... seconds. A request
+that ultimately fails after exhausting all retries returns exit code 4
+(LLM error). In `debug` mode each attempt emits a
+`retry: attempt k/n, waiting Ns` line; in `stream` mode a
+`{"type":"retry",...}` JSONL event is emitted. Retries are silent in
+`quiet` mode.
 
 ## Configuration
 

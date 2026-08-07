@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <limits.h>
 #include "llmkit.h"
 #include "config.h"
 #include "agent.h"
@@ -36,6 +37,10 @@ static void print_usage(void) {
                     "  --steer                    Enable steering: read additional user messages\n"
                     "                             from stdin during the run and inject them into\n"
                     "                             the conversation at the next turn (agent only)\n"
+                    "  --max-retries <n>         Number of times to retry a failed LLM request\n"
+                    "                             before giving up (agent only). Each retry waits\n"
+                    "                             a number of seconds following the Fibonacci\n"
+                    "                             sequence (1, 1, 2, 3, 5, 8, ...). Default: 5\n"
                     "  -l, --listen <host:port>   Listen address; omit for stdio mode (proxy)\n"
                     "  -h, --help                 Print this help and exit\n"
                     "  -V, --version              Print version and exit\n");
@@ -101,6 +106,22 @@ int main(int argc, char **argv) {
         const char *output_mode = get_flag(argc, argv, NULL, "--mode");
         bool steering = has_flag(argc, argv, NULL, "--steer");
 
+        /* --max-retries: optional, non-negative integer. Default 5. */
+        const char *retries_arg = get_flag(argc, argv, NULL, "--max-retries");
+        int max_retries = 5;
+        if (retries_arg != NULL) {
+            char *end = NULL;
+            long val = strtol(retries_arg, &end, 10);
+            if (end == retries_arg || *end != '\0' || val < 0 || val > INT_MAX) {
+                fprintf(stderr,
+                        "error: invalid --max-retries '%s' (must be a non-negative "
+                        "integer)\n",
+                        retries_arg);
+                return EXIT_ARGS_ERR;
+            }
+            max_retries = (int)val;
+        }
+
         /* Default output mode. */
         if (output_mode == NULL) {
             output_mode = RUN_MODE_QUIET;
@@ -137,7 +158,7 @@ int main(int argc, char **argv) {
             return rc;
         }
 
-        rc = agent_run(&ctx, convo_path, prompt_arg, output_mode, steering);
+        rc = agent_run(&ctx, convo_path, prompt_arg, output_mode, steering, max_retries);
         config_free(&ctx);
         return rc;
     }

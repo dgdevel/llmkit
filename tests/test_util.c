@@ -147,6 +147,26 @@ static void test_log_activity(void) {
     log_activity("[test] plain message");
 }
 
+static void test_fibonacci(void) {
+    /* 1-indexed Fibonacci: F(1)=1, F(2)=1, F(3)=2, F(4)=3, F(5)=5, ... */
+    CHECK_EQ(util_fibonacci(0), 0, "F(0) should be 0");
+    CHECK_EQ(util_fibonacci(-1), 0, "F(negative) should be 0");
+    CHECK_EQ(util_fibonacci(1), 1, "F(1) should be 1");
+    CHECK_EQ(util_fibonacci(2), 1, "F(2) should be 1");
+    CHECK_EQ(util_fibonacci(3), 2, "F(3) should be 2");
+    CHECK_EQ(util_fibonacci(4), 3, "F(4) should be 3");
+    CHECK_EQ(util_fibonacci(5), 5, "F(5) should be 5");
+    CHECK_EQ(util_fibonacci(6), 8, "F(6) should be 8");
+    CHECK_EQ(util_fibonacci(7), 13, "F(7) should be 13");
+    CHECK_EQ(util_fibonacci(8), 21, "F(8) should be 21");
+    CHECK_EQ(util_fibonacci(9), 34, "F(9) should be 34");
+    CHECK_EQ(util_fibonacci(10), 55, "F(10) should be 55");
+    /* recurrence: F(n) = F(n-1) + F(n-2) */
+    int64_t fm2 = util_fibonacci(40);
+    int64_t fm1 = util_fibonacci(41);
+    CHECK_EQ(util_fibonacci(42), fm1 + fm2, "recurrence F(42)=F(41)+F(40)");
+}
+
 int main(void) {
     fprintf(stderr, "=== test_util ===\n");
 
@@ -157,6 +177,7 @@ int main(void) {
     test_read_file();
     test_strdup();
     test_log_activity();
+    test_fibonacci();
 
     fprintf(stderr, "\n%d tests, %d failed\n", tests_run, tests_failed);
     return tests_failed > 0 ? 1 : 0;

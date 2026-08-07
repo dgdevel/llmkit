@@ -62,7 +62,7 @@ TIDY_FLAGS := -std=c17 -D_DEFAULT_SOURCE -I $(SRCDIR) \
 
 .PHONY: all debug profile test clean install uninstall dist check-ascii \
         vendors check-deps test_utf8 test_util test_config test_jsonrpc test_transport \
-        test_mcp test_conversation test_llm test_cli test_agent test_proxy \
+        test_mcp test_conversation test_llm test_cli test_agent test_agent_retries test_proxy \
         format format-check lint lint-analyzer windows windows32 clean-win \
         macos dist-linux dist-windows dist-macos
 
@@ -256,7 +256,7 @@ check-deps:
 	@echo "Done."
 
 test: test_utf8 test_util test_config test_jsonrpc test_transport test_mcp test_conversation test_llm \
-       test_steering test_cli test_agent test_proxy
+       test_steering test_cli test_agent test_agent_retries test_proxy
 	@echo "All tests passed."
 
 test_utf8: tests/test_utf8.c src/utf8.c
@@ -303,6 +303,9 @@ test_cli: $(TARGET)
 
 test_agent: $(TARGET) tests/fixtures/fake_mcp.py tests/test_agent_integration.py
 	python3 tests/test_agent_integration.py
+
+test_agent_retries: $(TARGET) tests/test_agent_retries.py
+	python3 tests/test_agent_retries.py
 
 test_proxy: $(TARGET) tests/fixtures/fake_mcp.py tests/test_proxy_integration.py
 	python3 tests/test_proxy_integration.py

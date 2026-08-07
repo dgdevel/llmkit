@@ -24,6 +24,20 @@ int64_t util_parse_duration(const char *s) {
     return -1;
 }
 
+int64_t util_fibonacci(int n) {
+    /* 1-indexed Fibonacci: F(1)=1, F(2)=1, F(3)=2, F(4)=3, F(5)=5, ...
+     * Iterative to avoid recursion and integer overflow for small n. */
+    if (n <= 0) return 0;
+    int64_t prev = 0; /* F(0) */
+    int64_t curr = 1; /* F(1) */
+    for (int i = 2; i <= n; i++) {
+        int64_t next = prev + curr;
+        prev = curr;
+        curr = next;
+    }
+    return curr;
+}
+
 void util_timestamp_now(char *buf, size_t len) {
     platform_timestamp_now(buf, len);
 }

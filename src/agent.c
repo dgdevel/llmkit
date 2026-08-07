@@ -21,6 +21,9 @@ static char *g_last_content = NULL;
 /* Whether steering (--steer) is active for this run. */
 static bool g_steering = false;
 
+/* Maximum number of LLM request retries on failure (0 = no retries). */
+static int g_max_retries = 0;
+
 /* Run-mode constants for internal dispatch. */
 #define OM_QUIET  0
 #define OM_DEBUG  1
@@ -255,6 +258,28 @@ static void emit_error_event(int code, const char *message) {
     }
 }
 
+/* Emit a retry event: an LLM request failed and will be retried after the
+ * given backoff delay. Stream mode emits a JSONL event; debug mode a
+ * timestamped line; quiet mode is silent. */
+static void emit_retry_event(int attempt, int max_retries, int64_t delay_s) {
+    int om = g_om;
+    if (om == OM_STREAM) {
+        char ts[64];
+        util_timestamp_now(ts, sizeof(ts));
+        cJSON *event = cJSON_CreateObject();
+        cJSON_AddStringToObject(event, "type", "retry");
+        cJSON_AddNumberToObject(event, "attempt", attempt);
+        cJSON_AddNumberToObject(event, "max_retries", max_retries);
+        cJSON_AddNumberToObject(event, "delay_seconds", (double)delay_s);
+        cJSON_AddStringToObject(event, "timestamp", ts);
+        emit_event(event);
+        cJSON_Delete(event);
+    } else if (om == OM_DEBUG) {
+        emit_debug("retry: attempt %d/%d, waiting %llds", attempt, max_retries, (long long)delay_s);
+    }
+    /* quiet: nothing */
+}
+
 /* Print the final assistant content (quiet mode only). */
 static void emit_quiet_final(void) {
     if (g_om != OM_QUIET) return;
@@ -425,23 +450,53 @@ static int conversation_loop(runtime_ctx *ctx, FILE *fp) {
             return rc;
         }
 
-        /* ---- Call LLM ---- */
+        /* ---- Call LLM (with retry + Fibonacci backoff) ---- */
         char *content = NULL;
         char *reasoning = NULL;
         char *model = NULL;
         tool_call *calls = NULL;
         int call_count = 0;
         usage_info usage;
+        memset(&usage, 0, sizeof(usage));
         int64_t t0 = platform_now_ms();
 
         rc = llm_chat_complete(ctx, msgs, msg_count, ctx->tools, ctx->tool_count, &content,
                                &reasoning, &model, &calls, &call_count, &usage);
+
+        /* Retry on LLM API failure, waiting util_fibonacci(k) seconds before
+         * the k-th retry: 1, 1, 2, 3, 5, 8, 13, 21, 34, 55, ... */
+        int retry = 0;
+        while (rc != EXIT_SUCCESS && retry < g_max_retries) {
+            retry++;
+            int64_t delay_s = util_fibonacci(retry);
+            emit_retry_event(retry, g_max_retries, delay_s);
+            log_activity("[retry] LLM call failed, retry %d/%d after %llds", retry, g_max_retries,
+                         (long long)delay_s);
+            platform_sleep_ms(delay_s * 1000);
+
+            /* Discard any partial output from the failed attempt before retrying. */
+            free(content);
+            content = NULL;
+            free(reasoning);
+            reasoning = NULL;
+            free(model);
+            model = NULL;
+            free(calls);
+            calls = NULL;
+            call_count = 0;
+            memset(&usage, 0, sizeof(usage));
+
+            rc = llm_chat_complete(ctx, msgs, msg_count, ctx->tools, ctx->tool_count, &content,
+                                   &reasoning, &model, &calls, &call_count, &usage);
+        }
+
         conversation_free_messages(msgs, msg_count);
 
         int64_t elapsed_ms = platform_now_ms() - t0;
 
         if (rc != EXIT_SUCCESS) {
-            log_activity("[error] LLM API call failed");
+            log_activity("[error] LLM API call failed after %d %s", g_max_retries,
+                         g_max_retries == 1 ? "retry" : "retries");
             emit_error_event(EXIT_LLM_ERR, "LLM API call failed");
             free(content);
             free(reasoning);
@@ -568,13 +623,14 @@ static int conversation_loop(runtime_ctx *ctx, FILE *fp) {
 /* ------------------------------------------------------------------ */
 
 int agent_run(runtime_ctx *ctx, const char *convo_path, const char *prompt, const char *run_mode,
-              bool steering) {
+              bool steering, int max_retries) {
     if (ctx == NULL || convo_path == NULL || prompt == NULL) return EXIT_INTERNAL_ERR;
 
     g_run_mode = run_mode ? run_mode : RUN_MODE_QUIET;
     g_om = resolve_run_mode(g_run_mode);
     g_last_content = NULL;
     g_steering = steering;
+    g_max_retries = max_retries > 0 ? max_retries : 0;
 
     /* Quiet mode: silence all progress diagnostics so the agent prints only
      * the final answer. Debug/stream modes route their own structured output

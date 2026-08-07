@@ -139,6 +139,27 @@ assert_exit "empty literal prompt -> exit 2" 2 $?
 assert_exit "missing config -> exit 1" 1 $?
 
 # ----------------------------------------------------------------------
+# 8b. --max-retries validation (agent only)
+#     Non-numeric / negative values -> exit 2 (args error).
+# ----------------------------------------------------------------------
+"$BIN" agent -c "$cfg2" --conversation "$out2" -p "hi" --max-retries abc >/dev/null 2>&1
+assert_exit "agent --max-retries non-numeric -> exit 2" 2 $?
+
+"$BIN" agent -c "$cfg2" --conversation "$out2" -p "hi" --max-retries -1 >/dev/null 2>&1
+assert_exit "agent --max-retries negative -> exit 2" 2 $?
+
+# --help must mention the flag and its Fibonacci backoff.
+helptxt=$("$BIN" --help 2>&1)
+case "$helptxt" in
+    *"--max-retries"*) ok "--help mentions --max-retries" ;;
+    *) fail "--help mentions --max-retries" "flag missing from help" ;;
+esac
+case "$helptxt" in
+    *"Fibonacci"*) ok "--help documents Fibonacci backoff" ;;
+    *) fail "--help documents Fibonacci backoff" "Fibonacci missing from help" ;;
+esac
+
+# ----------------------------------------------------------------------
 # 9. Proxy end-to-end (stdio): namespace + tools/list
 # ----------------------------------------------------------------------
 cfgp="$TMP/proxy_ok.yml"
