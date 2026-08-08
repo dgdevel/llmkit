@@ -195,7 +195,7 @@ void test_write_assistant(void) {
 
     fp = path ? fopen(path, "a") : NULL;
     ASSERT(fp != NULL, "reopen");
-    usage_info usage = {10, 5, 15};
+    usage_info usage = {.prompt_tokens = 10, .completion_tokens = 5, .total_tokens = 15};
     int rc = conversation_write_entry(fp, ENTRY_ASSISTANT, "Hello back", "", "gpt-4o", &usage);
     ASSERT(rc == EXIT_SUCCESS, "write success");
     if (fp) fclose(fp);
@@ -226,7 +226,7 @@ void test_write_assistant_with_reasoning(void) {
 
     fp = path ? fopen(path, "a") : NULL;
     ASSERT(fp != NULL, "reopen");
-    usage_info usage = {10, 5, 15};
+    usage_info usage = {.prompt_tokens = 10, .completion_tokens = 5, .total_tokens = 15};
     int rc = conversation_write_entry(fp, ENTRY_ASSISTANT, "The answer is 42",
                                       "Let me think... 6*7=42.", "gpt-4o", &usage);
     ASSERT(rc == EXIT_SUCCESS, "write success");
@@ -281,7 +281,7 @@ void test_reconstruct_reasoning(void) {
     fp = path ? fopen(path, "a") : NULL;
     conversation_write_meta(fp, "h", "r");
     conversation_write_entry(fp, ENTRY_USER, "Hi", "cli");
-    usage_info u = {5, 10, 15};
+    usage_info u = {.prompt_tokens = 5, .completion_tokens = 10, .total_tokens = 15};
     conversation_write_entry(fp, ENTRY_ASSISTANT, "Hello!", "Thinking about it...", "gpt-4o", &u);
     if (fp) fclose(fp);
 
@@ -399,7 +399,7 @@ void test_reconstruct_simple(void) {
     fp = path ? fopen(path, "a") : NULL;
     conversation_write_meta(fp, "h", "r");
     conversation_write_entry(fp, ENTRY_USER, "Hi", "cli");
-    usage_info u = {5, 10, 15};
+    usage_info u = {.prompt_tokens = 5, .completion_tokens = 10, .total_tokens = 15};
     conversation_write_entry(fp, ENTRY_ASSISTANT, "Hello!", "", "gpt-4o", &u);
     if (fp) fclose(fp);
 
@@ -461,7 +461,7 @@ void test_reconstruct_roundtrip(void) {
     fp = path ? fopen(path, "a") : NULL;
     conversation_write_meta(fp, "h", "r");
     conversation_write_entry(fp, ENTRY_USER, "Q1", "cli");
-    usage_info u1 = {1, 1, 2};
+    usage_info u1 = {.prompt_tokens = 1, .completion_tokens = 1, .total_tokens = 2};
     conversation_write_entry(fp, ENTRY_ASSISTANT, "A1", "", "m1", &u1);
     conversation_write_entry(fp, ENTRY_USER, "Q2", "cli");
     conversation_write_entry(fp, ENTRY_ASSISTANT, "", "", "m2", (const usage_info *)NULL);
@@ -532,7 +532,7 @@ void test_read_last_assistant_simple(void) {
     fp = path ? fopen(path, "a") : NULL;
     conversation_write_meta(fp, "h", "r");
     conversation_write_entry(fp, ENTRY_USER, "Hi", "cli");
-    usage_info u = {5, 10, 15};
+    usage_info u = {.prompt_tokens = 5, .completion_tokens = 10, .total_tokens = 15};
     conversation_write_entry(fp, ENTRY_ASSISTANT, "Hello there!", "", "gpt-4o", &u);
     if (fp) fclose(fp);
 
@@ -556,7 +556,7 @@ void test_read_last_assistant_multiple(void) {
 
     fp = path ? fopen(path, "a") : NULL;
     conversation_write_entry(fp, ENTRY_USER, "Q1", "cli");
-    usage_info u = {5, 10, 15};
+    usage_info u = {.prompt_tokens = 5, .completion_tokens = 10, .total_tokens = 15};
     conversation_write_entry(fp, ENTRY_ASSISTANT, "Answer 1", "", "gpt-4o", &u);
     conversation_write_entry(fp, ENTRY_USER, "Q2", "cli");
     conversation_write_entry(fp, ENTRY_ASSISTANT, "", "", "gpt-4o", (const usage_info *)NULL);

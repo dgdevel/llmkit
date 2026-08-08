@@ -58,6 +58,26 @@ Array of server entries:
 | `whitelist`            | `[]`      | Proxy: only expose these namespaced names             |
 | `blacklist`            | `[]`      | Proxy: exclude these namespaced names                 |
 
+## Agent (`agent`)
+
+| Key                  | Default   | Description                                                    |
+|----------------------|-----------|----------------------------------------------------------------|
+| `system_prompt`      | (none)    | System prompt prepended to every request (position 0)          |
+| `compact.enabled`    | `false`   | Enable prefix-cache-aware compaction of long conversations     |
+| `compact.max_tokens` | `16384`   | Token budget; compaction triggers when the estimated prompt    |
+|                      |           | exceeds `max_tokens * threshold`                               |
+| `compact.threshold`  | `0.8`     | Fraction of `max_tokens` that triggers compaction (0 < t <= 1) |
+| `compact.summarize`  | `false`   | `true`: summarize the middle of the conversation via the LLM;  |
+|                      |           | `false`: insert a static placeholder instead                   |
+
+Compaction keeps the canonical conversation JSONL untouched (append-only) and
+writes a projection sidecar (`<conversation>.context.json`) so the
+provider-visible prefix (system prompt + pinned early turns + one summary +
+recent tail) stays byte-stable across turns, keeping provider prefix caches
+(e.g. DeepSeek's automatic prefix cache) warm. Activating compaction is a
+deliberate cache-reset point: the first request after it pays one cache miss,
+after which the prefix grows append-only again.
+
 ## Example agent config
 
 ```yaml
@@ -67,6 +87,11 @@ llm:
   model: "llama3"
 agent:
   system_prompt: "You are a helpful assistant."
+  compact:
+    enabled: true
+    max_tokens: 16384
+    threshold: 0.8
+    summarize: false
 mcps:
   - name: fs
     cmdline: "npx -y @modelcontextprotocol/server-filesystem /tmp"

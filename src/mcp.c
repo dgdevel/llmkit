@@ -134,6 +134,23 @@ static void free_tool_defs(tool_def *tools, int count) {
     free(tools);
 }
 
+/* Deterministic ordering for the tool block: sorted by namespaced name (then
+ * server, then original name) so the serialized request stays byte-stable
+ * across runs and turns (provider prefix caches key on those bytes). Empty
+ * slots (calloc'd leftovers) sort last so they never precede real tools. */
+static int tool_def_cmp(const void *a, const void *b) {
+    const tool_def *ta = (const tool_def *)a;
+    const tool_def *tb = (const tool_def *)b;
+    if (ta->name == NULL && tb->name == NULL) return 0;
+    if (ta->name == NULL) return 1;
+    if (tb->name == NULL) return -1;
+    int c = strcmp(ta->name, tb->name);
+    if (c != 0) return c;
+    c = strcmp(ta->mcp_server ? ta->mcp_server : "", tb->mcp_server ? tb->mcp_server : "");
+    if (c != 0) return c;
+    return strcmp(ta->original ? ta->original : "", tb->original ? tb->original : "");
+}
+
 int mcp_discover_tools(runtime_ctx *ctx) {
     if (ctx == NULL) return EXIT_INTERNAL_ERR;
 
@@ -275,6 +292,7 @@ int mcp_discover_tools(runtime_ctx *ctx) {
     }
 
     ctx->tool_count = idx;
+    if (idx > 1) qsort(ctx->tools, (size_t)idx, sizeof(tool_def), tool_def_cmp);
     return EXIT_SUCCESS;
 }
 

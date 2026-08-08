@@ -123,6 +123,16 @@ int conversation_write_entry(FILE *fp, entry_type type, ...) {
                 cJSON_AddNumberToObject(u, "prompt_tokens", usage->prompt_tokens);
                 cJSON_AddNumberToObject(u, "completion_tokens", usage->completion_tokens);
                 cJSON_AddNumberToObject(u, "total_tokens", usage->total_tokens);
+                /* Prefix-cache telemetry; omitted when 0 / not reported so old
+                 * readers and old conversations stay compatible. */
+                if (usage->prompt_cache_hit_tokens > 0)
+                    cJSON_AddNumberToObject(u, "prompt_cache_hit_tokens",
+                                            usage->prompt_cache_hit_tokens);
+                if (usage->prompt_cache_miss_tokens > 0)
+                    cJSON_AddNumberToObject(u, "prompt_cache_miss_tokens",
+                                            usage->prompt_cache_miss_tokens);
+                if (usage->cached_tokens > 0)
+                    cJSON_AddNumberToObject(u, "cached_tokens", usage->cached_tokens);
                 cJSON_AddItemToObject(root, "usage", u);
             }
         }
@@ -497,6 +507,16 @@ int conversation_read_last_assistant(const char *path, char **out_content, char 
                             if (ct && cJSON_IsNumber(ct))
                                 out_usage->completion_tokens = ct->valueint;
                             if (tt && cJSON_IsNumber(tt)) out_usage->total_tokens = tt->valueint;
+                            /* Prefix-cache telemetry (absent when not reported). */
+                            cJSON *pch = cJSON_GetObjectItem(uj, "prompt_cache_hit_tokens");
+                            if (pch && cJSON_IsNumber(pch))
+                                out_usage->prompt_cache_hit_tokens = pch->valueint;
+                            cJSON *pcm = cJSON_GetObjectItem(uj, "prompt_cache_miss_tokens");
+                            if (pcm && cJSON_IsNumber(pcm))
+                                out_usage->prompt_cache_miss_tokens = pcm->valueint;
+                            cJSON *ctd = cJSON_GetObjectItem(uj, "cached_tokens");
+                            if (ctd && cJSON_IsNumber(ctd))
+                                out_usage->cached_tokens = ctd->valueint;
                         }
                     }
                 }

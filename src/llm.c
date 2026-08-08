@@ -72,8 +72,8 @@ static struct curl_slist *headers_to_slist(char **cfg_hdrs, struct curl_slist *b
 /*  Request body builder                                               */
 /* ------------------------------------------------------------------ */
 
-static char *build_request_body(const json_message *msgs, int msg_count, const tool_def *tools,
-                                int tool_count, const llm_cfg *cfg) {
+char *llm_build_request_body(const json_message *msgs, int msg_count, const tool_def *tools,
+                             int tool_count, const llm_cfg *cfg) {
     cJSON *root = cJSON_CreateObject();
     if (root == NULL) return NULL;
 
@@ -196,13 +196,28 @@ static char *build_request_body(const json_message *msgs, int msg_count, const t
     return out;
 }
 
+/* Serialize just the "messages" array of a chat-completion request body,
+ * using the exact same (deterministic) serialization as the request itself.
+ * Used by prefix-cache compaction to hash the covered prefix and to persist
+ * the projection. Returns a malloc'd JSON string, or NULL on failure. */
+char *llm_serialize_messages(const json_message *msgs, int msg_count, const llm_cfg *cfg) {
+    char *body = llm_build_request_body(msgs, msg_count, NULL, 0, cfg);
+    if (body == NULL) return NULL;
+    cJSON *root = cJSON_Parse(body);
+    free(body);
+    if (root == NULL) return NULL;
+    cJSON *arr = cJSON_GetObjectItem(root, "messages");
+    char *out = (arr != NULL) ? cJSON_PrintUnformatted(arr) : NULL;
+    cJSON_Delete(root);
+    return out;
+}
+
 /* ------------------------------------------------------------------ */
 /*  Response parser                                                    */
 /* ------------------------------------------------------------------ */
 
-static int parse_response(const char *body, char **out_content, char **out_reasoning,
-                          char **out_model, tool_call **out_calls, int *out_call_count,
-                          usage_info *usage) {
+int llm_parse_response(const char *body, char **out_content, char **out_reasoning, char **out_model,
+                       tool_call **out_calls, int *out_call_count, usage_info *usage) {
     if (body == NULL) return EXIT_LLM_ERR;
 
     cJSON *root = cJSON_Parse(body);
@@ -300,6 +315,18 @@ static int parse_response(const char *body, char **out_content, char **out_reaso
             if (ct && cJSON_IsNumber(ct)) usage->completion_tokens = ct->valueint;
             cJSON *tt = cJSON_GetObjectItem(usage_j, "total_tokens");
             if (tt && cJSON_IsNumber(tt)) usage->total_tokens = tt->valueint;
+
+            /* Prefix-cache telemetry. DeepSeek reports the top-level fields;
+             * OpenAI nests cached_tokens under prompt_tokens_details. */
+            cJSON *pch = cJSON_GetObjectItem(usage_j, "prompt_cache_hit_tokens");
+            if (pch && cJSON_IsNumber(pch)) usage->prompt_cache_hit_tokens = pch->valueint;
+            cJSON *pcm = cJSON_GetObjectItem(usage_j, "prompt_cache_miss_tokens");
+            if (pcm && cJSON_IsNumber(pcm)) usage->prompt_cache_miss_tokens = pcm->valueint;
+            cJSON *ptd = cJSON_GetObjectItem(usage_j, "prompt_tokens_details");
+            if (ptd != NULL) {
+                cJSON *cached = cJSON_GetObjectItem(ptd, "cached_tokens");
+                if (cached && cJSON_IsNumber(cached)) usage->cached_tokens = cached->valueint;
+            }
         }
     }
 
@@ -344,7 +371,7 @@ int llm_chat_complete(runtime_ctx *ctx, const json_message *messages, int msg_co
     }
 
     /* Build request body */
-    char *body = build_request_body(messages, msg_count, tools, tool_count, &ctx->llm);
+    char *body = llm_build_request_body(messages, msg_count, tools, tool_count, &ctx->llm);
     if (body == NULL) return EXIT_INTERNAL_ERR;
 
     /* cURL setup */
@@ -409,8 +436,8 @@ int llm_chat_complete(runtime_ctx *ctx, const json_message *messages, int msg_co
     }
 
     /* Parse the response body. */
-    int rc = parse_response(gb.data ? gb.data : "", out_content, out_reasoning, out_model,
-                            out_calls, out_call_count, usage);
+    int rc = llm_parse_response(gb.data ? gb.data : "", out_content, out_reasoning, out_model,
+                                out_calls, out_call_count, usage);
     growbuf_free(&gb);
     return rc;
 }

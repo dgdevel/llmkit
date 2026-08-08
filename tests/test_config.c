@@ -96,7 +96,12 @@ static void test_full_config(void) {
                        "    hide: true\n"
                        "\n"
                        "agent:\n"
-                       "  system_prompt: \"You are a helpful assistant\"\n";
+                       "  system_prompt: \"You are a helpful assistant\"\n"
+                       "  compact:\n"
+                       "    enabled: true\n"
+                       "    max_tokens: 8192\n"
+                       "    threshold: 0.6\n"
+                       "    summarize: yes\n";
 
     const char *tmp = "/tmp/llmkit_test_full.yml";
     write_file(tmp, yaml);
@@ -160,6 +165,11 @@ static void test_full_config(void) {
 
     /* Check agent config */
     CHECK_STR_EQ(ctx.agent.system_prompt, "You are a helpful assistant", "agent.system_prompt");
+    CHECK_EQ(ctx.agent.compact_enabled, 1, "agent.compact.enabled");
+    CHECK_EQ(ctx.agent.compact_max_tokens, 8192, "agent.compact.max_tokens");
+    CHECK(ctx.agent.compact_threshold > 0.59 && ctx.agent.compact_threshold < 0.61,
+          "agent.compact.threshold");
+    CHECK_EQ(ctx.agent.compact_summarize, 1, "agent.compact.summarize");
 
     config_free(&ctx);
     unlink(tmp);
@@ -201,6 +211,11 @@ static void test_defaults(void) {
     CHECK_EQ(ctx.mcps[0].reconnect_delay_ms, 1000, "default reconnect_delay");
 
     CHECK_STR_NULL(ctx.agent.system_prompt, "default system_prompt NULL");
+    CHECK_EQ(ctx.agent.compact_enabled, 0, "default compact.enabled off");
+    CHECK_EQ(ctx.agent.compact_max_tokens, 16384, "default compact.max_tokens");
+    CHECK(ctx.agent.compact_threshold > 0.79 && ctx.agent.compact_threshold < 0.81,
+          "default compact.threshold 0.8");
+    CHECK_EQ(ctx.agent.compact_summarize, 0, "default compact.summarize off");
 
     config_free(&ctx);
     unlink(tmp);

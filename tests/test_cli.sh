@@ -10,7 +10,9 @@ set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="${BIN:-$ROOT/llmkit}"
 FIX="$ROOT/tests/fixtures"
-TMP="$(mktemp -d)"
+# Pin the temp dir under /tmp: $TMPDIR may point at a stale/deleted session
+# directory in some sandboxes, which would make `mktemp -d` fail silently.
+TMP="$(mktemp -d /tmp/llmkit-cli.XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT
 
 tests=0
@@ -85,13 +87,37 @@ EOF
 "$BIN" proxy -c "$cfg" -l "127.0.0.1:notaport" >/dev/null 2>&1
 assert_exit "proxy bad listen addr -> exit 2" 2 $?
 
-# Bind failure: valid format but a port we cannot bind (privileged port 1
-# without root, or port 0 is ambiguous). Use port 1 — bind fails -> exit 3
-# (proxy spec: 3 = Server error / bind failure).
-if [ "$(id -u)" -ne 0 ]; then
-    "$BIN" proxy -c "$cfg" -l "127.0.0.1:1" >/dev/null 2>&1
-    assert_exit "proxy bind failure -> exit 3" 3 $?
+# Bind failure: a port already in use -> exit 3 (proxy spec: 3 = Server
+# error / bind failure). Privileged port 1 is avoided: some sandboxes allow
+# unprivileged low-port binds, which would make the proxy bind successfully
+# and serve forever instead of failing.
+busy_py="$TMP/busy_listen.py"
+cat >"$busy_py" <<'PY'
+import socket
+import time
+s = socket.socket()
+s.bind(("127.0.0.1", 0))
+print(s.getsockname()[1], flush=True)
+s.listen(1)
+time.sleep(120)
+PY
+python3 "$busy_py" >"$TMP/busy.port" 2>/dev/null &
+busy_pid=$!
+i=0
+while [ ! -s "$TMP/busy.port" ] && [ "$i" -lt 50 ]; do
+    sleep 0.1
+    i=$((i + 1))
+done
+busy_port=$(cat "$TMP/busy.port" 2>/dev/null)
+if [ -n "$busy_port" ]; then
+    "$BIN" proxy -c "$cfg" -l "127.0.0.1:$busy_port" >/dev/null 2>&1
+    assert_exit "proxy bind failure -> exit 3 (port in use)" 3 $?
+else
+    fail "proxy bind failure -> exit 3 (port in use)" "could not reserve a test port"
 fi
+kill "$busy_pid" 2>/dev/null
+wait "$busy_pid" 2>/dev/null
+rm -f "$TMP/busy.port" "$busy_py"
 
 # ----------------------------------------------------------------------
 # 6. MCP init timeout -> exit 6
@@ -308,6 +334,40 @@ assert_exit "response missing file -> exit 0" 0 $rc
 # ----------------------------------------------------------------------
 "$BIN" response >/dev/null 2>&1
 assert_exit "response without --conversation -> exit 2" 2 $?
+
+# ----------------------------------------------------------------------
+# 16. response command — --stats prints prefix-cache telemetry
+# ----------------------------------------------------------------------
+convo4="$TMP/response_cache.jsonl"
+printf '{"type":"meta","version":1,"timestamp":"2026-01-01T00:00:00Z","config_hash":"sha256:abc","run_id":"r4"}
+{"type":"user","timestamp":"2026-01-01T00:00:01Z","content":"Hello","source":"cli"}
+{"type":"assistant","timestamp":"2026-01-01T00:00:02Z","content":"Cached answer","model":"deepseek-chat","usage":{"prompt_tokens":120,"completion_tokens":5,"total_tokens":125,"prompt_cache_hit_tokens":100,"prompt_cache_miss_tokens":20}}' >"$convo4"
+
+out=$("$BIN" response --conversation "$convo4" --stats 2>/dev/null)
+rc=$?
+assert_exit "response --stats -> exit 0" 0 $rc
+if [ "$out" = "Cached answer" ]; then
+    ok "response --stats still prints last assistant content"
+else
+    fail "response --stats still prints last assistant content" "got '$out'"
+fi
+
+err=$("$BIN" response --conversation "$convo4" --stats 2>&1 >/dev/null)
+case "$err" in
+    *"hit=100 miss=20 ratio=83.3%"*)
+        ok "response --stats prints cache hit/miss/ratio" ;;
+    *)
+        fail "response --stats prints cache hit/miss/ratio" "got '$err'" ;;
+esac
+
+# Without --stats the cache line must not appear.
+err2=$("$BIN" response --conversation "$convo4" 2>&1 >/dev/null)
+case "$err2" in
+    *"ratio="*)
+        fail "response without --stats omits cache line" "got '$err2'" ;;
+    *)
+        ok "response without --stats omits cache line" ;;
+esac
 
 echo ""
 echo "$tests tests, $failed failed"

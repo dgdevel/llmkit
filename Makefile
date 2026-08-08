@@ -62,7 +62,8 @@ TIDY_FLAGS := -std=c17 -D_DEFAULT_SOURCE -I $(SRCDIR) \
 
 .PHONY: all debug profile test clean install uninstall dist check-ascii \
         vendors check-deps test_utf8 test_util test_config test_jsonrpc test_transport \
-        test_mcp test_conversation test_llm test_cli test_agent test_agent_retries test_proxy \
+        test_mcp test_conversation test_llm test_compact test_cli test_agent test_agent_retries \
+        test_agent_compaction test_proxy \
         format format-check lint lint-analyzer windows windows32 clean-win \
         macos dist-linux dist-windows dist-macos
 
@@ -70,7 +71,8 @@ TIDY_FLAGS := -std=c17 -D_DEFAULT_SOURCE -I $(SRCDIR) \
 # before compiling. Skip with `make $(TARGET)` if you only need the binary.
 all: check-ascii format-check lint $(TARGET)
 
-debug: CFLAGS = -Og -g3 -Wall -Wextra -Wpedantic -std=c17 -D_DEFAULT_SOURCE -DLLMKIT_DEBUG
+debug: CFLAGS = -Og -g3 -Wall -Wextra -Wpedantic -std=c17 -D_DEFAULT_SOURCE -DLLMKIT_DEBUG \
+               $(YAML_CFLAGS) $(CURL_CFLAGS) $(CRYPTO_CFLAGS) $(CJSON_CFLAGS)
 debug: LDFLAGS += -fsanitize=address
 debug: all
 
@@ -135,7 +137,7 @@ $(OBJDIR):
 
 TEST_BINS := tests/test_utf8 tests/test_util tests/test_config tests/test_jsonrpc \
              tests/test_transport tests/test_mcp tests/test_conversation tests/test_llm \
-             tests/test_steering
+             tests/test_compact tests/test_steering
 
 clean:
 	rm -rf $(OBJDIR) $(TARGET) build-win llmkit.exe $(TEST_BINS) dist
@@ -255,8 +257,9 @@ check-deps:
 	fi
 	@echo "Done."
 
-test: test_utf8 test_util test_config test_jsonrpc test_transport test_mcp test_conversation test_llm \
-       test_steering test_cli test_agent test_agent_retries test_proxy
+test: test_utf8 test_util test_config test_jsonrpc test_transport test_mcp test_conversation \
+       test_llm test_compact test_steering test_cli test_agent test_agent_retries \
+       test_agent_compaction test_proxy
 	@echo "All tests passed."
 
 test_utf8: tests/test_utf8.c src/utf8.c
@@ -291,6 +294,12 @@ test_llm: tests/test_llm.c src/llm.c src/util.c src/utf8.c src/platform.c $(CJSO
 	$(CC) $(CFLAGS) -Isrc -o tests/test_llm tests/test_llm.c src/llm.c src/util.c src/utf8.c src/platform.c $(CJSON_SRC) $(LIBS)
 	./tests/test_llm
 
+test_compact: tests/test_compact.c src/compact.c src/conversation.c src/llm.c src/util.c \
+               src/utf8.c src/platform.c $(CJSON_SRC)
+	$(CC) $(CFLAGS) -Isrc -o tests/test_compact tests/test_compact.c src/compact.c \
+	    src/conversation.c src/llm.c src/util.c src/utf8.c src/platform.c $(CJSON_SRC) $(LIBS)
+	./tests/test_compact
+
 test_steering: tests/test_steering.c src/steering.c src/platform.c src/util.c
 	$(CC) $(CFLAGS) -Isrc -o tests/test_steering tests/test_steering.c src/steering.c src/platform.c src/util.c $(LIBS)
 	./tests/test_steering
@@ -303,6 +312,9 @@ test_cli: $(TARGET)
 
 test_agent: $(TARGET) tests/fixtures/fake_mcp.py tests/test_agent_integration.py
 	python3 tests/test_agent_integration.py
+
+test_agent_compaction: $(TARGET) tests/fixtures/fake_mcp.py tests/test_agent_compaction.py
+	python3 tests/test_agent_compaction.py
 
 test_agent_retries: $(TARGET) tests/test_agent_retries.py
 	python3 tests/test_agent_retries.py

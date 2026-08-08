@@ -36,6 +36,67 @@ tests_failed = []
 TOOL_CALL_ID = "call_abc123"
 
 
+# ---------------------------------------------------------------------------
+# Byte-stability helpers (prefix-cache stability)
+# ---------------------------------------------------------------------------
+def matching_bracket(s, open_idx):
+    """Index of the bracket matching the '[' at open_idx, respecting JSON
+    string literals (nested arrays like tool_calls are handled correctly)."""
+    depth = 0
+    in_str = False
+    esc = False
+    for i in range(open_idx, len(s)):
+        c = s[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == '"':
+                in_str = False
+            continue
+        if c == '"':
+            in_str = True
+        elif c == "[":
+            depth += 1
+        elif c == "]":
+            depth -= 1
+            if depth == 0:
+                return i
+    return -1
+
+
+def messages_bounds(body):
+    """(open, close) byte offsets of the 'messages' array, or None."""
+    i = body.find('"messages":')
+    if i < 0:
+        return None
+    j = body.find("[", i)
+    if j < 0:
+        return None
+    k = matching_bracket(body, j)
+    if k < 0:
+        return None
+    return j, k
+
+
+def messages_span(body):
+    """Serialized messages array, up to (but excluding) its closing ']'."""
+    b = messages_bounds(body)
+    if b is None:
+        return None
+    return body[b[0]:b[1]]
+
+
+def body_without_messages(body):
+    """Body with the messages array contents blanked out, so the remainder
+    (model, tools, tool_choice) can be compared byte-for-byte across turns."""
+    b = messages_bounds(body)
+    if b is None:
+        return None
+    return body[:b[0]] + "[]" + body[b[1] + 1:]
+
+
 def check(name, cond, detail=""):
     global tests_run
     tests_run += 1
@@ -58,12 +119,19 @@ def free_port():
 # Mock OpenAI-compatible chat completions server
 # ---------------------------------------------------------------------------
 class MockLLM(BaseHTTPRequestHandler):
+    # Raw request bodies received by this server (shared across handler
+    # instances; the agent issues requests sequentially).
+    bodies = []
+    lock = threading.Lock()
+
     def log_message(self, *a):
         pass  # silence
 
     def do_POST(self):
         length = int(self.headers.get("Content-Length", "0"))
         body = self.rfile.read(length).decode("utf-8", "replace")
+        with MockLLM.lock:
+            MockLLM.bodies.append(body)
         try:
             req = json.loads(body)
         except Exception:
@@ -81,7 +149,15 @@ class MockLLM(BaseHTTPRequestHandler):
                     "message": {"role": "assistant", "content": "Done. The time is known."},
                     "finish_reason": "stop",
                 }],
-                "usage": {"prompt_tokens": 10, "completion_tokens": 8, "total_tokens": 18},
+                "usage": {
+                    "prompt_tokens": 120,
+                    "completion_tokens": 8,
+                    "total_tokens": 128,
+                    # DeepSeek-style prefix-cache usage: the JSONL entry must
+                    # persist these so `response --stats` can report them.
+                    "prompt_cache_hit_tokens": 80,
+                    "prompt_cache_miss_tokens": 40,
+                },
             }
         else:
             # First turn: request exactly one tool call.
@@ -213,6 +289,10 @@ def main():
               "Done" in (final_asst[1].get("content") or ""), f"asst={final_asst[1]}")
         check("final assistant has usage",
               "total_tokens" in (final_asst[1].get("usage") or {}), f"asst={final_asst[1]}")
+        fu = final_asst[1].get("usage") or {}
+        check("final assistant persists cache hit/miss tokens",
+              fu.get("prompt_cache_hit_tokens") == 80 and fu.get("prompt_cache_miss_tokens") == 40,
+              f"asst={final_asst[1]}")
 
     # Validate the meta entry.
     meta = entries[0] if entries else {}
@@ -220,6 +300,28 @@ def main():
     check("meta config_hash present",
           meta.get("config_hash", "").startswith("sha256:"), f"meta={meta}")
     check("meta run_id is uuid", len(meta.get("run_id", "")) == 36, f"meta={meta}")
+
+    # -------------------------------------------------------------------
+    # Prefix-cache stability: the message prefix and the model/tools/
+    # tool_choice block must be byte-identical across turns; only the
+    # message tail may grow.
+    # -------------------------------------------------------------------
+    bodies = MockLLM.bodies
+    check("mock LLM received exactly 2 requests", len(bodies) == 2,
+          f"n={len(bodies)}")
+    if len(bodies) == 2:
+        b1, b2 = bodies[0], bodies[1]
+        m1, m2 = messages_span(b1), messages_span(b2)
+        check("turn 2 reuses byte-identical message prefix",
+              m1 is not None and m2 is not None and m2.startswith(m1)
+              and len(m2) > len(m1) and m2[len(m1)] == ",",
+              f"m1={m1!r} m2={m2!r}")
+        rest1, rest2 = body_without_messages(b1), body_without_messages(b2)
+        check("model/tools/tool_choice block byte-identical across turns",
+              rest1 is not None and rest1 == rest2,
+              f"rest1={rest1!r} rest2={rest2!r}")
+    # Clear before Scenario B: the ephemeral run uses the same mock server.
+    MockLLM.bodies = []
 
     # -------------------------------------------------------------------
     # Scenario B: agent without --conversation (ephemeral, discarded).

@@ -620,6 +620,87 @@ err:
     return -1;
 }
 
+/* Read a boolean scalar ("true"/"yes" or "false"/"no"). Returns 0 on success
+ * with *out set, or -1 with p->error set. */
+static int cfg_read_bool(cfg_parse *p, int *out) {
+    char *v = NULL;
+    if (cfg_read_scalar(p, &v) != 0) return -1;
+    int ok = 0;
+    if (strcmp(v, "true") == 0 || strcmp(v, "yes") == 0) {
+        *out = 1;
+        ok = 1;
+    } else if (strcmp(v, "false") == 0 || strcmp(v, "no") == 0) {
+        *out = 0;
+        ok = 1;
+    } else {
+        snprintf(p->error_msg, sizeof(p->error_msg), "Invalid boolean '%s'", v);
+        p->error_code = EXIT_CONFIG_ERR;
+    }
+    free(v);
+    return ok ? 0 : -1;
+}
+
+/* Parse the agent.compact mapping (prefix-cache-aware compaction settings). */
+static int cfg_parse_agent_compact(cfg_parse *p, runtime_ctx *ctx) {
+    if (cfg_next(p) != 0) return -1;
+    if (cfg_expect(p, YAML_MAPPING_START_EVENT) != 0) return -1;
+    cfg_event_done(p);
+
+    while (1) {
+        if (cfg_next(p) != 0) goto err;
+        if (p->event.type == YAML_MAPPING_END_EVENT) break;
+        if (cfg_expect(p, YAML_SCALAR_EVENT) != 0) goto err;
+        const char *key = cfg_scalar(p);
+
+        if (strcmp(key, "enabled") == 0) {
+            cfg_event_done(p);
+            if (cfg_read_bool(p, &ctx->agent.compact_enabled) != 0) goto err;
+        } else if (strcmp(key, "max_tokens") == 0) {
+            cfg_event_done(p);
+            char *v = NULL;
+            if (cfg_read_scalar(p, &v) != 0) goto err;
+            char *end = NULL;
+            long n = strtol(v, &end, 10);
+            if (end == v || *end != '\0' || n <= 0) {
+                snprintf(p->error_msg, sizeof(p->error_msg),
+                         "Invalid integer '%s' for compact.max_tokens", v);
+                free(v);
+                p->error_code = EXIT_CONFIG_ERR;
+                goto err;
+            }
+            ctx->agent.compact_max_tokens = n;
+            free(v);
+        } else if (strcmp(key, "threshold") == 0) {
+            cfg_event_done(p);
+            char *v = NULL;
+            if (cfg_read_scalar(p, &v) != 0) goto err;
+            char *end = NULL;
+            double d = strtod(v, &end);
+            if (end == v || *end != '\0' || d <= 0.0 || d > 1.0) {
+                snprintf(p->error_msg, sizeof(p->error_msg),
+                         "Invalid threshold '%s' for compact.threshold (0 < t <= 1)", v);
+                free(v);
+                p->error_code = EXIT_CONFIG_ERR;
+                goto err;
+            }
+            ctx->agent.compact_threshold = d;
+            free(v);
+        } else if (strcmp(key, "summarize") == 0) {
+            cfg_event_done(p);
+            if (cfg_read_bool(p, &ctx->agent.compact_summarize) != 0) goto err;
+        } else {
+            cfg_event_done(p);
+            if (cfg_skip_value(p) != 0) goto err;
+        }
+    }
+
+    cfg_event_done(p);
+    return 0;
+
+err:
+    return -1;
+}
+
 static int cfg_parse_agent(cfg_parse *p, runtime_ctx *ctx) {
     if (cfg_next(p) != 0) return -1;
     if (cfg_expect(p, YAML_MAPPING_START_EVENT) != 0) return -1;
@@ -634,6 +715,9 @@ static int cfg_parse_agent(cfg_parse *p, runtime_ctx *ctx) {
         if (strcmp(key, "system_prompt") == 0) {
             cfg_event_done(p);
             if (cfg_read_scalar(p, &ctx->agent.system_prompt) != 0) goto err;
+        } else if (strcmp(key, "compact") == 0) {
+            cfg_event_done(p);
+            if (cfg_parse_agent_compact(p, ctx) != 0) goto err;
         } else {
             cfg_event_done(p);
             if (cfg_skip_value(p) != 0) goto err;
@@ -659,6 +743,12 @@ int config_load(const char *path, runtime_ctx *ctx) {
         free(raw);
         return EXIT_CONFIG_ERR;
     }
+
+    /* Defaults for agent.compact.* (overridable under the agent: section). */
+    ctx->agent.compact_enabled = 0;
+    ctx->agent.compact_max_tokens = 16384;
+    ctx->agent.compact_threshold = 0.8;
+    ctx->agent.compact_summarize = 0;
 
     cfg_parse p;
     memset(&p, 0, sizeof(p));

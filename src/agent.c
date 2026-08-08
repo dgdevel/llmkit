@@ -1,4 +1,5 @@
 #include "agent.h"
+#include "compact.h"
 #include "conversation.h"
 #include "mcp.h"
 #include "llm.h"
@@ -157,6 +158,15 @@ static void emit_assistant_event(const char *content, const char *reasoning, con
             cJSON_AddNumberToObject(u, "prompt_tokens", usage->prompt_tokens);
             cJSON_AddNumberToObject(u, "completion_tokens", usage->completion_tokens);
             cJSON_AddNumberToObject(u, "total_tokens", usage->total_tokens);
+            /* Prefix-cache telemetry; omitted when 0 / not reported. */
+            if (usage->prompt_cache_hit_tokens > 0)
+                cJSON_AddNumberToObject(u, "prompt_cache_hit_tokens",
+                                        usage->prompt_cache_hit_tokens);
+            if (usage->prompt_cache_miss_tokens > 0)
+                cJSON_AddNumberToObject(u, "prompt_cache_miss_tokens",
+                                        usage->prompt_cache_miss_tokens);
+            if (usage->cached_tokens > 0)
+                cJSON_AddNumberToObject(u, "cached_tokens", usage->cached_tokens);
             cJSON_AddItemToObject(event, "usage", u);
         }
         emit_event(event);
@@ -386,6 +396,15 @@ static int startup_sequence(runtime_ctx *ctx, const char *convo_path, const char
         return rc;
     }
 
+    /* Discover tools once at startup. The tool block in the request must stay
+     * byte-stable across turns so provider prefix caches (e.g. DeepSeek) stay
+     * warm; tools are therefore not re-fetched between turns. */
+    rc = mcp_discover_tools(ctx);
+    if (rc != EXIT_SUCCESS) {
+        log_activity("[error] Failed to discover tools");
+        return rc;
+    }
+
     log_activity("[init] LLM API ready");
     return EXIT_SUCCESS;
 }
@@ -442,12 +461,15 @@ static int conversation_loop(runtime_ctx *ctx, FILE *fp) {
             msg_count++;
         }
 
-        /* ---- Discover tools ---- */
-        rc = mcp_discover_tools(ctx);
-        if (rc != EXIT_SUCCESS) {
-            log_activity("[error] Failed to discover tools");
-            conversation_free_messages(msgs, msg_count);
-            return rc;
+        /* ---- Prefix-cache-aware compaction (projection + sidecar) ---- */
+        {
+            int covered = 0;
+            rc = compact_apply(ctx, ctx->convo_path, &msgs, &msg_count, &covered);
+            if (rc != EXIT_SUCCESS) {
+                log_activity("[error] Failed to apply compaction");
+                conversation_free_messages(msgs, msg_count);
+                return rc;
+            }
         }
 
         /* ---- Call LLM (with retry + Fibonacci backoff) ---- */
@@ -518,6 +540,15 @@ static int conversation_loop(runtime_ctx *ctx, FILE *fp) {
             } else {
                 fprintf(stderr, "[stats] %s | tokens N/A in %.2fs\n", model ? model : "?",
                         (double)elapsed_ms / 1000.0);
+            }
+            /* Prefix-cache telemetry for this turn (debug/stream modes). */
+            if (usage.prompt_cache_hit_tokens > 0 || usage.prompt_cache_miss_tokens > 0) {
+                int denom = usage.prompt_cache_hit_tokens + usage.prompt_cache_miss_tokens;
+                fprintf(stderr, "[cache] hit=%d miss=%d ratio=%.1f%%\n",
+                        usage.prompt_cache_hit_tokens, usage.prompt_cache_miss_tokens,
+                        denom > 0 ? 100.0 * (double)usage.prompt_cache_hit_tokens / denom : 0.0);
+            } else if (usage.cached_tokens > 0) {
+                fprintf(stderr, "[cache] cached=%d\n", usage.cached_tokens);
             }
         }
 

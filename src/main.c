@@ -44,6 +44,8 @@ static void print_usage(void) {
                     "                             before giving up (agent only). Each retry waits\n"
                     "                             a number of seconds following the Fibonacci\n"
                     "                             sequence (1, 1, 2, 3, 5, 8, ...). Default: 5\n"
+                    "  --stats                    Print prefix-cache hit/miss tokens of the last\n"
+                    "                             assistant entry (response only)\n"
                     "  -l, --listen <host:port>   Listen address; omit for stdio mode (proxy)\n"
                     "  -h, --help                 Print this help and exit\n"
                     "  -V, --version              Print version and exit\n");
@@ -216,6 +218,7 @@ int main(int argc, char **argv) {
     /* ---- response ---- */
     if (strcmp(argv[1], "response") == 0) {
         const char *file_path = get_flag(argc, argv, NULL, "--conversation");
+        bool show_stats = has_flag(argc, argv, NULL, "--stats");
 
         if (file_path == NULL) {
             fprintf(stderr, "error: response requires --conversation <conversation.jsonl>\n");
@@ -236,6 +239,20 @@ int main(int argc, char **argv) {
             fprintf(stderr, "[stats] %s | %d tokens (prompt=%d + completion=%d)\n",
                     model && model[0] ? model : "?", usage.total_tokens, usage.prompt_tokens,
                     usage.completion_tokens);
+        }
+        if (show_stats) {
+            /* Prefix-cache telemetry for the last assistant entry. */
+            int hit = usage.prompt_cache_hit_tokens;
+            int miss = usage.prompt_cache_miss_tokens;
+            if (hit > 0 || miss > 0) {
+                int denom = hit + miss;
+                fprintf(stderr, "[cache] hit=%d miss=%d ratio=%.1f%%\n", hit, miss,
+                        denom > 0 ? 100.0 * (double)hit / denom : 0.0);
+            } else if (usage.cached_tokens > 0) {
+                fprintf(stderr, "[cache] cached=%d\n", usage.cached_tokens);
+            } else {
+                fprintf(stderr, "[cache] no prefix-cache usage reported\n");
+            }
         }
         free(model);
 

@@ -72,6 +72,11 @@ typedef struct {
 /* Agent configuration */
 typedef struct {
     char *system_prompt;
+    /* Prefix-cache-aware compaction (agent.compact.*). */
+    int compact_enabled;        /* default 0 (off) */
+    int64_t compact_max_tokens; /* default 16384 */
+    double compact_threshold;   /* default 0.8 (fraction of max_tokens) */
+    int compact_summarize;      /* default 0: static placeholder summary */
 } agent_cfg;
 
 /* Tool definition (cached from tools/list) */
@@ -95,6 +100,9 @@ typedef struct {
     int prompt_tokens;
     int completion_tokens;
     int total_tokens;
+    int prompt_cache_hit_tokens;  /* DeepSeek: usage.prompt_cache_hit_tokens */
+    int prompt_cache_miss_tokens; /* DeepSeek: usage.prompt_cache_miss_tokens */
+    int cached_tokens;            /* OpenAI: usage.prompt_tokens_details.cached_tokens */
 } usage_info;
 
 /* A single message in the LLM chat request */
