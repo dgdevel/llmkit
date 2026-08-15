@@ -119,10 +119,69 @@ int mcp_connect_all(runtime_ctx *ctx) {
 }
 
 /* ------------------------------------------------------------------ */
+/*  mcp_connect_one / mcp_server_connected                             */
+/* ------------------------------------------------------------------ */
+
+/* Is a server with this name connected and initialized? Connections are
+ * keyed by name across the whole process, so name-shared servers (e.g. a
+ * subagent reference to a top-level server) naturally reuse one transport. */
+bool mcp_server_connected(const char *name) {
+    if (name == NULL) return false;
+    for (int i = 0; i < s_conn_count; i++) {
+        if (s_connections[i].cfg != NULL && s_connections[i].initialized &&
+            strcmp(s_connections[i].cfg->name, name) == 0)
+            return true;
+    }
+    return false;
+}
+
+/* Lazily connect one MCP server and append it to the connection registry.
+ * Used by subagents on first tool use so unused private servers are never
+ * started. A no-op for reference entries and already-connected names.
+ * On failure the registry is unchanged (the failed transport is closed). */
+int mcp_connect_one(mcp_server_cfg *cfg) {
+    if (cfg == NULL || cfg->name == NULL) return EXIT_INTERNAL_ERR;
+    if (cfg->reference) return EXIT_SUCCESS;
+    if (mcp_server_connected(cfg->name)) return EXIT_SUCCESS;
+
+    mcp_connection *tmp =
+        realloc(s_connections, (size_t)(s_conn_count + 1) * sizeof(mcp_connection));
+    if (tmp == NULL) {
+        log_activity("[error] OOM allocating MCP connection");
+        return EXIT_INTERNAL_ERR;
+    }
+    s_connections = tmp;
+
+    mcp_connection *conn = &s_connections[s_conn_count];
+    memset(conn, 0, sizeof(*conn));
+
+    log_activity("[init] Connecting to MCP server '%s'...", cfg->name);
+
+    int rc = transport_open(cfg, conn);
+    if (rc != EXIT_SUCCESS) {
+        log_activity("[error] Failed to connect to MCP server '%s'", cfg->name);
+        transport_close(conn);
+        return rc;
+    }
+
+    rc = mcp_initialize(cfg, conn);
+    if (rc != EXIT_SUCCESS) {
+        log_activity("[error] MCP server '%s' initialization failed", cfg->name);
+        transport_close(conn);
+        memset(conn, 0, sizeof(*conn));
+        return rc;
+    }
+
+    conn->initialized = true;
+    s_conn_count++;
+    return EXIT_SUCCESS;
+}
+
+/* ------------------------------------------------------------------ */
 /*  mcp_discover_tools                                                 */
 /* ------------------------------------------------------------------ */
 /* Free any previously discovered tools. */
-static void free_tool_defs(tool_def *tools, int count) {
+void mcp_free_tool_defs(tool_def *tools, int count) {
     if (tools == NULL) return;
     for (int i = 0; i < count; i++) {
         free(tools[i].name);
@@ -137,8 +196,10 @@ static void free_tool_defs(tool_def *tools, int count) {
 /* Deterministic ordering for the tool block: sorted by namespaced name (then
  * server, then original name) so the serialized request stays byte-stable
  * across runs and turns (provider prefix caches key on those bytes). Empty
- * slots (calloc'd leftovers) sort last so they never precede real tools. */
-static int tool_def_cmp(const void *a, const void *b) {
+ * slots (calloc'd leftovers) sort last so they never precede real tools.
+ * Shared with subagent.c, which merges synthetic subagent tools into the
+ * same array and must keep the identical ordering. */
+int mcp_tool_def_cmp(const void *a, const void *b) {
     const tool_def *ta = (const tool_def *)a;
     const tool_def *tb = (const tool_def *)b;
     if (ta->name == NULL && tb->name == NULL) return 0;
@@ -151,11 +212,20 @@ static int tool_def_cmp(const void *a, const void *b) {
     return strcmp(ta->original ? ta->original : "", tb->original ? tb->original : "");
 }
 
-int mcp_discover_tools(runtime_ctx *ctx) {
+/* Is this connection's server in the allowed-name list (NULL = all)? */
+static bool conn_allowed(const char *const *allowed, int allowed_count, const mcp_server_cfg *cfg) {
+    if (allowed == NULL) return true;
+    for (int i = 0; i < allowed_count; i++) {
+        if (strcmp(allowed[i], cfg->name) == 0) return true;
+    }
+    return false;
+}
+
+int mcp_discover_tools_for(runtime_ctx *ctx, const char *const *allowed, int allowed_count) {
     if (ctx == NULL) return EXIT_INTERNAL_ERR;
 
     /* Free previous tools if this is a rediscovery (multi-turn agent). */
-    free_tool_defs(ctx->tools, ctx->tool_count);
+    mcp_free_tool_defs(ctx->tools, ctx->tool_count);
     ctx->tools = NULL;
     ctx->tool_count = 0;
 
@@ -165,6 +235,7 @@ int mcp_discover_tools(runtime_ctx *ctx) {
     int total = 0;
     for (int i = 0; i < s_conn_count; i++) {
         if (!s_connections[i].initialized) continue;
+        if (!conn_allowed(allowed, allowed_count, s_connections[i].cfg)) continue;
         mcp_server_cfg *cfg = s_connections[i].cfg;
 
         char *req = NULL;
@@ -212,6 +283,7 @@ int mcp_discover_tools(runtime_ctx *ctx) {
     int idx = 0;
     for (int i = 0; i < s_conn_count && idx < total; i++) {
         if (!s_connections[i].initialized) continue;
+        if (!conn_allowed(allowed, allowed_count, s_connections[i].cfg)) continue;
         mcp_server_cfg *cfg = s_connections[i].cfg;
 
         char *req = NULL;
@@ -292,8 +364,12 @@ int mcp_discover_tools(runtime_ctx *ctx) {
     }
 
     ctx->tool_count = idx;
-    if (idx > 1) qsort(ctx->tools, (size_t)idx, sizeof(tool_def), tool_def_cmp);
+    if (idx > 1) qsort(ctx->tools, (size_t)idx, sizeof(tool_def), mcp_tool_def_cmp);
     return EXIT_SUCCESS;
+}
+
+int mcp_discover_tools(runtime_ctx *ctx) {
+    return mcp_discover_tools_for(ctx, NULL, 0);
 }
 
 /* ------------------------------------------------------------------ */

@@ -280,7 +280,7 @@ err:
     return -1;
 }
 
-static int mcp_parse_fields(cfg_parse *p, mcp_server_cfg *cfg) {
+static int mcp_parse_fields(cfg_parse *p, mcp_server_cfg *cfg, bool allow_reference) {
     memset(cfg, 0, sizeof(*cfg));
     cfg->transport = MCP_STDIO;
     cfg->init_timeout_ms = 30000;
@@ -288,6 +288,8 @@ static int mcp_parse_fields(cfg_parse *p, mcp_server_cfg *cfg) {
     cfg->call_timeout_beh = TIMEOUT_FAIL;
     cfg->max_reconnect = 3;
     cfg->reconnect_delay_ms = 1000;
+
+    int seen_other = 0; /* any key other than 'name' was present */
 
     while (1) {
         if (cfg_next(p) != 0) goto err;
@@ -305,6 +307,7 @@ static int mcp_parse_fields(cfg_parse *p, mcp_server_cfg *cfg) {
             }
 
         } else if (strcmp(key, "type") == 0) {
+            seen_other = 1;
             cfg_event_done(p);
             char *v = NULL;
             if (cfg_read_scalar(p, &v) != 0) goto err;
@@ -323,18 +326,22 @@ static int mcp_parse_fields(cfg_parse *p, mcp_server_cfg *cfg) {
             free(v);
 
         } else if (strcmp(key, "cmdline") == 0) {
+            seen_other = 1;
             cfg_event_done(p);
             if (cfg_read_scalar(p, &cfg->cmdline) != 0) goto err;
 
         } else if (strcmp(key, "url") == 0) {
+            seen_other = 1;
             cfg_event_done(p);
             if (cfg_read_scalar(p, &cfg->url) != 0) goto err;
 
         } else if (strcmp(key, "headers") == 0) {
+            seen_other = 1;
             cfg_event_done(p);
             if (cfg_parse_headers(p, &cfg->headers) != 0) goto err;
 
         } else if (strcmp(key, "init_timeout") == 0) {
+            seen_other = 1;
             cfg_event_done(p);
             char *v = NULL;
             if (cfg_read_scalar(p, &v) != 0) goto err;
@@ -348,6 +355,7 @@ static int mcp_parse_fields(cfg_parse *p, mcp_server_cfg *cfg) {
             cfg->init_timeout_ms = ms;
 
         } else if (strcmp(key, "call_timeout") == 0) {
+            seen_other = 1;
             cfg_event_done(p);
             char *v = NULL;
             if (cfg_read_scalar(p, &v) != 0) goto err;
@@ -361,6 +369,7 @@ static int mcp_parse_fields(cfg_parse *p, mcp_server_cfg *cfg) {
             cfg->call_timeout_ms = ms;
 
         } else if (strcmp(key, "call_timeout_behavior") == 0) {
+            seen_other = 1;
             cfg_event_done(p);
             char *v = NULL;
             if (cfg_read_scalar(p, &v) != 0) goto err;
@@ -378,6 +387,7 @@ static int mcp_parse_fields(cfg_parse *p, mcp_server_cfg *cfg) {
             free(v);
 
         } else if (strcmp(key, "hide") == 0) {
+            seen_other = 1;
             cfg_event_done(p);
             char *v = NULL;
             if (cfg_read_scalar(p, &v) != 0) goto err;
@@ -394,26 +404,32 @@ static int mcp_parse_fields(cfg_parse *p, mcp_server_cfg *cfg) {
             free(v);
 
         } else if (strcmp(key, "namespace") == 0) {
+            seen_other = 1;
             cfg_event_done(p);
             if (cfg_read_scalar(p, &cfg->namespace) != 0) goto err;
 
         } else if (strcmp(key, "rename") == 0) {
+            seen_other = 1;
             cfg_event_done(p);
             if (cfg_parse_str_map(p, &cfg->rename_keys) != 0) goto err;
 
         } else if (strcmp(key, "redefine") == 0) {
+            seen_other = 1;
             cfg_event_done(p);
             if (cfg_parse_str_map(p, &cfg->redefine_keys) != 0) goto err;
 
         } else if (strcmp(key, "whitelist") == 0) {
+            seen_other = 1;
             cfg_event_done(p);
             if (cfg_parse_str_list(p, &cfg->whitelist) != 0) goto err;
 
         } else if (strcmp(key, "blacklist") == 0) {
+            seen_other = 1;
             cfg_event_done(p);
             if (cfg_parse_str_list(p, &cfg->blacklist) != 0) goto err;
 
         } else if (strcmp(key, "max_reconnect") == 0) {
+            seen_other = 1;
             cfg_event_done(p);
             char *v = NULL;
             if (cfg_read_scalar(p, &v) != 0) goto err;
@@ -429,6 +445,7 @@ static int mcp_parse_fields(cfg_parse *p, mcp_server_cfg *cfg) {
             free(v);
 
         } else if (strcmp(key, "reconnect_delay") == 0) {
+            seen_other = 1;
             cfg_event_done(p);
             char *v = NULL;
             if (cfg_read_scalar(p, &v) != 0) goto err;
@@ -454,6 +471,14 @@ static int mcp_parse_fields(cfg_parse *p, mcp_server_cfg *cfg) {
                  "MCP server entry missing required 'name' field");
         p->error_code = EXIT_CONFIG_ERR;
         goto err;
+    }
+
+    /* Subagent reference entry: only a 'name' was given. The specification
+     * is resolved against the top-level 'mcps' list (validated after the
+     * whole document is parsed), so skip all per-entry requirements. */
+    if (allow_reference && !seen_other) {
+        cfg->reference = true;
+        return 0;
     }
 
     if (cfg->transport == MCP_STDIO && !cfg->cmdline) {
@@ -537,7 +562,7 @@ static int cfg_parse_mcps(cfg_parse *p, runtime_ctx *ctx) {
             ctx->mcps = tmp;
         }
 
-        if (mcp_parse_fields(p, &ctx->mcps[ctx->mcp_count]) != 0) goto err;
+        if (mcp_parse_fields(p, &ctx->mcps[ctx->mcp_count], false) != 0) goto err;
         ctx->mcp_count++;
     }
 
@@ -556,6 +581,392 @@ err:
     free(ctx->mcps);
     ctx->mcps = NULL;
     ctx->mcp_count = 0;
+    return -1;
+}
+
+/* ------------------------------------------------------------------ */
+/*  subagents                                                          */
+/* ------------------------------------------------------------------ */
+
+static int cfg_parse_subagents(cfg_parse *p, runtime_ctx *ctx, subagent_spec **out, int *out_count,
+                               int depth);
+
+/* Read a boolean scalar ("true"/"yes" or "false"/"no"). Returns 0 on success
+ * with *out set, or -1 with p->error set. Declared here for the subagent
+ * parsers below. */
+static int cfg_read_bool(cfg_parse *p, int *out);
+
+/* Free a subagent tool definition. */
+static void cfg_free_subagent_tool(subagent_tool_def *tool) {
+    if (!tool) return;
+    free(tool->name);
+    free(tool->description);
+    if (tool->attributes) {
+        for (int i = 0; i < tool->attribute_count; i++) {
+            free(tool->attributes[i].name);
+            free(tool->attributes[i].type);
+            free(tool->attributes[i].description);
+        }
+        free(tool->attributes);
+    }
+    memset(tool, 0, sizeof(*tool));
+}
+
+/* Free an array of subagent specs, recursively. */
+static void cfg_free_subagents(subagent_spec *arr, int count) {
+    if (!arr) return;
+    for (int i = 0; i < count; i++) {
+        cfg_free_subagent_tool(&arr[i].tool);
+        free(arr[i].system_prompt);
+        free(arr[i].user_prompt);
+        for (int j = 0; j < arr[i].mcp_count; j++) config_free_mcp(&arr[i].mcps[j]);
+        free(arr[i].mcps);
+        /* Recursive call frees the nested array itself. */
+        cfg_free_subagents(arr[i].subagents, arr[i].subagent_count);
+    }
+    free(arr);
+}
+
+/* Validate a subagent attribute JSON schema type. */
+static bool cfg_subagent_attr_type_valid(const char *t) {
+    if (strcmp(t, "string") == 0) return true;
+    if (strcmp(t, "integer") == 0) return true;
+    if (strcmp(t, "number") == 0) return true;
+    if (strcmp(t, "boolean") == 0) return true;
+    if (strcmp(t, "array") == 0) return true;
+    if (strcmp(t, "object") == 0) return true;
+    return false;
+}
+
+/* Parse the value of one tool_definition.attributes.<name> entry: a mapping
+ * with optional type (default "string"), description and required
+ * (default true). name must stay valid for the duration of the call; it is
+ * duplicated into the attr. */
+static int cfg_parse_subagent_attr(cfg_parse *p, subagent_attr *attr, const char *name) {
+    memset(attr, 0, sizeof(*attr));
+    attr->name = util_strdup(name);
+    attr->required = 1;
+
+    if (attr->name == NULL) {
+        p->error_code = EXIT_INTERNAL_ERR;
+        return -1;
+    }
+
+    if (cfg_next(p) != 0) goto err;
+    if (cfg_expect(p, YAML_MAPPING_START_EVENT) != 0) {
+        cfg_event_done(p);
+        goto err;
+    }
+    cfg_event_done(p);
+
+    while (1) {
+        if (cfg_next(p) != 0) goto err;
+        if (p->event.type == YAML_MAPPING_END_EVENT) break;
+        if (cfg_expect(p, YAML_SCALAR_EVENT) != 0) goto err;
+        const char *key = cfg_scalar(p);
+
+        if (strcmp(key, "type") == 0) {
+            cfg_event_done(p);
+            free(attr->type);
+            if (cfg_read_scalar(p, &attr->type) != 0) goto err;
+        } else if (strcmp(key, "description") == 0) {
+            cfg_event_done(p);
+            free(attr->description);
+            if (cfg_read_scalar(p, &attr->description) != 0) goto err;
+        } else if (strcmp(key, "required") == 0) {
+            cfg_event_done(p);
+            if (cfg_read_bool(p, &attr->required) != 0) goto err;
+        } else {
+            cfg_event_done(p);
+            if (cfg_skip_value(p) != 0) goto err;
+        }
+    }
+    cfg_event_done(p);
+
+    if (attr->type == NULL) attr->type = util_strdup("string");
+    if (attr->type == NULL) {
+        p->error_code = EXIT_INTERNAL_ERR;
+        goto err;
+    }
+    if (!cfg_subagent_attr_type_valid(attr->type)) {
+        snprintf(p->error_msg, sizeof(p->error_msg),
+                 "Invalid type '%s' for subagent attribute '%s' "
+                 "(string|integer|number|boolean|array|object)",
+                 attr->type, attr->name);
+        p->error_code = EXIT_CONFIG_ERR;
+        goto err;
+    }
+    return 0;
+
+err:
+    free(attr->name);
+    free(attr->type);
+    free(attr->description);
+    memset(attr, 0, sizeof(*attr));
+    return -1;
+}
+
+/* Parse a tool_definition mapping (name, description, attributes). */
+static int cfg_parse_subagent_tool_def(cfg_parse *p, subagent_tool_def *tool) {
+    memset(tool, 0, sizeof(*tool));
+
+    if (cfg_next(p) != 0) goto err;
+    if (cfg_expect(p, YAML_MAPPING_START_EVENT) != 0) {
+        cfg_event_done(p);
+        goto err;
+    }
+    cfg_event_done(p);
+
+    while (1) {
+        if (cfg_next(p) != 0) goto err;
+        if (p->event.type == YAML_MAPPING_END_EVENT) break;
+        if (cfg_expect(p, YAML_SCALAR_EVENT) != 0) goto err;
+        const char *key = cfg_scalar(p);
+
+        if (strcmp(key, "name") == 0) {
+            cfg_event_done(p);
+            if (cfg_read_scalar(p, &tool->name) != 0) goto err;
+        } else if (strcmp(key, "description") == 0) {
+            cfg_event_done(p);
+            if (cfg_read_scalar(p, &tool->description) != 0) goto err;
+        } else if (strcmp(key, "attributes") == 0) {
+            cfg_event_done(p);
+
+            if (cfg_next(p) != 0) goto err;
+            if (cfg_expect(p, YAML_MAPPING_START_EVENT) != 0) {
+                cfg_event_done(p);
+                goto err;
+            }
+            cfg_event_done(p);
+
+            int cap = 0;
+            while (1) {
+                if (cfg_next(p) != 0) goto err;
+                if (p->event.type == YAML_MAPPING_END_EVENT) break;
+                if (cfg_expect(p, YAML_SCALAR_EVENT) != 0) goto err;
+                const char *aname = cfg_scalar(p);
+                if (!utf8_validate_c_string(aname)) {
+                    snprintf(p->error_msg, sizeof(p->error_msg),
+                             "Invalid UTF-8 in subagent attribute name");
+                    p->error_code = EXIT_CONFIG_ERR;
+                    goto err;
+                }
+                char *name_copy = util_strdup(aname);
+                cfg_event_done(p);
+                if (name_copy == NULL) {
+                    p->error_code = EXIT_INTERNAL_ERR;
+                    goto err;
+                }
+
+                if (tool->attribute_count >= cap) {
+                    cap = cap ? cap * 2 : 4;
+                    subagent_attr *tmp =
+                        realloc(tool->attributes, (size_t)cap * sizeof(subagent_attr));
+                    if (tmp == NULL) {
+                        free(name_copy);
+                        p->error_code = EXIT_INTERNAL_ERR;
+                        goto err;
+                    }
+                    tool->attributes = tmp;
+                }
+
+                int rc =
+                    cfg_parse_subagent_attr(p, &tool->attributes[tool->attribute_count], name_copy);
+                free(name_copy);
+                if (rc != 0) goto err;
+                tool->attribute_count++;
+            }
+            cfg_event_done(p);
+        } else {
+            cfg_event_done(p);
+            if (cfg_skip_value(p) != 0) goto err;
+        }
+    }
+    cfg_event_done(p);
+
+    if (tool->name == NULL || tool->name[0] == '\0') {
+        snprintf(p->error_msg, sizeof(p->error_msg),
+                 "subagents entry missing required 'tool_definition.name'");
+        p->error_code = EXIT_CONFIG_ERR;
+        goto err;
+    }
+    return 0;
+
+err:
+    cfg_free_subagent_tool(tool);
+    return -1;
+}
+
+/* Parse one 'mcps' list of a subagent. Unlike the top-level list it may be
+ * empty and entries may be name-only references to top-level servers. */
+static int cfg_parse_subagent_mcps(cfg_parse *p, subagent_spec *spec) {
+    if (cfg_next(p) != 0) return -1;
+    if (cfg_expect(p, YAML_SEQUENCE_START_EVENT) != 0) {
+        cfg_event_done(p);
+        return -1;
+    }
+    cfg_event_done(p);
+
+    int cap = 0;
+
+    while (1) {
+        if (cfg_next(p) != 0) goto err;
+        if (p->event.type == YAML_SEQUENCE_END_EVENT) break;
+
+        if (p->event.type != YAML_MAPPING_START_EVENT) {
+            snprintf(p->error_msg, sizeof(p->error_msg), "Expected mapping for MCP server entry");
+            p->error_code = EXIT_CONFIG_ERR;
+            cfg_event_done(p);
+            goto err;
+        }
+        cfg_event_done(p);
+
+        if (spec->mcp_count >= cap) {
+            cap = cap ? cap * 2 : 4;
+            mcp_server_cfg *tmp = realloc(spec->mcps, (size_t)cap * sizeof(mcp_server_cfg));
+            if (!tmp) {
+                p->error_code = EXIT_INTERNAL_ERR;
+                goto err;
+            }
+            spec->mcps = tmp;
+        }
+
+        if (mcp_parse_fields(p, &spec->mcps[spec->mcp_count], true) != 0) goto err;
+        spec->mcp_count++;
+    }
+
+    cfg_event_done(p);
+    return 0;
+
+err:
+    for (int i = 0; i < spec->mcp_count; i++) config_free_mcp(&spec->mcps[i]);
+    free(spec->mcps);
+    spec->mcps = NULL;
+    spec->mcp_count = 0;
+    return -1;
+}
+
+/* Parse a single subagent mapping. The caller has already consumed the
+ * YAML_MAPPING_START_EVENT. Frees itself on error. */
+static int cfg_parse_subagent(cfg_parse *p, runtime_ctx *ctx, subagent_spec *spec, int depth) {
+    memset(spec, 0, sizeof(*spec));
+
+    while (1) {
+        if (cfg_next(p) != 0) goto err;
+        if (p->event.type == YAML_MAPPING_END_EVENT) break;
+        if (cfg_expect(p, YAML_SCALAR_EVENT) != 0) goto err;
+        const char *key = cfg_scalar(p);
+
+        if (strcmp(key, "tool_definition") == 0) {
+            cfg_event_done(p);
+            if (cfg_parse_subagent_tool_def(p, &spec->tool) != 0) goto err;
+        } else if (strcmp(key, "system_prompt") == 0) {
+            cfg_event_done(p);
+            if (cfg_read_scalar(p, &spec->system_prompt) != 0) goto err;
+        } else if (strcmp(key, "user_prompt") == 0) {
+            cfg_event_done(p);
+            if (cfg_read_scalar(p, &spec->user_prompt) != 0) goto err;
+        } else if (strcmp(key, "mcps") == 0) {
+            cfg_event_done(p);
+            if (cfg_parse_subagent_mcps(p, spec) != 0) goto err;
+        } else if (strcmp(key, "subagents") == 0) {
+            cfg_event_done(p);
+            if (cfg_parse_subagents(p, ctx, &spec->subagents, &spec->subagent_count, depth + 1) !=
+                0)
+                goto err;
+        } else {
+            cfg_event_done(p);
+            if (cfg_skip_value(p) != 0) goto err;
+        }
+    }
+    cfg_event_done(p);
+
+    if (spec->tool.name == NULL) {
+        snprintf(p->error_msg, sizeof(p->error_msg),
+                 "subagents entry missing required 'tool_definition' with a 'name'");
+        p->error_code = EXIT_CONFIG_ERR;
+        goto err;
+    }
+    return 0;
+
+err:
+    cfg_free_subagent_tool(&spec->tool);
+    free(spec->system_prompt);
+    free(spec->user_prompt);
+    for (int i = 0; i < spec->mcp_count; i++) config_free_mcp(&spec->mcps[i]);
+    free(spec->mcps);
+    cfg_free_subagents(spec->subagents, spec->subagent_count);
+    memset(spec, 0, sizeof(*spec));
+    return -1;
+}
+
+/* Parse a 'subagents' sequence (root or nested). depth is 1-based. */
+static int cfg_parse_subagents(cfg_parse *p, runtime_ctx *ctx, subagent_spec **out, int *out_count,
+                               int depth) {
+    *out = NULL;
+    *out_count = 0;
+
+    if (depth > SUBAGENT_MAX_DEPTH) {
+        snprintf(p->error_msg, sizeof(p->error_msg), "subagents nested deeper than %d levels",
+                 SUBAGENT_MAX_DEPTH);
+        p->error_code = EXIT_CONFIG_ERR;
+        return -1;
+    }
+
+    if (cfg_next(p) != 0) return -1;
+    if (cfg_expect(p, YAML_SEQUENCE_START_EVENT) != 0) {
+        cfg_event_done(p);
+        return -1;
+    }
+    cfg_event_done(p);
+
+    int count = 0, cap = 0;
+    subagent_spec *arr = NULL;
+
+    while (1) {
+        if (cfg_next(p) != 0) goto err;
+        if (p->event.type == YAML_SEQUENCE_END_EVENT) break;
+
+        if (p->event.type != YAML_MAPPING_START_EVENT) {
+            snprintf(p->error_msg, sizeof(p->error_msg), "Expected mapping for subagent entry");
+            p->error_code = EXIT_CONFIG_ERR;
+            cfg_event_done(p);
+            goto err;
+        }
+        cfg_event_done(p);
+
+        if (count >= cap) {
+            cap = cap ? cap * 2 : 4;
+            subagent_spec *tmp = realloc(arr, (size_t)cap * sizeof(subagent_spec));
+            if (!tmp) {
+                p->error_code = EXIT_INTERNAL_ERR;
+                goto err;
+            }
+            arr = tmp;
+        }
+
+        if (cfg_parse_subagent(p, ctx, &arr[count], depth) != 0) goto err;
+        count++;
+
+        /* Tool names must be unique among siblings: the parent dispatches a
+         * call by name within this list only. */
+        for (int i = 0; i < count - 1; i++) {
+            if (strcmp(arr[i].tool.name, arr[count - 1].tool.name) == 0) {
+                snprintf(p->error_msg, sizeof(p->error_msg), "Duplicate subagent tool name '%s'",
+                         arr[count - 1].tool.name);
+                p->error_code = EXIT_CONFIG_ERR;
+                goto err;
+            }
+        }
+    }
+
+    cfg_event_done(p);
+    *out = arr;
+    *out_count = count;
+    return 0;
+
+err:
+    cfg_free_subagents(arr, count);
     return -1;
 }
 
@@ -731,6 +1142,115 @@ err:
     return -1;
 }
 
+/* ------------------------------------------------------------------ */
+/*  Post-parse subagent validation                                     */
+/* ------------------------------------------------------------------ */
+
+/* Is name already present in the seen list? */
+static bool name_seen(const char **seen, int seen_count, const char *name) {
+    for (int i = 0; i < seen_count; i++) {
+        if (strcmp(seen[i], name) == 0) return true;
+    }
+    return false;
+}
+
+/* Append a name pointer (not copied) to the seen list. Returns 0 or -1 on
+ * allocation failure. */
+static int seen_append(const char ***seen, int *seen_count, int *seen_cap, const char *name) {
+    if (*seen_count >= *seen_cap) {
+        *seen_cap = *seen_cap ? *seen_cap * 2 : 8;
+        const char **tmp = realloc(*seen, (size_t)*seen_cap * sizeof(char *));
+        if (tmp == NULL) return -1;
+        *seen = tmp;
+    }
+    (*seen)[(*seen_count)++] = name;
+    return 0;
+}
+
+/* Is 'name' defined in the top-level 'mcps' list? */
+static bool top_level_mcp_exists(const runtime_ctx *ctx, const char *name) {
+    for (int i = 0; i < ctx->mcp_count; i++) {
+        if (strcmp(ctx->mcps[i].name, name) == 0) return true;
+    }
+    return false;
+}
+
+/* Validate the subagent tree now that the whole document is parsed:
+ *  - reference MCP entries must resolve to a top-level 'mcps' server;
+ *  - fully-specified MCP entries must not reuse a name defined anywhere
+ *    else in the config (MCP names are the runtime routing key, so a
+ *    duplicate would make tool calls ambiguous).
+ * seen[] holds every MCP name defined so far (top-level entries first,
+ * then full subagent entries in document order). */
+static int validate_subagents(const subagent_spec *arr, int count, const runtime_ctx *ctx,
+                              const char ***seen, int *seen_count, int *seen_cap, bool *oom) {
+    for (int i = 0; i < count; i++) {
+        const subagent_spec *s = &arr[i];
+        for (int j = 0; j < s->mcp_count; j++) {
+            const mcp_server_cfg *m = &s->mcps[j];
+            if (m->reference) {
+                if (!top_level_mcp_exists(ctx, m->name)) {
+                    log_activity("[error] subagent '%s' references MCP server '%s' which is not "
+                                 "defined in the top-level 'mcps' list",
+                                 s->tool.name, m->name);
+                    return -1;
+                }
+                continue;
+            }
+            if (name_seen(*seen, *seen_count, m->name)) {
+                log_activity("[error] Duplicate MCP server name '%s' (names must be unique "
+                             "across the whole config)",
+                             m->name);
+                return -1;
+            }
+            if (seen_append(seen, seen_count, seen_cap, m->name) != 0) {
+                *oom = true;
+                return -1;
+            }
+        }
+        if (validate_subagents(s->subagents, s->subagent_count, ctx, seen, seen_count, seen_cap,
+                               oom) != 0)
+            return -1;
+    }
+    return 0;
+}
+
+/* Enforce MCP-name uniqueness and subagent reference resolution.
+ * Returns EXIT_SUCCESS, EXIT_CONFIG_ERR, or EXIT_INTERNAL_ERR. */
+static int validate_mcp_names(const runtime_ctx *ctx) {
+    const char **seen = NULL;
+    int seen_count = 0, seen_cap = 0;
+    bool oom = false;
+    int rc = EXIT_SUCCESS;
+
+    for (int i = 0; i < ctx->mcp_count; i++) {
+        if (name_seen(seen, seen_count, ctx->mcps[i].name)) {
+            log_activity("[error] Duplicate MCP server name '%s' in top-level 'mcps' list",
+                         ctx->mcps[i].name);
+            rc = EXIT_CONFIG_ERR;
+            goto done;
+        }
+        if (seen_append(&seen, &seen_count, &seen_cap, ctx->mcps[i].name) != 0) {
+            rc = EXIT_INTERNAL_ERR;
+            goto done;
+        }
+    }
+
+    if (validate_subagents(ctx->subagents, ctx->subagent_count, ctx, &seen, &seen_count, &seen_cap,
+                           &oom) != 0) {
+        if (oom) {
+            rc = EXIT_INTERNAL_ERR;
+        } else {
+            rc = EXIT_CONFIG_ERR;
+        }
+        goto done;
+    }
+
+done:
+    free(seen);
+    return rc;
+}
+
 int config_load(const char *path, runtime_ctx *ctx) {
     char *raw = util_read_file(path);
     if (!raw) {
@@ -839,6 +1359,12 @@ int config_load(const char *path, runtime_ctx *ctx) {
                 result = p.error_code;
                 goto done;
             }
+        } else if (strcmp(key, "subagents") == 0) {
+            cfg_event_done(&p);
+            if (cfg_parse_subagents(&p, ctx, &ctx->subagents, &ctx->subagent_count, 1) != 0) {
+                result = p.error_code;
+                goto done;
+            }
         } else {
             cfg_event_done(&p);
             if (cfg_skip_value(&p) != 0) {
@@ -848,6 +1374,12 @@ int config_load(const char *path, runtime_ctx *ctx) {
         }
     }
     cfg_event_done(&p);
+
+    /* Whole document parsed: validate MCP names and subagent references.
+     * MCP names are the runtime routing key, so duplicates anywhere in the
+     * config (top level or any subagent list) are rejected. */
+    result = validate_mcp_names(ctx);
+    if (result != EXIT_SUCCESS) goto done;
 
     if (cfg_next(&p) != 0) {
         result = p.error_code;
@@ -915,5 +1447,6 @@ void config_free(runtime_ctx *ctx) {
     }
     free(ctx->mcps);
     free(ctx->agent.system_prompt);
+    cfg_free_subagents(ctx->subagents, ctx->subagent_count);
     memset(ctx, 0, sizeof(*ctx));
 }

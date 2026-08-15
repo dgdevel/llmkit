@@ -1,0 +1,46 @@
+# Agent-as-tool example: the main agent gets a "calculator" tool that is
+# actually a nested agent with its own private MCP calculator server.
+#
+#   llmkit agent -c examples/agent-subagent.yml -p "How much is (2+3)*4?"
+#
+llm:
+  api_base: "http://127.0.0.1:8000/v1"
+
+agent:
+  system_prompt: "You are a helpful assistant. Use the calculator to do your math."
+
+subagents:
+  - tool_definition:
+      name: calculator
+      description: A mathematic helper
+      attributes:
+        expression:
+          type: string
+          description: the expression to be evaluated
+        base:
+          type: integer
+          description: radix for the result (optional)
+          required: false
+    system_prompt: "You help doing math, use the real_calculator tool to resolve expressions."
+    user_prompt: "Resolve the expression {expression} using the calculator tool"
+    mcps:
+      - name: real_calculator
+        cmdline: "uvx mcp-server-calculator"
+        init_timeout: "30s"
+        call_timeout: "10m"
+
+# A subagent may also reference a server from the main mcps list instead of
+# defining its own: an entry with only a name reuses that connection.
+#
+# mcps:
+#   - name: shared_calculator
+#     cmdline: "uvx mcp-server-calculator"
+# subagents:
+#   - tool_definition:
+#       name: calculator
+#     mcps:
+#       - name: shared_calculator
+#
+# Subagents can have their own subagents (up to 8 levels of nesting); each
+# level sees only its own tools and MCP servers, and every level uses the
+# same llm configuration as the main agent.

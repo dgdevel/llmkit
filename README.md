@@ -143,6 +143,49 @@ that ultimately fails after exhausting all retries returns exit code 4
 `{"type":"retry",...}` JSONL event is emitted. Retries are silent in
 `quiet` mode.
 
+### Subagents (`agent`, agent-as-tool)
+
+The optional `subagents` config key exposes nested agents to the main agent
+as ordinary tools. When the LLM calls such a tool, llmkit runs a fresh
+conversation with the subagent's own system/user prompts and MCP servers and
+returns the subagent's final answer as the tool result:
+
+```yaml
+llm:
+  api_base: "http://127.0.0.1:8000/v1"
+agent:
+  system_prompt: "You are a helpful assistant. Use the calculator to do your math."
+subagents:
+  - tool_definition:
+      name: calculator
+      description: A mathematic helper
+      attributes:
+        expression:
+          type: string
+          description: the expression to be evaluated
+    system_prompt: "You help doing math, use the real_calculator tool to resolve expressions."
+    user_prompt: "Resolve the expression {expression} using the calculator tool"
+    mcps:
+      - name: real_calculator
+        cmdline: "uvx mcp-server-calculator"
+```
+
+Highlights:
+
+- `tool_definition.attributes` become the tool's JSON schema, and their
+  values are interpolated into `system_prompt`/`user_prompt` via
+  `{attribute}` placeholders.
+- Subagents always use the same `llm` configuration as the main agent.
+- A subagent's `mcps` entries use the main `mcps` format; an entry with only
+  a `name` is a *reference* that reuses the already-running top-level
+  server, while fully-specified entries are private and started lazily on
+  first use.
+- Subagents can have their own `subagents` (recursive, max depth 8).
+
+See [docs/configuration.md](docs/configuration.md#subagents-subagents--agent-as-tool)
+for the full reference and `examples/agent-subagent.yml` for a complete
+example.
+
 ## Configuration
 
 llmkit is driven by a single YAML config file passed via `-c <config.yml>`.
@@ -150,8 +193,8 @@ Both modes (`agent` and `proxy`) share the same schema; the difference is which
 root keys are accepted.
 
 See [docs/configuration.md](docs/configuration.md) for the full reference:
-the `llm`, `mcps`, and `agent` fields, all MCP server options, and example
-agent/proxy configs.
+the `llm`, `mcps`, `agent`, and `subagents` fields, all MCP server options,
+and example agent/proxy configs.
 
 ## Exit codes
 

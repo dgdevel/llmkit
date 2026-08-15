@@ -3,6 +3,7 @@
 #include "conversation.h"
 #include "mcp.h"
 #include "llm.h"
+#include "subagent.h"
 #include "util.h"
 #include "platform.h"
 #include "steering.h"
@@ -405,6 +406,15 @@ static int startup_sequence(runtime_ctx *ctx, const char *convo_path, const char
         return rc;
     }
 
+    /* Merge root-level subagents into the tool block (agent-as-tool). The
+     * merged array is re-sorted deterministically, keeping the block
+     * byte-stable. */
+    rc = subagent_register_tools(ctx);
+    if (rc != EXIT_SUCCESS) {
+        log_activity("[error] Failed to register subagent tools");
+        return rc;
+    }
+
     log_activity("[init] LLM API ready");
     return EXIT_SUCCESS;
 }
@@ -602,10 +612,25 @@ static int conversation_loop(runtime_ctx *ctx, FILE *fp) {
             conversation_write_entry(fp, ENTRY_TOOL_CALL, tc_id, tc_name, tc_args, td->mcp_server);
             emit_tool_call_event(tc_id, tc_name, tc_args, td->mcp_server);
 
-            /* Execute via MCP. */
+            /* Execute via MCP, or dispatch to a subagent (agent-as-tool). */
             char *result = NULL;
             bool is_error = false;
-            int mrc = mcp_call_tool(ctx, td->mcp_server, td->original, tc_args, &result, &is_error);
+            int mrc;
+
+            if (strcmp(td->mcp_server, SUBAGENT_TOOL_SERVER) == 0) {
+                subagent_spec *spec = subagent_find(ctx->subagents, ctx->subagent_count, tc_name);
+                if (spec == NULL) {
+                    log_activity("[error] Subagent definition '%s' not found", tc_name);
+                    emit_tool_result_event(tc_id, tc_name, "Subagent definition not found", 1, 0,
+                                           td->mcp_server);
+                    conversation_write_entry(fp, ENTRY_TOOL_RESULT, tc_id, tc_name,
+                                             "Subagent definition not found", 1, 0, td->mcp_server);
+                    continue;
+                }
+                mrc = subagent_call(ctx, spec, tc_args, 1, g_max_retries, &result, &is_error);
+            } else {
+                mrc = mcp_call_tool(ctx, td->mcp_server, td->original, tc_args, &result, &is_error);
+            }
 
             if (mrc == EXIT_MCP_ERR) {
                 /* Timeout with fail behavior - stop the conversation. */

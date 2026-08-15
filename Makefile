@@ -63,7 +63,7 @@ TIDY_FLAGS := -std=c17 -D_DEFAULT_SOURCE -I $(SRCDIR) \
 .PHONY: all debug profile test clean install uninstall dist check-ascii \
         vendors check-deps test_utf8 test_util test_config test_jsonrpc test_transport \
         test_mcp test_conversation test_llm test_compact test_cli test_agent test_agent_retries \
-        test_agent_compaction test_proxy \
+        test_agent_compaction test_agent_subagent test_proxy \
         format format-check lint lint-analyzer windows windows32 clean-win \
         macos dist-linux dist-windows dist-macos
 
@@ -137,7 +137,7 @@ $(OBJDIR):
 
 TEST_BINS := tests/test_utf8 tests/test_util tests/test_config tests/test_jsonrpc \
              tests/test_transport tests/test_mcp tests/test_conversation tests/test_llm \
-             tests/test_compact tests/test_steering
+             tests/test_compact tests/test_steering tests/test_subagent
 
 clean:
 	rm -rf $(OBJDIR) $(TARGET) build-win llmkit.exe $(TEST_BINS) dist
@@ -257,9 +257,9 @@ check-deps:
 	fi
 	@echo "Done."
 
-test: test_utf8 test_util test_config test_jsonrpc test_transport test_mcp test_conversation \
+test: test_utf8 test_util test_config test_jsonrpc test_transport test_mcp test_conversation test_subagent \
        test_llm test_compact test_steering test_cli test_agent test_agent_retries \
-       test_agent_compaction test_proxy
+       test_agent_compaction test_agent_subagent test_proxy
 	@echo "All tests passed."
 
 test_utf8: tests/test_utf8.c src/utf8.c
@@ -269,6 +269,14 @@ test_utf8: tests/test_utf8.c src/utf8.c
 test_config: tests/test_config.c src/config.c src/util.c src/utf8.c src/platform.c
 	$(CC) $(CFLAGS) -Isrc -o tests/test_config tests/test_config.c src/config.c src/util.c src/utf8.c src/platform.c $(LIBS)
 	./tests/test_config
+
+test_subagent: tests/test_subagent.c src/subagent.c src/mcp.c src/jsonrpc.c src/mcp_transport.c \
+               src/conversation.c src/llm.c src/compact.c src/steering.c \
+               src/util.c src/utf8.c src/platform.c $(CJSON_SRC)
+	$(CC) $(CFLAGS) -Isrc -o tests/test_subagent tests/test_subagent.c src/subagent.c src/mcp.c \
+		src/jsonrpc.c src/mcp_transport.c src/conversation.c src/llm.c src/compact.c \
+		src/steering.c src/util.c src/utf8.c src/platform.c $(CJSON_SRC) $(LIBS)
+	./tests/test_subagent
 
 test_util: tests/test_util.c src/util.c src/utf8.c src/platform.c
 	$(CC) $(CFLAGS) -Isrc -o tests/test_util tests/test_util.c src/util.c src/utf8.c src/platform.c $(LIBS)
@@ -318,6 +326,9 @@ test_agent_compaction: $(TARGET) tests/fixtures/fake_mcp.py tests/test_agent_com
 
 test_agent_retries: $(TARGET) tests/test_agent_retries.py
 	python3 tests/test_agent_retries.py
+
+test_agent_subagent: $(TARGET) tests/fixtures/fake_mcp.py tests/test_agent_subagent.py
+	python3 tests/test_agent_subagent.py
 
 test_proxy: $(TARGET) tests/fixtures/fake_mcp.py tests/test_proxy_integration.py
 	python3 tests/test_proxy_integration.py

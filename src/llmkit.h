@@ -58,6 +58,9 @@ typedef struct {
     char **blacklist;
     int max_reconnect;
     int64_t reconnect_delay_ms;
+    /* Subagent-only: entry has just a 'name' and refers to a server defined
+     * in the top-level 'mcps' list. Never connected/disconnected on its own. */
+    bool reference;
 } mcp_server_cfg;
 
 /* LLM configuration */
@@ -78,6 +81,39 @@ typedef struct {
     double compact_threshold;   /* default 0.8 (fraction of max_tokens) */
     int compact_summarize;      /* default 0: static placeholder summary */
 } agent_cfg;
+
+/* Subagent tool attribute (subagents[].tool_definition.attributes.<name>).
+ * Insertion order is preserved so the generated JSON schema is deterministic
+ * (byte-stable tool blocks keep provider prefix caches warm). */
+typedef struct {
+    char *name;
+    char *type;        /* string|integer|number|boolean|array|object */
+    char *description; /* may be NULL */
+    int required;      /* default 1 */
+} subagent_attr;
+
+/* Tool definition presented to the parent agent for a subagent. */
+typedef struct {
+    char *name;
+    char *description;
+    subagent_attr *attributes; /* insertion order, may be NULL */
+    int attribute_count;
+} subagent_tool_def;
+
+/* Subagent specification. Recursive: a subagent may expose its own
+ * subagents as tools. The LLM config is inherited from the parent. */
+typedef struct subagent_spec {
+    subagent_tool_def tool;
+    char *system_prompt;  /* may be NULL */
+    char *user_prompt;    /* may be NULL */
+    mcp_server_cfg *mcps; /* private servers + references, may be NULL */
+    int mcp_count;
+    struct subagent_spec *subagents; /* may be NULL */
+    int subagent_count;
+} subagent_spec;
+
+/* Maximum subagent nesting depth (root subagents are depth 1). */
+#define SUBAGENT_MAX_DEPTH 8
 
 /* Tool definition (cached from tools/list) */
 typedef struct {
@@ -121,6 +157,8 @@ typedef struct {
     mcp_server_cfg *mcps;
     int mcp_count;
     agent_cfg agent;
+    subagent_spec *subagents; /* root-level subagents, may be NULL */
+    int subagent_count;
     tool_def *tools;
     int tool_count;
     char *convo_path;

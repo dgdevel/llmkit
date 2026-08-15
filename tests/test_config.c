@@ -399,6 +399,196 @@ static void test_unknown_keys(void) {
     fprintf(stderr, "  [ok] test_unknown_keys\n");
 }
 
+/* ------------------------------------------------------------------ */
+/*  subagents                                                          */
+/* ------------------------------------------------------------------ */
+
+static void test_subagents_valid(void) {
+    const char *yaml = "llm:\n"
+                       "  api_base: \"http://1.2.3.4/v1\"\n"
+                       "agent:\n"
+                       "  system_prompt: \"You are a helpful assistant.\"\n"
+                       "subagents:\n"
+                       "  - tool_definition:\n"
+                       "      name: calculator\n"
+                       "      description: A mathematic helper\n"
+                       "      attributes:\n"
+                       "        expression:\n"
+                       "          type: string\n"
+                       "          description: the expression to be evaluated\n"
+                       "        base:\n"
+                       "          type: integer\n"
+                       "          required: false\n"
+                       "    system_prompt: \"You help doing math.\"\n"
+                       "    user_prompt: \"Resolve {expression}\"\n"
+                       "    mcps:\n"
+                       "      - name: real_calculator\n"
+                       "        cmdline: uvx mcp-server-calculator\n";
+
+    const char *tmp = "/tmp/llmkit_test_subagents_valid.yml";
+    write_file(tmp, yaml);
+
+    runtime_ctx ctx;
+    memset(&ctx, 0, sizeof(ctx));
+
+    int ret = config_load(tmp, &ctx);
+    CHECK_EQ(ret, 0, "valid subagents config loads");
+
+    CHECK_EQ(ctx.subagent_count, 1, "one root subagent");
+    subagent_spec *s = &ctx.subagents[0];
+    CHECK_STR_EQ(s->tool.name, "calculator", "tool name");
+    CHECK_STR_EQ(s->tool.description, "A mathematic helper", "tool description");
+    CHECK_STR_EQ(s->system_prompt, "You help doing math.", "system_prompt");
+    CHECK_STR_EQ(s->user_prompt, "Resolve {expression}", "user_prompt");
+
+    CHECK_EQ(s->tool.attribute_count, 2, "two attributes");
+    CHECK_STR_EQ(s->tool.attributes[0].name, "expression", "attr 0 name");
+    CHECK_STR_EQ(s->tool.attributes[0].type, "string", "attr 0 type");
+    CHECK_EQ(s->tool.attributes[0].required, 1, "attr 0 required defaults to true");
+    CHECK_STR_EQ(s->tool.attributes[1].name, "base", "attr 1 name");
+    CHECK_STR_EQ(s->tool.attributes[1].type, "integer", "attr 1 type");
+    CHECK_EQ(s->tool.attributes[1].required, 0, "attr 1 required: false");
+
+    CHECK_EQ(s->mcp_count, 1, "one private mcp");
+    CHECK_STR_EQ(s->mcps[0].name, "real_calculator", "mcp name");
+    CHECK_STR_EQ(s->mcps[0].cmdline, "uvx mcp-server-calculator", "mcp cmdline");
+    CHECK_EQ(s->mcps[0].reference, 0, "mcp is a full entry, not a reference");
+    CHECK_EQ(s->subagent_count, 0, "no nested subagents");
+
+    config_free(&ctx);
+    unlink(tmp);
+
+    fprintf(stderr, "  [ok] test_subagents_valid\n");
+}
+
+static void test_subagents_nested(void) {
+    const char *yaml = "llm:\n"
+                       "  api_base: \"http://1.2.3.4/v1\"\n"
+                       "subagents:\n"
+                       "  - tool_definition:\n"
+                       "      name: parent\n"
+                       "    subagents:\n"
+                       "      - tool_definition:\n"
+                       "          name: child\n"
+                       "        mcps:\n"
+                       "          - name: inner\n"
+                       "            cmdline: run-inner\n";
+
+    const char *tmp = "/tmp/llmkit_test_subagents_nested.yml";
+    write_file(tmp, yaml);
+
+    runtime_ctx ctx;
+    memset(&ctx, 0, sizeof(ctx));
+
+    int ret = config_load(tmp, &ctx);
+    CHECK_EQ(ret, 0, "nested subagents config loads");
+
+    CHECK_EQ(ctx.subagent_count, 1, "one root subagent");
+    subagent_spec *s = &ctx.subagents[0];
+    CHECK_STR_EQ(s->tool.name, "parent", "root tool name");
+    CHECK_EQ(s->subagent_count, 1, "one nested subagent");
+    CHECK_STR_EQ(s->subagents[0].tool.name, "child", "nested tool name");
+    CHECK_EQ(s->subagents[0].mcp_count, 1, "nested private mcp");
+    CHECK_STR_EQ(s->subagents[0].mcps[0].cmdline, "run-inner", "nested mcp cmdline");
+
+    config_free(&ctx);
+    unlink(tmp);
+
+    fprintf(stderr, "  [ok] test_subagents_nested\n");
+}
+
+static void test_subagents_reference(void) {
+    /* A name-only entry inside subagents.mcps references the main list. */
+    const char *yaml = "llm:\n"
+                       "  api_base: \"http://1.2.3.4/v1\"\n"
+                       "mcps:\n"
+                       "  - name: calc\n"
+                       "    cmdline: uvx mcp-server-calculator\n"
+                       "subagents:\n"
+                       "  - tool_definition:\n"
+                       "      name: c1\n"
+                       "    mcps:\n"
+                       "      - name: calc\n"
+                       "      - name: own\n"
+                       "        cmdline: run-own\n";
+
+    const char *tmp = "/tmp/llmkit_test_subagents_reference.yml";
+    write_file(tmp, yaml);
+
+    runtime_ctx ctx;
+    memset(&ctx, 0, sizeof(ctx));
+
+    int ret = config_load(tmp, &ctx);
+    CHECK_EQ(ret, 0, "reference config loads");
+
+    subagent_spec *s = &ctx.subagents[0];
+    CHECK_EQ(s->mcp_count, 2, "two mcp entries");
+    CHECK_EQ(s->mcps[0].reference, 1, "name-only entry is a reference");
+    CHECK_STR_NULL(s->mcps[0].cmdline, "reference has no cmdline");
+    CHECK_EQ(s->mcps[1].reference, 0, "full entry is not a reference");
+    CHECK_STR_EQ(s->mcps[1].cmdline, "run-own", "full entry cmdline");
+
+    config_free(&ctx);
+    unlink(tmp);
+
+    fprintf(stderr, "  [ok] test_subagents_reference\n");
+}
+
+static void test_subagents_errors(void) {
+    struct {
+        const char *name;
+        const char *yaml;
+    } cases[] = {
+        {"unresolved reference",
+         "llm:\n  api_base: x\nmcps:\n  - name: other\n    cmdline: c\nsubagents:\n"
+         "  - tool_definition:\n      name: c1\n    mcps:\n      - name: nosuch\n"},
+        {"missing tool name", "llm:\n  api_base: x\nsubagents:\n  - system_prompt: s\n"},
+        {"duplicate sibling tool names",
+         "llm:\n  api_base: x\nsubagents:\n  - tool_definition:\n      name: c1\n"
+         "  - tool_definition:\n      name: c1\n"},
+        {"bad attribute type",
+         "llm:\n  api_base: x\nsubagents:\n  - tool_definition:\n      name: c1\n"
+         "      attributes:\n        a:\n          type: float\n"},
+        {"mcp name collides with top-level",
+         "llm:\n  api_base: x\nmcps:\n  - name: calc\n    cmdline: c\nsubagents:\n"
+         "  - tool_definition:\n      name: c1\n    mcps:\n      - name: calc\n"
+         "        cmdline: d\n"},
+        {"reference without top-level mcps",
+         "llm:\n  api_base: x\nsubagents:\n  - tool_definition:\n      name: c1\n"
+         "    mcps:\n      - name: calc\n"},
+        {"subagents not a sequence", "llm:\n  api_base: x\nsubagents: oops\n"},
+        {"depth beyond cap",
+         "llm:\n  api_base: x\nsubagents:\n  - tool_definition:\n      name: a\n"
+         "    subagents:\n      - tool_definition:\n          name: b\n"
+         "        subagents:\n          - tool_definition:\n              name: c\n"
+         "            subagents:\n            - tool_definition:\n                name: d\n"
+         "              subagents:\n              - tool_definition:\n                  name: e\n"
+         "                subagents:\n                - tool_definition:\n                    "
+         "name: f\n"
+         "                  subagents:\n                  - tool_definition:\n                     "
+         " name: g\n"
+         "                    subagents:\n                    - tool_definition:\n"
+         "                        name: h\n"
+         "                      subagents:\n                      - tool_definition:\n"
+         "                          name: i\n"},
+    };
+
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        char path[128];
+        snprintf(path, sizeof(path), "/tmp/llmkit_test_subagents_err_%zu.yml", i);
+        write_file(path, cases[i].yaml);
+
+        runtime_ctx ctx;
+        memset(&ctx, 0, sizeof(ctx));
+        int ret = config_load(path, &ctx);
+        CHECK_EQ(ret, EXIT_CONFIG_ERR, cases[i].name);
+        config_free(&ctx);
+        unlink(path);
+    }
+
+    fprintf(stderr, "  [ok] test_subagents_errors\n");
+}
+
 int main(void) {
     fprintf(stderr, "=== test_config ===\n");
 
@@ -410,6 +600,10 @@ int main(void) {
     test_invalid_types();
     test_config_free_null();
     test_unknown_keys();
+    test_subagents_valid();
+    test_subagents_nested();
+    test_subagents_reference();
+    test_subagents_errors();
 
     fprintf(stderr, "\n%d tests, %d failed\n", tests_run, tests_failed);
     return tests_failed > 0 ? 1 : 0;
