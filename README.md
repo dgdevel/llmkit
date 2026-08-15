@@ -181,6 +181,13 @@ Highlights:
   server, while fully-specified entries are private and started lazily on
   first use.
 - Subagents can have their own `subagents` (recursive, max depth 8).
+- The **full sub-conversation of every subagent run is retained in the
+  conversation JSONL** as a nested trace: bracketed by `subagent_start` /
+  `subagent_end` entries and stamped with `depth`, `subagent` and `run_id`
+  fields, so sublevels stay inspectable and attributable. The traces are
+  excluded from the LLM's own history — the main agent and each subagent
+  still see exactly their own messages. See
+  [docs/conversation-format.md](docs/conversation-format.md#subagent-traces-sublevels).
 
 See [docs/configuration.md](docs/configuration.md#subagents-subagents--agent-as-tool)
 for the full reference and `examples/agent-subagent.yml` for a complete

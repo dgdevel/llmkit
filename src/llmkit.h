@@ -37,8 +37,22 @@ typedef enum {
     ENTRY_ASSISTANT,
     ENTRY_TOOL_CALL,
     ENTRY_TOOL_RESULT,
-    ENTRY_ERROR
+    ENTRY_ERROR,
+    /* Subagent trace brackets: written around the scoped entries of one
+     * agent-as-tool run, skipped during reconstruction like meta/error. */
+    ENTRY_SUBAGENT_START,
+    ENTRY_SUBAGENT_END
 } entry_type;
+
+/* Scope of a subagent (nested) conversation trace. Entries written with a
+ * non-NULL scope carry "depth" (>= 1), "subagent" (tool name) and "run_id"
+ * fields; entries written without one are top-level. Readers filter by
+ * run_id: NULL run_id = top-level entries only. */
+typedef struct {
+    int depth;            /* 1 for root subagents, deeper for nested ones */
+    const char *subagent; /* subagent tool name */
+    const char *run_id;   /* UUID of this subagent run */
+} conv_scope;
 
 /* MCP server configuration (parsed from YAML) */
 typedef struct {

@@ -627,7 +627,8 @@ static int conversation_loop(runtime_ctx *ctx, FILE *fp) {
                                              "Subagent definition not found", 1, 0, td->mcp_server);
                     continue;
                 }
-                mrc = subagent_call(ctx, spec, tc_args, 1, g_max_retries, &result, &is_error);
+                mrc = subagent_call(ctx, spec, tc_args, 1, g_max_retries, fp, tc_id, &result,
+                                    &is_error);
             } else {
                 mrc = mcp_call_tool(ctx, td->mcp_server, td->original, tc_args, &result, &is_error);
             }

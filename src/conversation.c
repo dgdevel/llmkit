@@ -67,7 +67,10 @@ int conversation_write_meta(FILE *fp, const char *config_hash, const char *run_i
     cJSON *root = make_entry_base("meta");
     if (root == NULL) return EXIT_INTERNAL_ERR;
 
-    cJSON_AddNumberToObject(root, "version", 1);
+    /* Version 2: adds subagent trace entries (subagent_start/end) and the
+     * optional depth/subagent/run_id scope fields. Readers stay lenient:
+     * version-1 files simply contain no scoped entries. */
+    cJSON_AddNumberToObject(root, "version", 2);
     cJSON_AddStringToObject(root, "config_hash", config_hash);
     cJSON_AddStringToObject(root, "run_id", run_id);
 
@@ -80,11 +83,24 @@ int conversation_write_meta(FILE *fp, const char *config_hash, const char *run_i
 /*  conversation_write_entry (variadic)                                */
 /* ------------------------------------------------------------------ */
 
-int conversation_write_entry(FILE *fp, entry_type type, ...) {
+/* Stamp the scope fields (depth/subagent/run_id) of a nested entry right
+ * after type+timestamp so every scoped line is self-describing even when
+ * the file is truncated mid-subagent (crash). */
+static int apply_scope(cJSON *root, const conv_scope *scope) {
+    if (scope == NULL) return EXIT_SUCCESS;
+    if (cJSON_AddNumberToObject(root, "depth", scope->depth) == NULL ||
+        cJSON_AddStringToObject(root, "subagent", scope->subagent ? scope->subagent : "") == NULL ||
+        cJSON_AddStringToObject(root, "run_id", scope->run_id ? scope->run_id : "") == NULL) {
+        return EXIT_INTERNAL_ERR;
+    }
+    return EXIT_SUCCESS;
+}
+
+/* Shared core: consume the type-specific variadic arguments, build and write
+ * the entry. scope == NULL writes a top-level entry. */
+static int write_entry_core(FILE *fp, const conv_scope *scope, entry_type type, va_list args) {
     if (fp == NULL) return EXIT_INTERNAL_ERR;
 
-    va_list args;
-    va_start(args, type);
     int rc = EXIT_SUCCESS;
     cJSON *root = NULL;
 
@@ -97,6 +113,8 @@ int conversation_write_entry(FILE *fp, entry_type type, ...) {
             rc = EXIT_INTERNAL_ERR;
             break;
         }
+        rc = apply_scope(root, scope);
+        if (rc != EXIT_SUCCESS) break;
         cJSON_AddStringToObject(root, "content", content ? content : "");
         cJSON_AddStringToObject(root, "source", source ? source : "cli");
         break;
@@ -112,6 +130,8 @@ int conversation_write_entry(FILE *fp, entry_type type, ...) {
             rc = EXIT_INTERNAL_ERR;
             break;
         }
+        rc = apply_scope(root, scope);
+        if (rc != EXIT_SUCCESS) break;
         cJSON_AddStringToObject(root, "content", content ? content : "");
         if (reasoning != NULL && reasoning[0] != '\0') {
             cJSON_AddStringToObject(root, "reasoning", reasoning);
@@ -149,6 +169,8 @@ int conversation_write_entry(FILE *fp, entry_type type, ...) {
             rc = EXIT_INTERNAL_ERR;
             break;
         }
+        rc = apply_scope(root, scope);
+        if (rc != EXIT_SUCCESS) break;
         cJSON_AddStringToObject(root, "id", id ? id : "");
         cJSON_AddStringToObject(root, "name", name ? name : "");
         cJSON_AddStringToObject(root, "arguments", arguments ? arguments : "{}");
@@ -168,6 +190,8 @@ int conversation_write_entry(FILE *fp, entry_type type, ...) {
             rc = EXIT_INTERNAL_ERR;
             break;
         }
+        rc = apply_scope(root, scope);
+        if (rc != EXIT_SUCCESS) break;
         cJSON_AddStringToObject(root, "call_id", call_id ? call_id : "");
         cJSON_AddStringToObject(root, "name", name ? name : "");
         cJSON_AddStringToObject(root, "result", result ? result : "");
@@ -186,6 +210,8 @@ int conversation_write_entry(FILE *fp, entry_type type, ...) {
             rc = EXIT_INTERNAL_ERR;
             break;
         }
+        rc = apply_scope(root, scope);
+        if (rc != EXIT_SUCCESS) break;
         cJSON_AddNumberToObject(root, "code", code);
         cJSON_AddStringToObject(root, "message", message ? message : "");
         cJSON_AddBoolToObject(root, "recoverable", recoverable ? 1 : 0);
@@ -197,13 +223,76 @@ int conversation_write_entry(FILE *fp, entry_type type, ...) {
         break;
     }
 
-    va_end(args);
-
-    if (root != NULL) {
+    if (rc == EXIT_SUCCESS && root != NULL) {
         int wr = write_json_line(fp, root);
-        cJSON_Delete(root);
         if (rc == EXIT_SUCCESS) rc = wr;
     }
+    cJSON_Delete(root);
+    return rc;
+}
+
+int conversation_write_entry(FILE *fp, entry_type type, ...) {
+    va_list args;
+    va_start(args, type);
+    int rc = write_entry_core(fp, NULL, type, args);
+    va_end(args);
+    return rc;
+}
+
+int conversation_write_scoped(FILE *fp, const conv_scope *scope, entry_type type, ...) {
+    va_list args;
+    va_start(args, type);
+    int rc = write_entry_core(fp, scope, type, args);
+    va_end(args);
+    return rc;
+}
+
+/* ------------------------------------------------------------------ */
+/*  subagent bracket entries                                           */
+/* ------------------------------------------------------------------ */
+
+int conversation_write_subagent_start(FILE *fp, const conv_scope *scope, const char *call_id,
+                                      const char *arguments) {
+    if (fp == NULL || scope == NULL) return EXIT_INTERNAL_ERR;
+
+    cJSON *root = make_entry_base("subagent_start");
+    if (root == NULL) return EXIT_INTERNAL_ERR;
+
+    int rc = EXIT_SUCCESS;
+    if (cJSON_AddNumberToObject(root, "depth", scope->depth) == NULL ||
+        cJSON_AddStringToObject(root, "subagent", scope->subagent ? scope->subagent : "") == NULL ||
+        cJSON_AddStringToObject(root, "run_id", scope->run_id ? scope->run_id : "") == NULL ||
+        cJSON_AddStringToObject(root, "call_id", call_id ? call_id : "") == NULL ||
+        cJSON_AddStringToObject(root, "arguments", arguments ? arguments : "{}") == NULL) {
+        rc = EXIT_INTERNAL_ERR;
+    }
+
+    if (rc == EXIT_SUCCESS) {
+        rc = write_json_line(fp, root);
+    }
+    cJSON_Delete(root);
+    return rc;
+}
+
+int conversation_write_subagent_end(FILE *fp, const conv_scope *scope, int turns, int is_error) {
+    if (fp == NULL || scope == NULL) return EXIT_INTERNAL_ERR;
+
+    cJSON *root = make_entry_base("subagent_end");
+    if (root == NULL) return EXIT_INTERNAL_ERR;
+
+    int rc = EXIT_SUCCESS;
+    if (cJSON_AddNumberToObject(root, "depth", scope->depth) == NULL ||
+        cJSON_AddStringToObject(root, "subagent", scope->subagent ? scope->subagent : "") == NULL ||
+        cJSON_AddStringToObject(root, "run_id", scope->run_id ? scope->run_id : "") == NULL ||
+        cJSON_AddNumberToObject(root, "turns", turns) == NULL ||
+        cJSON_AddBoolToObject(root, "is_error", is_error ? 1 : 0) == NULL) {
+        rc = EXIT_INTERNAL_ERR;
+    }
+
+    if (rc == EXIT_SUCCESS) {
+        rc = write_json_line(fp, root);
+    }
+    cJSON_Delete(root);
     return rc;
 }
 
@@ -262,6 +351,11 @@ typedef struct {
 } conv_entry;
 
 int conversation_reconstruct(const char *path, json_message **out_msgs, int *out_count) {
+    return conversation_reconstruct_scope(path, NULL, out_msgs, out_count);
+}
+
+int conversation_reconstruct_scope(const char *path, const char *run_id, json_message **out_msgs,
+                                   int *out_count) {
     if (path == NULL || out_msgs == NULL || out_count == NULL) return EXIT_INTERNAL_ERR;
     *out_msgs = NULL;
     *out_count = 0;
@@ -305,33 +399,54 @@ int conversation_reconstruct(const char *path, json_message **out_msgs, int *out
                             et = ENTRY_ERROR;
                         } else if (strcmp(ts, "meta") == 0) {
                             et = ENTRY_META;
+                        } else if (strcmp(ts, "subagent_start") == 0) {
+                            et = ENTRY_SUBAGENT_START;
+                        } else if (strcmp(ts, "subagent_end") == 0) {
+                            et = ENTRY_SUBAGENT_END;
                         } else {
                             cJSON_Delete(j);
                             line = next ? next + 1 : NULL;
                             continue;
                         }
 
-                        /* Skip meta and error -- not part of LLM history. */
-                        if (et != ENTRY_META && et != ENTRY_ERROR) {
-                            if (ecount >= ecap) {
-                                int new_cap = ecap * 2;
-                                conv_entry *tmp =
-                                    realloc(entries, (size_t)new_cap * sizeof(conv_entry));
-                                if (tmp == NULL) {
-                                    free_entries(entries, ecount);
-                                    free(content);
-                                    return EXIT_INTERNAL_ERR;
-                                }
-                                memset(tmp + ecap, 0,
-                                       (size_t)(new_cap - ecap) * sizeof(conv_entry));
-                                entries = tmp;
-                                ecap = new_cap;
+                        /* Skip meta, error and subagent brackets -- not part of
+                         * LLM history. */
+                        if (et != ENTRY_META && et != ENTRY_ERROR && et != ENTRY_SUBAGENT_START &&
+                            et != ENTRY_SUBAGENT_END) {
+                            /* Scope filter: with run_id == NULL keep only
+                             * top-level entries (no run_id field); with a
+                             * run_id keep only that subagent run's entries. */
+                            cJSON *rid = cJSON_GetObjectItem(j, "run_id");
+                            const char *entry_rid =
+                                (rid && cJSON_IsString(rid)) ? rid->valuestring : NULL;
+                            int keep;
+                            if (run_id == NULL) {
+                                keep = (entry_rid == NULL);
+                            } else {
+                                keep = (entry_rid != NULL && strcmp(entry_rid, run_id) == 0);
                             }
-                            entries[ecount].type = et;
-                            entries[ecount].json = j;
-                            ecount++;
-                            line = next ? next + 1 : NULL;
-                            continue;
+
+                            if (keep) {
+                                if (ecount >= ecap) {
+                                    int new_cap = ecap * 2;
+                                    conv_entry *tmp =
+                                        realloc(entries, (size_t)new_cap * sizeof(conv_entry));
+                                    if (tmp == NULL) {
+                                        free_entries(entries, ecount);
+                                        free(content);
+                                        return EXIT_INTERNAL_ERR;
+                                    }
+                                    memset(tmp + ecap, 0,
+                                           (size_t)(new_cap - ecap) * sizeof(conv_entry));
+                                    entries = tmp;
+                                    ecap = new_cap;
+                                }
+                                entries[ecount].type = et;
+                                entries[ecount].json = j;
+                                ecount++;
+                                line = next ? next + 1 : NULL;
+                                continue;
+                            }
                         }
                     }
                     cJSON_Delete(j);
@@ -477,6 +592,15 @@ int conversation_read_last_assistant(const char *path, char **out_content, char 
                 cJSON *tj = cJSON_GetObjectItem(j, "type");
                 const char *ts = (tj && cJSON_IsString(tj)) ? tj->valuestring : NULL;
                 if (ts != NULL && strcmp(ts, "assistant") == 0) {
+                    /* Scoped (subagent) assistants never surface as the main
+                     * answer: a nested run's final text is recorded at top
+                     * level as the parent's tool_result. */
+                    cJSON *rid = cJSON_GetObjectItem(j, "run_id");
+                    if (rid != NULL && cJSON_IsString(rid)) {
+                        cJSON_Delete(j);
+                        line = next ? next + 1 : NULL;
+                        continue;
+                    }
                     cJSON *cj = cJSON_GetObjectItem(j, "content");
                     const char *val = (cj && cJSON_IsString(cj)) ? cj->valuestring : "";
                     free(last_content);

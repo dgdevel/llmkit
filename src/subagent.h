@@ -41,15 +41,22 @@ char *subagent_interp(const char *tmpl, const subagent_spec *spec, const char *a
  * config as the parent agent, and return the subagent's final assistant
  * content in *out_result (malloc'd).
  *
- * The nested loop is silent on stdout (diagnostics go to stderr via
- * log_activity), uses the parent's retry policy (Fibonacci backoff) and a
- * 50-turn safety limit, and may dispatch to the subagent's own subagents
- * (depth + 1, capped by SUBAGENT_MAX_DEPTH).
+ * The full sub-conversation trace is retained in the parent's conversation
+ * file: fp must be the parent's already-open conversation stream. A
+ * subagent_start/subagent_end bracket pair is written around the run's
+ * scoped entries (stamped with depth, the subagent tool name and a fresh
+ * run_id); call_id ties the trace to the originating tool_call. The nested
+ * loop rebuilds its history from the shared file by run_id, stays silent on
+ * stdout (diagnostics go to stderr via log_activity), uses the parent's
+ * retry policy (Fibonacci backoff) and a 50-turn safety limit, and may
+ * dispatch to the subagent's own subagents (depth + 1, capped by
+ * SUBAGENT_MAX_DEPTH) whose traces are nested in turn.
  *
  * Returns EXIT_SUCCESS with *out_is_error set for soft failures (LLM or
  * tool errors delivered to the caller as a tool result), EXIT_MCP_ERR to
  * propagate a fatal inner tool failure, or EXIT_INTERNAL_ERR. */
 int subagent_call(const runtime_ctx *parent, subagent_spec *spec, const char *args_json, int depth,
-                  int max_retries, char **out_result, bool *out_is_error);
+                  int max_retries, FILE *fp, const char *call_id, char **out_result,
+                  bool *out_is_error);
 
 #endif

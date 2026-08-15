@@ -9,7 +9,7 @@ so the conversation is discarded — useful for one-shot prompts. In both cases 
 on-disk format is identical.
 
 ```plaintext
-{"type":"meta","timestamp":"...","version":1,"config_hash":"sha256:...","run_id":"..."}
+{"type":"meta","timestamp":"...","version":2,"config_hash":"sha256:...","run_id":"..."}
 {"type":"user","timestamp":"...","content":"What is the weather?","source":"cli"}
 {"type":"assistant","timestamp":"...","content":"Let me check...","model":"gpt-4o","usage":{...}}
 {"type":"tool_call","timestamp":"...","id":"call_abc","name":"weather_get","arguments":"{\"city\":\"London\"}","mcp_server":"weather-srv"}
@@ -26,12 +26,21 @@ The **first line** of every conversation file. Written once at session start.
 |---------------|--------|---------------------------------------------------|
 | `type`        | string | Always `"meta"`                                   |
 | `timestamp`   | string | ISO 8601 UTC timestamp                            |
-| `version`     | number | Schema version (currently `1`)                    |
+| `version`     | number | Schema version (currently `2`)                    |
 | `config_hash` | string | SHA-256 hex digest of the resolved YAML config    |
 | `run_id`      | string | UUID v4 identifying this agent session            |
 
+Version history:
+
+- `1` — original schema.
+- `2` — adds the subagent trace entries (`subagent_start`, `subagent_end`)
+  and the optional `depth`/`subagent`/`run_id` scope fields (see
+  [Subagent traces](#subagent-traces-sublevels)). The change is additive:
+  a version-1 file simply contains no scoped entries, and readers accept
+  both.
+
 ```json
-{"type":"meta","timestamp":"2026-07-27T14:30:00Z","version":1,"config_hash":"sha256:a1b2c3...","run_id":"550e8400-e29b-41d4-a716-446655440000"}
+{"type":"meta","timestamp":"2026-07-27T14:30:00Z","version":2,"config_hash":"sha256:a1b2c3...","run_id":"550e8400-e29b-41d4-a716-446655440000"}
 ```
 
 ### `user` — user message
@@ -154,6 +163,103 @@ Runtime errors that occur during the agent run. These entries are **not** part o
 {"type":"error","timestamp":"2026-07-27T14:30:10Z","code":4,"message":"LLM API call failed","recoverable":false}
 ```
 
+## Subagent traces (sublevels)
+
+When a subagent (agent-as-tool) runs, its **entire sub-conversation** is
+retained in the same JSONL file — nested between the parent's `tool_call`
+and `tool_result` entries — so the full trace of every sub-conversation
+survives. A subagent run opens with a `subagent_start` bracket, writes its
+scoped entries, and closes with a `subagent_end` bracket. Subagents of
+subagents repeat the pattern one level deeper, recursively (up to the
+nesting limit).
+
+```plaintext
+{"type":"assistant", ...}                                  <- parent assistant (tool_calls)
+{"type":"tool_call","id":"call_1","name":"calculator", ...} <- parent calls the subagent
+{"type":"subagent_start", ...}                             <- trace opens
+{"type":"user",      "depth":1, "subagent":"calculator", "run_id":"<uuid>", ...}
+{"type":"assistant", "depth":1, "subagent":"calculator", "run_id":"<uuid>", ...}
+{"type":"tool_call", "depth":1, ...}                        <- the subagent's own tools
+{"type":"tool_result","depth":1, ...}
+{"type":"subagent_start","depth":2, ...}                    <- nested subagent, one level deeper
+{"type":"user",      "depth":2, ...}
+{"type":"assistant", "depth":2, ...}
+{"type":"subagent_end",  "depth":2, ...}
+{"type":"tool_result","depth":1, ...}                       <- answer of the nested run
+{"type":"assistant", "depth":1, ...}                        <- subagent's final answer
+{"type":"subagent_end", ...}                                <- trace closes
+{"type":"tool_result","call_id":"call_1","name":"calculator", ...} <- parent receives the answer
+{"type":"assistant", ...}                                   <- parent continues
+```
+
+### Scope fields
+
+Every entry written inside a subagent run (and the brackets themselves)
+carries three extra fields:
+
+| Field      | Type   | Description                                                     |
+|------------|--------|-----------------------------------------------------------------|
+| `depth`    | number | Nesting level: `1` for a root subagent, `2` inside it, etc.     |
+| `subagent` | string | Tool name of the subagent that wrote the entry                  |
+| `run_id`   | string | UUID of this subagent run (one per invocation, not per config)  |
+
+Top-level entries carry none of these fields. Presence of `run_id` is the
+discriminator: an entry either belongs to a subagent run (identifiable
+down to the individual invocation) or to the main conversation.
+
+### `subagent_start` — trace open
+
+Written immediately after the parent's `tool_call` for the subagent.
+
+| Field       | Type   | Description                                       |
+|-------------|--------|---------------------------------------------------|
+| `type`      | string | Always `"subagent_start"`                         |
+| `timestamp` | string | ISO 8601 UTC timestamp                            |
+| `depth`     | number | Nesting level (>= 1)                              |
+| `subagent`  | string | Subagent tool name                                |
+| `run_id`    | string | UUID of this subagent run                         |
+| `call_id`   | string | Matches the `id` of the originating `tool_call`   |
+| `arguments` | string | JSON string of the raw tool-call arguments        |
+
+```json
+{"type":"subagent_start","timestamp":"2026-07-27T14:30:05Z","depth":1,"subagent":"calculator","run_id":"9f0c...","call_id":"call_1","arguments":"{\"expression\":\"2+3\"}"}
+```
+
+### `subagent_end` — trace close
+
+Written immediately before the parent's `tool_result`.
+
+| Field       | Type    | Description                                        |
+|-------------|---------|----------------------------------------------------|
+| `type`      | string  | Always `"subagent_end"`                            |
+| `timestamp` | string  | ISO 8601 UTC timestamp                             |
+| `depth`     | number  | Nesting level (>= 1)                               |
+| `subagent`  | string  | Subagent tool name                                 |
+| `run_id`    | string  | UUID of this subagent run                          |
+| `turns`     | number  | LLM turns the subagent executed                    |
+| `is_error`  | boolean | `true` if the run ended in a soft error            |
+
+```json
+{"type":"subagent_end","timestamp":"2026-07-27T14:30:07Z","depth":1,"subagent":"calculator","run_id":"9f0c...","turns":2,"is_error":false}
+```
+
+### Semantics
+
+- **Bracket integrity.** The bracket pair is closed on every exit path
+  (including early failures); only a hard crash of the process can leave a
+  `subagent_start` without its `subagent_end`. Even then, every scoped line
+  is self-describing (`depth`/`subagent`/`run_id`), so truncated traces
+  remain attributable.
+- **History reconstruction is scope-filtered.** When llmkit replays the
+  conversation, the main agent's request history is built from top-level
+  entries only; a subagent rebuilds its history from the entries carrying
+  its own `run_id`. Nested traces never leak into any LLM request.
+- **`llmkit response` ignores scoped entries.** The last *top-level*
+  assistant entry is the session's answer; a subagent's final text is
+  already recorded at top level as its parent's `tool_result`.
+- **Compaction** operates on the reconstructed (scope-filtered) history,
+  so nested traces do not affect the main conversation's projection.
+
 ## Tool-call grouping
 
 When the LLM responds with tool calls, the assistant entry is followed by one or more `tool_call` entries, each immediately followed by its corresponding `tool_result`. Example sequence of a single multi-tool turn:
@@ -179,6 +285,12 @@ Every entry has a `timestamp` field in ISO 8601 UTC format generated at write ti
 ## Reading the file
 
 - Use **`llmkit agent`** to replay and continue a conversation — it reconstructs the full message history from the JSONL and passes it to the LLM, preserving tool-call groupings.
+- The history is built from **top-level entries only**; subagent traces are
+  excluded from every LLM request (each subagent rebuilds its own history
+  by `run_id` while it runs). Readers walking the file linearly should skip
+  entries that carry a `run_id` field unless they specifically want the
+  subagent traces, and can use the `subagent_start`/`subagent_end` brackets
+  to delimit them.
 
 ## Stdout output modes (`--mode` flag)
 

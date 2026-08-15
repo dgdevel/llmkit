@@ -297,20 +297,25 @@ All functions use cJSON for JSON construction/parsing. Return value indicates su
 | Function | Purpose |
 |----------|---------|
 | `int conversation_open(const char *path, FILE **out_fp)` | Open file for append ("a"), create if not exists. Validate UTF-8 of existing content. |
-| `int conversation_write_meta(FILE *fp, const char *config_hash, const char *run_id)` | Write meta JSON entry. |
-| `int conversation_write_entry(FILE *fp, entry_type type, ...)` | Write typed entry to JSONL. |
-| `int conversation_reconstruct(const char *path, json_message **out_msgs, int *out_count)` | Read all lines, skip meta/error, build message array for LLM API. |
+| `int conversation_write_meta(FILE *fp, const char *config_hash, const char *run_id)` | Write meta JSON entry (schema version 2). |
+| `int conversation_write_entry(FILE *fp, entry_type type, ...)` | Write typed entry to JSONL (top-level scope). |
+| `int conversation_write_scoped(FILE *fp, const conv_scope *scope, entry_type type, ...)` | Same, but stamps `depth`/`subagent`/`run_id` on the entry (subagent trace). |
+| `int conversation_write_subagent_start(FILE *fp, const conv_scope *scope, const char *call_id, const char *arguments)` | Open a subagent trace bracket. |
+| `int conversation_write_subagent_end(FILE *fp, const conv_scope *scope, int turns, int is_error)` | Close a subagent trace bracket. |
+| `int conversation_reconstruct(const char *path, json_message **out_msgs, int *out_count)` | Read all lines, skip meta/error/brackets and scoped entries, build the top-level message array for the LLM API. |
+| `int conversation_reconstruct_scope(const char *path, const char *run_id, json_message **out_msgs, int *out_count)` | Same, but rebuilds one subagent run's history: with `run_id == NULL` identical to `conversation_reconstruct`, otherwise only entries carrying that `run_id`. |
 | `void conversation_free_messages(json_message *msgs, int count)` | Free reconstructed message array. |
-| `int conversation_read_last_assistant(const char *path, char **out_content)` | Read file line by line, find the last `"type":"assistant"` entry, return its `content`. |
+| `int conversation_read_last_assistant(const char *path, char **out_content)` | Read file line by line, find the last top-level `"type":"assistant"` entry (scoped entries skipped), return its `content`. |
 
-**`conversation_reconstruct` algorithm:**
+**`conversation_reconstruct_scope` algorithm:**
 1. Open file for reading
 2. Read line by line
 3. Parse JSON, check `type` field
-4. Skip `meta` and `error` entries
-5. `user` → `{role: "user", content: content}`
-6. `assistant` → `{role: "assistant", content: content}`
-7. Group `tool_call` with preceding assistant. Collect tool_calls, then append tool role messages:
+4. Skip `meta`, `error`, `subagent_start` and `subagent_end` entries
+5. Scope filter: `run_id == NULL` keeps entries without a `run_id` field (top level); a non-NULL `run_id` keeps only that subagent run's entries
+6. `user` → `{role: "user", content: content}`
+7. `assistant` → `{role: "assistant", content: content}`
+8. Group `tool_call` with preceding assistant. Collect tool_calls, then append tool role messages:
    - `tool_call` entry → assistant message gets `tool_calls` array entry
    - `tool_result` entry → `{role: "tool", tool_call_id: call_id, content: result}`
 

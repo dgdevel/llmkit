@@ -296,7 +296,7 @@ def main():
 
     # Validate the meta entry.
     meta = entries[0] if entries else {}
-    check("meta version is 1", meta.get("version") == 1, f"meta={meta}")
+    check("meta version is 2", meta.get("version") == 2, f"meta={meta}")
     check("meta config_hash present",
           meta.get("config_hash", "").startswith("sha256:"), f"meta={meta}")
     check("meta run_id is uuid", len(meta.get("run_id", "")) == 36, f"meta={meta}")

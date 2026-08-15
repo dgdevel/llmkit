@@ -252,19 +252,24 @@ static const tool_def *find_tool(const tool_def *tools, int tool_count, const ch
     return NULL;
 }
 
-/* Run the subagent conversation loop over the child context. On success
- * *out_final receives the last assistant content (malloc'd). Returns
- * EXIT_SUCCESS, an exit code on fatal failure (is_error set with a
- * message for soft LLM failures). */
-static int subagent_run_loop(runtime_ctx *child, FILE *fp, subagent_spec *spec, int depth,
-                             int max_retries, char **out_final, bool *out_is_error) {
+/* Run the subagent conversation loop over the child context. All entries
+ * are written into the parent's conversation file via fp, stamped with the
+ * run's scope, so the full sub-conversation trace is retained in place.
+ * On success *out_final receives the last assistant content (malloc'd) and
+ * *out_turns the number of turns executed. Returns EXIT_SUCCESS, an exit
+ * code on fatal failure (is_error set with a message for soft LLM
+ * failures). */
+static int subagent_run_loop(runtime_ctx *child, FILE *fp, const conv_scope *scope,
+                             subagent_spec *spec, int depth, int max_retries, char **out_final,
+                             bool *out_is_error, int *out_turns) {
     int rc = EXIT_SUCCESS;
 
     for (int turn = 0; turn < SUBAGENT_MAX_TURNS; turn++) {
-        /* Reconstruct message history from the temp conversation file. */
+        /* Reconstruct this run's message history from the shared conversation
+         * file (scope filter: only entries carrying our run_id). */
         json_message *msgs = NULL;
         int msg_count = 0;
-        rc = conversation_reconstruct(child->convo_path, &msgs, &msg_count);
+        rc = conversation_reconstruct_scope(child->convo_path, child->run_id, &msgs, &msg_count);
         if (rc != EXIT_SUCCESS) {
             log_activity("[error] subagent '%s': failed to reconstruct conversation",
                          spec->tool.name);
@@ -334,8 +339,10 @@ static int subagent_run_loop(runtime_ctx *child, FILE *fp, subagent_spec *spec, 
             return EXIT_SUCCESS;
         }
 
-        conversation_write_entry(fp, ENTRY_ASSISTANT, content ? content : "",
-                                 reasoning ? reasoning : "", model ? model : "", &usage);
+        conversation_write_scoped(fp, scope, ENTRY_ASSISTANT, content ? content : "",
+                                  reasoning ? reasoning : "", model ? model : "", &usage);
+
+        *out_turns = turn + 1;
 
         if (call_count == 0) {
             free(reasoning);
@@ -355,27 +362,29 @@ static int subagent_run_loop(runtime_ctx *child, FILE *fp, subagent_spec *spec, 
 
             const tool_def *td = find_tool(child->tools, child->tool_count, tc_name);
             if (td == NULL) {
-                conversation_write_entry(fp, ENTRY_TOOL_CALL, tc_id, tc_name, tc_args, "");
-                conversation_write_entry(fp, ENTRY_TOOL_RESULT, tc_id, tc_name,
-                                         "Tool definition not found", 1, 0, "");
+                conversation_write_scoped(fp, scope, ENTRY_TOOL_CALL, tc_id, tc_name, tc_args, "");
+                conversation_write_scoped(fp, scope, ENTRY_TOOL_RESULT, tc_id, tc_name,
+                                          "Tool definition not found", 1, 0, "");
                 continue;
             }
 
-            conversation_write_entry(fp, ENTRY_TOOL_CALL, tc_id, tc_name, tc_args, td->mcp_server);
+            conversation_write_scoped(fp, scope, ENTRY_TOOL_CALL, tc_id, tc_name, tc_args,
+                                      td->mcp_server);
 
             char *result = NULL;
             bool is_error = false;
 
             if (strcmp(td->mcp_server, SUBAGENT_TOOL_SERVER) == 0) {
-                /* Nested subagent (agent-as-tool inside this subagent). */
+                /* Nested subagent (agent-as-tool inside this subagent). Its
+                 * trace is bracketed inside ours in the same file. */
                 subagent_spec *nested =
                     subagent_find(spec->subagents, spec->subagent_count, tc_name);
                 if (nested == NULL) {
                     is_error = true;
                     result = util_strdup("Subagent definition not found");
                 } else {
-                    int src = subagent_call(child, nested, tc_args, depth + 1, max_retries, &result,
-                                            &is_error);
+                    int src = subagent_call(child, nested, tc_args, depth + 1, max_retries, fp,
+                                            tc_id, &result, &is_error);
                     if (src != EXIT_SUCCESS) {
                         free(result);
                         free(content);
@@ -391,9 +400,9 @@ static int subagent_run_loop(runtime_ctx *child, FILE *fp, subagent_spec *spec, 
                 if (mrc != EXIT_SUCCESS) {
                     /* Fatal MCP failure (e.g. timeout with fail behavior):
                      * stop the subagent and propagate. */
-                    conversation_write_entry(fp, ENTRY_TOOL_RESULT, tc_id, tc_name,
-                                             result ? result : "Tool call failed", 1, 0,
-                                             td->mcp_server);
+                    conversation_write_scoped(fp, scope, ENTRY_TOOL_RESULT, tc_id, tc_name,
+                                              result ? result : "Tool call failed", 1, 0,
+                                              td->mcp_server);
                     free(result);
                     free(content);
                     free(reasoning);
@@ -405,8 +414,8 @@ static int subagent_run_loop(runtime_ctx *child, FILE *fp, subagent_spec *spec, 
                 }
             }
 
-            conversation_write_entry(fp, ENTRY_TOOL_RESULT, tc_id, tc_name, result ? result : "",
-                                     (int)is_error, 0, td->mcp_server);
+            conversation_write_scoped(fp, scope, ENTRY_TOOL_RESULT, tc_id, tc_name,
+                                      result ? result : "", (int)is_error, 0, td->mcp_server);
             free(result);
         }
 
@@ -428,7 +437,8 @@ static int subagent_run_loop(runtime_ctx *child, FILE *fp, subagent_spec *spec, 
 /* ------------------------------------------------------------------ */
 
 int subagent_call(const runtime_ctx *parent, subagent_spec *spec, const char *args_json, int depth,
-                  int max_retries, char **out_result, bool *out_is_error) {
+                  int max_retries, FILE *fp, const char *call_id, char **out_result,
+                  bool *out_is_error) {
     if (parent == NULL || spec == NULL || out_result == NULL || out_is_error == NULL)
         return EXIT_INTERNAL_ERR;
 
@@ -463,31 +473,27 @@ int subagent_call(const runtime_ctx *parent, subagent_spec *spec, const char *ar
         return EXIT_INTERNAL_ERR;
     }
 
-    /* Child context: shares the LLM config (same LLM as the main agent) and
-     * the config hash; owns its system prompt, tools and temp conversation.
-     * It must never be passed to config_free. */
+    /* Child context: shares the LLM config (same LLM as the main agent), the
+     * config hash and the parent's conversation file (its entries are scoped
+     * by run_id); owns its system prompt and tools. It must never be passed
+     * to config_free, and convo_path must not be freed here. */
     runtime_ctx child;
     memset(&child, 0, sizeof(child));
     child.llm = parent->llm; /* shallow copy: strings are read-only shared */
     memcpy(child.config_hash, parent->config_hash, sizeof(child.config_hash));
     child.agent.system_prompt = system_prompt;
+    child.convo_path = parent->convo_path; /* shared, not owned */
     util_uuid_v4(child.run_id);
 
-    /* Temp conversation file for this subagent run. */
-    const char *tmpdir = platform_temp_dir();
-    size_t plen = strlen(tmpdir) + sizeof("/llmkit-sub-.jsonl") + sizeof(child.run_id);
-    char *convo_path = malloc(plen);
-    if (convo_path == NULL) {
-        free(system_prompt);
-        free(user_prompt);
-        return EXIT_INTERNAL_ERR;
-    }
-    snprintf(convo_path, plen, "%s/llmkit-sub-%s.jsonl", tmpdir, child.run_id);
-    child.convo_path = convo_path;
+    /* Scope stamped on every entry of this run; the brackets record the
+     * originating tool call so the trace can be tied back to the parent's
+     * tool_call/tool_result pair. */
+    conv_scope scope = {depth, spec->tool.name, child.run_id};
 
     int rc = EXIT_SUCCESS;
-    FILE *fp = NULL;
     char *final = NULL;
+    int turns = 0;
+    bool started = false;
 
     /* Lazily connect this subagent's private MCP servers (first use).
      * Reference entries and names already connected are no-ops. */
@@ -503,20 +509,17 @@ int subagent_call(const runtime_ctx *parent, subagent_spec *spec, const char *ar
         }
     }
 
-    /* Open the conversation and write meta + interpolated user prompt. */
-    rc = conversation_open(convo_path, &fp);
+    /* Open the subagent trace in the parent's conversation file: bracket
+     * start, then the interpolated user prompt. */
+    rc = conversation_write_subagent_start(fp, &scope, call_id, args_json);
     if (rc != EXIT_SUCCESS) {
         *out_is_error = true;
-        *out_result = util_strdup("Subagent failed to open its conversation file");
+        *out_result = util_strdup("Subagent failed to write its conversation trace");
         rc = EXIT_SUCCESS;
         goto done;
     }
-    {
-        char prefixed[80];
-        snprintf(prefixed, sizeof(prefixed), "sha256:%s", child.config_hash);
-        conversation_write_meta(fp, prefixed, child.run_id);
-    }
-    conversation_write_entry(fp, ENTRY_USER, user_prompt ? user_prompt : "", "subagent");
+    started = true;
+    conversation_write_scoped(fp, &scope, ENTRY_USER, user_prompt ? user_prompt : "", "subagent");
 
     /* Discover tools only from this subagent's MCP list... */
     const char **allowed = NULL;
@@ -547,7 +550,8 @@ int subagent_call(const runtime_ctx *parent, subagent_spec *spec, const char *ar
     }
 
     /* Run the nested loop. */
-    rc = subagent_run_loop(&child, fp, spec, depth, max_retries, &final, out_is_error);
+    rc = subagent_run_loop(&child, fp, &scope, spec, depth, max_retries, &final, out_is_error,
+                           &turns);
     if (rc == EXIT_SUCCESS) {
         *out_result = final;
         final = NULL;
@@ -555,11 +559,15 @@ int subagent_call(const runtime_ctx *parent, subagent_spec *spec, const char *ar
     }
 
 done:
+    /* Close the bracket whenever it was opened - even on early failure, so
+     * readers never see an unterminated subagent trace except after a
+     * crash (which each line's scope fields survive anyway). */
+    if (started) {
+        conversation_write_subagent_end(fp, &scope, turns,
+                                        (rc != EXIT_SUCCESS || *out_is_error) ? 1 : 0);
+    }
     free(final);
-    if (fp != NULL) fclose(fp);
-    platform_delete_file(convo_path);
     mcp_free_tool_defs(child.tools, child.tool_count); /* frees the array too */
-    free(convo_path);
     free(system_prompt);
     free(user_prompt);
     return rc;
