@@ -6,6 +6,7 @@
 #include "config.h"
 #include "agent.h"
 #include "proxy.h"
+#include "gateway.h"
 #include "conversation.h"
 #include "util.h"
 #include "platform.h"
@@ -17,15 +18,19 @@ static void print_usage(void) {
                     "  llmkit agent -c <config.yml> [--conversation <convo.jsonl>] "
                     "-p <prompt|prompt_file> [--mode <type>]\n"
                     "  llmkit proxy -c <config.yml> [-l <host:port>]\n"
+                    "  llmkit gateway -c <config.yml> [-l <host:port>]\n"
                     "  llmkit response --conversation <conversation.jsonl>\n"
                     "\n"
                     "Commands:\n"
                     "  agent     Run LLM conversation agent with MCP tool support\n"
                     "  proxy     Run MCP proxy server (stdio or HTTP)\n"
+                    "  gateway   Run MCP gateway server exposing discover/invoke\n"
+                    "            tools only (stdio or HTTP)\n"
                     "  response  Print the last LLM response from a conversation\n"
                     "\n"
                     "Flags:\n"
-                    "  -c, --config <file>        YAML configuration file (agent, proxy)\n"
+                    "  -c, --config <file>        YAML configuration file (agent, proxy,\n"
+                    "                             gateway)\n"
                     "  --conversation <file>      Conversation JSONL file. The agent\n"
                     "                             appends to it and continues prior turns;\n"
                     "                             optional for agent: if omitted the run\n"
@@ -46,7 +51,8 @@ static void print_usage(void) {
                     "                             sequence (1, 1, 2, 3, 5, 8, ...). Default: 5\n"
                     "  --stats                    Print prefix-cache hit/miss tokens of the last\n"
                     "                             assistant entry (response only)\n"
-                    "  -l, --listen <host:port>   Listen address; omit for stdio mode (proxy)\n"
+                    "  -l, --listen <host:port>   Listen address; omit for stdio mode "
+                    "(proxy, gateway)\n"
                     "  -h, --help                 Print this help and exit\n"
                     "  -V, --version              Print version and exit\n");
 }
@@ -211,6 +217,30 @@ int main(int argc, char **argv) {
         }
 
         rc = proxy_run(&ctx, listen_addr);
+        config_free(&ctx);
+        return rc;
+    }
+
+    /* ---- gateway ---- */
+    if (strcmp(argv[1], "gateway") == 0) {
+        const char *config_path = get_flag(argc, argv, "-c", "--config");
+        const char *listen_addr = get_flag(argc, argv, "-l", "--listen");
+
+        if (config_path == NULL) {
+            fprintf(stderr, "error: gateway requires -c <config>\n");
+            return EXIT_ARGS_ERR;
+        }
+
+        runtime_ctx ctx;
+        memset(&ctx, 0, sizeof(ctx));
+
+        int rc = config_load(config_path, &ctx);
+        if (rc != EXIT_SUCCESS) {
+            config_free(&ctx);
+            return rc;
+        }
+
+        rc = gateway_run(&ctx, listen_addr);
         config_free(&ctx);
         return rc;
     }

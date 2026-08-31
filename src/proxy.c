@@ -1,101 +1,12 @@
 #include "proxy.h"
 #include "mcp.h"
 #include "jsonrpc.h"
-#include "platform.h"
+#include "srv.h"
 #include "util.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 #include <cJSON.h>
-
-/* ------------------------------------------------------------------ */
-/*  Helpers                                                            */
-/* ------------------------------------------------------------------ */
-
-static const char *get_ns(mcp_server_cfg *cfg) {
-    return (cfg->namespace != NULL && cfg->namespace[0]) ? cfg->namespace : cfg->name;
-}
-
-/* Check if a namespaced name starts with a given namespace prefix + dot. */
-static int has_namespace(const char *name, const char *ns) {
-    size_t nlen = strlen(ns);
-    return (strncmp(name, ns, nlen) == 0 && name[nlen] == '.');
-}
-
-/* Advance past "{ns}." to get the local name. Returns NULL if prefix doesn't match. */
-static const char *local_name(const char *name, const char *ns) {
-    if (!has_namespace(name, ns)) return NULL;
-    return name + strlen(ns) + 1;
-}
-
-/* Check whitelist/blacklist. Returns true if the item should be INCLUDED. */
-static bool check_filters(mcp_server_cfg *cfg, const char *namespaced_name) {
-    /* Whitelist: if non-empty, only items in the list pass. */
-    if (cfg->whitelist != NULL && cfg->whitelist[0] != NULL) {
-        bool found = false;
-        for (int i = 0; cfg->whitelist[i] != NULL; i++) {
-            if (strcmp(cfg->whitelist[i], namespaced_name) == 0) {
-                found = true;
-                break;
-            }
-        }
-        if (!found) return false;
-    }
-    /* Blacklist: if non-empty, items in the list are excluded. */
-    if (cfg->blacklist != NULL && cfg->blacklist[0] != NULL) {
-        for (int i = 0; cfg->blacklist[i] != NULL; i++) {
-            if (strcmp(cfg->blacklist[i], namespaced_name) == 0) return false;
-        }
-    }
-    return true;
-}
-
-/* Apply rename map: if namespaced_name matches a key, replace *name with the value. */
-static void apply_rename(mcp_server_cfg *cfg, const char *namespaced_name, const char **name) {
-    if (cfg->rename_keys == NULL) return;
-    for (int i = 0; cfg->rename_keys[i] != NULL; i++) {
-        const char *eq = strchr(cfg->rename_keys[i], '=');
-        if (eq == NULL) continue;
-        size_t klen = (size_t)(eq - cfg->rename_keys[i]);
-        if (strlen(namespaced_name) == klen &&
-            strncmp(cfg->rename_keys[i], namespaced_name, klen) == 0) {
-            *name = eq + 1;
-            return;
-        }
-    }
-}
-
-/* Apply redefine map: if namespaced_name matches a key, replace *desc. */
-static void apply_redefine(mcp_server_cfg *cfg, const char *namespaced_name, const char **desc) {
-    if (cfg->redefine_keys == NULL) return;
-    for (int i = 0; cfg->redefine_keys[i] != NULL; i++) {
-        const char *eq = strchr(cfg->redefine_keys[i], '=');
-        if (eq == NULL) continue;
-        size_t klen = (size_t)(eq - cfg->redefine_keys[i]);
-        if (strlen(namespaced_name) == klen &&
-            strncmp(cfg->redefine_keys[i], namespaced_name, klen) == 0) {
-            *desc = eq + 1;
-            return;
-        }
-    }
-}
-
-/* Build the namespaced name: "{ns}.{original}" (malloc'd, caller frees). */
-static char *make_namespaced(const char *ns, const char *original) {
-    size_t ns_len = strlen(ns);
-    size_t on_len = strlen(original);
-    char *out = malloc(ns_len + 1 + on_len + 1);
-    if (out == NULL) {
-        log_activity("[error] OOM");
-        exit(EXIT_INTERNAL_ERR);
-    }
-    memcpy(out, ns, ns_len);
-    out[ns_len] = '.';
-    memcpy(out + ns_len + 1, original, on_len);
-    out[ns_len + 1 + on_len] = '\0';
-    return out;
-}
 
 /* ------------------------------------------------------------------ */
 /*  Reverse translation helpers for list responses                     */
@@ -106,7 +17,7 @@ static char *make_namespaced(const char *ns, const char *original) {
 static void translate_list_reverse(mcp_server_cfg *cfg, cJSON *items, const char *name_field,
                                    const char *uri_field) {
     if (items == NULL || !cJSON_IsArray(items)) return;
-    const char *ns = get_ns(cfg);
+    const char *ns = srv_get_ns(cfg);
     int count = cJSON_GetArraySize(items);
 
     /* Iterate backwards so removal is safe. */
@@ -117,10 +28,10 @@ static void translate_list_reverse(mcp_server_cfg *cfg, cJSON *items, const char
         /* Determine the namespaced name for filtering. */
         cJSON *name_j = cJSON_GetObjectItem(item, name_field);
         const char *orig_name = (name_j && cJSON_IsString(name_j)) ? name_j->valuestring : "";
-        char *ns_name = make_namespaced(ns, orig_name);
+        char *ns_name = srv_make_namespaced(ns, orig_name);
 
         /* Apply filters. */
-        if (!check_filters(cfg, ns_name)) {
+        if (!srv_check_filters(cfg, ns_name)) {
             free(ns_name);
             cJSON_DeleteItemFromArray(items, i);
             continue;
@@ -128,7 +39,7 @@ static void translate_list_reverse(mcp_server_cfg *cfg, cJSON *items, const char
 
         /* Apply rename to the name field. */
         const char *exposed_name = ns_name;
-        apply_rename(cfg, ns_name, &exposed_name);
+        srv_apply_rename(cfg, ns_name, &exposed_name);
         cJSON_DeleteItemFromObject(item, name_field);
         cJSON_AddStringToObject(item, "name", exposed_name);
 
@@ -137,7 +48,7 @@ static void translate_list_reverse(mcp_server_cfg *cfg, cJSON *items, const char
             cJSON *desc_j = cJSON_GetObjectItem(item, "description");
             if (desc_j && cJSON_IsString(desc_j)) {
                 const char *new_desc = desc_j->valuestring;
-                apply_redefine(cfg, ns_name, &new_desc);
+                srv_apply_redefine(cfg, ns_name, &new_desc);
                 if (new_desc != desc_j->valuestring) {
                     cJSON_DeleteItemFromObject(item, "description");
                     cJSON_AddStringToObject(item, "description", new_desc);
@@ -150,7 +61,7 @@ static void translate_list_reverse(mcp_server_cfg *cfg, cJSON *items, const char
             cJSON *uri_j = cJSON_GetObjectItem(item, uri_field);
             if (uri_j && cJSON_IsString(uri_j)) {
                 const char *orig_uri = uri_j->valuestring;
-                char *ns_uri = make_namespaced(ns, orig_uri);
+                char *ns_uri = srv_make_namespaced(ns, orig_uri);
                 cJSON_DeleteItemFromObject(item, uri_field);
                 cJSON_AddStringToObject(item, uri_field, ns_uri);
                 free(ns_uri);
@@ -162,89 +73,6 @@ static void translate_list_reverse(mcp_server_cfg *cfg, cJSON *items, const char
 }
 
 /* ------------------------------------------------------------------ */
-/*  Forward translation: strip namespace from a namespaced name        */
-/*  and return the backend-local name.  The caller must NOT free the   */
-/*  returned pointer (it points into the input).                       */
-/* ------------------------------------------------------------------ */
-/* Convert a cJSON id node (number/string/null) to a malloc'd string for
- * use with jsonrpc_build_request, which takes a const char* id. Returns
- * NULL if id_node is NULL or not a number/string. */
-static char *id_node_to_str(const cJSON *id_node) {
-    if (id_node == NULL) return NULL;
-    if (cJSON_IsString(id_node)) return util_strdup(id_node->valuestring);
-    if (cJSON_IsNumber(id_node)) {
-        char buf[32];
-        snprintf(buf, sizeof(buf), "%g", id_node->valuedouble);
-        return util_strdup(buf);
-    }
-    return NULL;
-}
-
-/* ------------------------------------------------------------------ */
-/*  Build a JSON-RPC response from a result or error.                  */
-/* ------------------------------------------------------------------ */
-static char *build_response(const cJSON *id_node, cJSON *result, const char *error_msg) {
-    cJSON *root = cJSON_CreateObject();
-    if (root == NULL) return NULL;
-    cJSON_AddStringToObject(root, "jsonrpc", "2.0");
-    /* Preserve the request id verbatim (number, string, or null). Per
-     * JSON-RPC 2.0 the response MUST echo the request id. */
-    if (id_node != NULL) {
-        cJSON_AddItemToObject(root, "id", cJSON_Duplicate(id_node, 1));
-    } else {
-        cJSON_AddNullToObject(root, "id");
-    }
-    if (error_msg != NULL) {
-        cJSON *err = cJSON_CreateObject();
-        if (err != NULL) {
-            cJSON_AddNumberToObject(err, "code", -32000);
-            cJSON_AddStringToObject(err, "message", error_msg);
-            cJSON_AddItemToObject(root, "error", err);
-        }
-    } else if (result != NULL) {
-        cJSON_AddItemToObject(root, "result", result);
-    }
-    char *out = cJSON_PrintUnformatted(root);
-    cJSON_Delete(root);
-    return out;
-}
-
-/* Build a successful JSON-RPC response wrapping a result JSON string. */
-static char *build_success(const cJSON *id_node, const char *result_json) {
-    cJSON *result = cJSON_Parse(result_json ? result_json : "{}");
-    if (result == NULL) result = cJSON_CreateObject();
-    return build_response(id_node, result, NULL);
-}
-
-/* Build an error JSON-RPC response. */
-static char *build_error(const cJSON *id_node, const char *msg) {
-    return build_response(id_node, NULL, msg ? msg : "Internal error");
-}
-
-/* Rewrite the id of a forwarded backend response so it matches the
- * client's original request id. backend_resp is a malloc'd string that
- * is freed here; a new malloc'd string is returned (or the original on
- * parse failure). */
-static char *rewrite_response_id(const cJSON *id_node, char *backend_resp) {
-    if (backend_resp == NULL) return NULL;
-    cJSON *resp = cJSON_Parse(backend_resp);
-    if (resp == NULL) {
-        /* Not valid JSON; leave the raw response as-is. */
-        return backend_resp;
-    }
-    cJSON *existing = cJSON_GetObjectItem(resp, "id");
-    if (existing != NULL) {
-        cJSON_ReplaceItemInObject(resp, "id", cJSON_Duplicate(id_node, 1));
-    } else {
-        cJSON_AddItemToObject(resp, "id", cJSON_Duplicate(id_node, 1));
-    }
-    char *out = cJSON_PrintUnformatted(resp);
-    cJSON_Delete(resp);
-    free(backend_resp);
-    return out;
-}
-
-/* ------------------------------------------------------------------ */
 /*  handle_mcp_request                                                 */
 /* ------------------------------------------------------------------ */
 
@@ -253,7 +81,7 @@ static int handle_mcp_request(runtime_ctx *ctx, const char *req_json, char **out
 
     cJSON *req = cJSON_Parse(req_json);
     if (req == NULL) {
-        *out_resp = build_error(NULL, "Parse error");
+        *out_resp = srv_build_error(NULL, "Parse error");
         return EXIT_SUCCESS;
     }
 
@@ -263,7 +91,7 @@ static int handle_mcp_request(runtime_ctx *ctx, const char *req_json, char **out
 
     cJSON *method_j = cJSON_GetObjectItem(req, "method");
     if (method_j == NULL || !cJSON_IsString(method_j)) {
-        *out_resp = build_error(id_j, "Method not specified");
+        *out_resp = srv_build_error(id_j, "Method not specified");
         cJSON_Delete(req);
         return EXIT_SUCCESS;
     }
@@ -288,7 +116,7 @@ static int handle_mcp_request(runtime_ctx *ctx, const char *req_json, char **out
             cJSON_AddStringToObject(info, "name", "llmkit-proxy");
             cJSON_AddStringToObject(info, "version", LLMKIT_VERSION);
         }
-        *out_resp = build_response(id_j, result, NULL);
+        *out_resp = srv_build_response(id_j, result, NULL);
         cJSON_Delete(req);
         return EXIT_SUCCESS;
     }
@@ -304,7 +132,7 @@ static int handle_mcp_request(runtime_ctx *ctx, const char *req_json, char **out
 
     /* ---- ping ---- */
     if (strcmp(method, "ping") == 0) {
-        *out_resp = build_success(id_j, "{}");
+        *out_resp = srv_build_success(id_j, "{}");
         cJSON_Delete(req);
         return EXIT_SUCCESS;
     }
@@ -364,7 +192,7 @@ static int handle_mcp_request(runtime_ctx *ctx, const char *req_json, char **out
             return EXIT_INTERNAL_ERR;
         }
         cJSON_AddItemToObject(result, "tools", all_tools);
-        *out_resp = build_response(id_j, result, NULL);
+        *out_resp = srv_build_response(id_j, result, NULL);
         cJSON_Delete(req);
         return EXIT_SUCCESS;
     }
@@ -379,8 +207,8 @@ static int handle_mcp_request(runtime_ctx *ctx, const char *req_json, char **out
         mcp_server_cfg *backend = NULL;
         const char *local_tool = tc_name;
         for (int i = 0; i < ctx->mcp_count; i++) {
-            const char *ns = get_ns(&ctx->mcps[i]);
-            const char *loc = local_name(tc_name, ns);
+            const char *ns = srv_get_ns(&ctx->mcps[i]);
+            const char *loc = srv_local_name(tc_name, ns);
             if (loc != NULL) {
                 backend = &ctx->mcps[i];
                 local_tool = loc;
@@ -389,7 +217,7 @@ static int handle_mcp_request(runtime_ctx *ctx, const char *req_json, char **out
         }
 
         if (backend == NULL) {
-            *out_resp = build_error(id_j, "Tool not found on any backend");
+            *out_resp = srv_build_error(id_j, "Tool not found on any backend");
             cJSON_Delete(req);
             return EXIT_SUCCESS;
         }
@@ -403,7 +231,7 @@ static int handle_mcp_request(runtime_ctx *ctx, const char *req_json, char **out
         }
         if (jsonrpc_build_call_tool(local_tool, args_str, &call_req) != EXIT_SUCCESS) {
             free(args_str);
-            *out_resp = build_error(id_j, "Failed to build tool call");
+            *out_resp = srv_build_error(id_j, "Failed to build tool call");
             cJSON_Delete(req);
             return EXIT_SUCCESS;
         }
@@ -415,13 +243,13 @@ static int handle_mcp_request(runtime_ctx *ctx, const char *req_json, char **out
 
         if (rc != EXIT_SUCCESS || backend_resp == NULL) {
             free(backend_resp);
-            *out_resp = build_error(id_j, "Backend request failed");
+            *out_resp = srv_build_error(id_j, "Backend request failed");
             cJSON_Delete(req);
             return EXIT_SUCCESS;
         }
 
         /* Rewrite the backend's id to echo the client's request id. */
-        *out_resp = rewrite_response_id(id_j, backend_resp);
+        *out_resp = srv_rewrite_response_id(id_j, backend_resp);
         cJSON_Delete(req);
         return EXIT_SUCCESS;
     }
@@ -474,7 +302,7 @@ static int handle_mcp_request(runtime_ctx *ctx, const char *req_json, char **out
             return EXIT_INTERNAL_ERR;
         }
         cJSON_AddItemToObject(result, "resources", all_res);
-        *out_resp = build_response(id_j, result, NULL);
+        *out_resp = srv_build_response(id_j, result, NULL);
         cJSON_Delete(req);
         return EXIT_SUCCESS;
     }
@@ -488,8 +316,8 @@ static int handle_mcp_request(runtime_ctx *ctx, const char *req_json, char **out
         mcp_server_cfg *backend = NULL;
         const char *local_uri = uri;
         for (int i = 0; i < ctx->mcp_count; i++) {
-            const char *ns = get_ns(&ctx->mcps[i]);
-            const char *loc = local_name(uri, ns);
+            const char *ns = srv_get_ns(&ctx->mcps[i]);
+            const char *loc = srv_local_name(uri, ns);
             if (loc != NULL) {
                 backend = &ctx->mcps[i];
                 local_uri = loc;
@@ -498,7 +326,7 @@ static int handle_mcp_request(runtime_ctx *ctx, const char *req_json, char **out
         }
 
         if (backend == NULL) {
-            *out_resp = build_error(id_j, "Resource not found on any backend");
+            *out_resp = srv_build_error(id_j, "Resource not found on any backend");
             cJSON_Delete(req);
             return EXIT_SUCCESS;
         }
@@ -512,13 +340,13 @@ static int handle_mcp_request(runtime_ctx *ctx, const char *req_json, char **out
         cJSON_AddStringToObject(rp, "uri", local_uri);
         char *rp_str = cJSON_PrintUnformatted(rp);
         cJSON_Delete(rp);
-        char *req_id = id_node_to_str(id_j);
+        char *req_id = srv_id_to_str(id_j);
         char *read_req = jsonrpc_build_request("resources/read", rp_str, req_id);
         free(req_id);
         free(rp_str);
 
         if (read_req == NULL) {
-            *out_resp = build_error(id_j, "Failed to build request");
+            *out_resp = srv_build_error(id_j, "Failed to build request");
             cJSON_Delete(req);
             return EXIT_SUCCESS;
         }
@@ -529,12 +357,12 @@ static int handle_mcp_request(runtime_ctx *ctx, const char *req_json, char **out
 
         if (rc != EXIT_SUCCESS || backend_resp == NULL) {
             free(backend_resp);
-            *out_resp = build_error(id_j, "Backend request failed");
+            *out_resp = srv_build_error(id_j, "Backend request failed");
             cJSON_Delete(req);
             return EXIT_SUCCESS;
         }
 
-        *out_resp = rewrite_response_id(id_j, backend_resp);
+        *out_resp = srv_rewrite_response_id(id_j, backend_resp);
         cJSON_Delete(req);
         return EXIT_SUCCESS;
     }
@@ -587,7 +415,7 @@ static int handle_mcp_request(runtime_ctx *ctx, const char *req_json, char **out
             return EXIT_INTERNAL_ERR;
         }
         cJSON_AddItemToObject(result, "prompts", all_pr);
-        *out_resp = build_response(id_j, result, NULL);
+        *out_resp = srv_build_response(id_j, result, NULL);
         cJSON_Delete(req);
         return EXIT_SUCCESS;
     }
@@ -601,8 +429,8 @@ static int handle_mcp_request(runtime_ctx *ctx, const char *req_json, char **out
         mcp_server_cfg *backend = NULL;
         const char *local_pname = pname;
         for (int i = 0; i < ctx->mcp_count; i++) {
-            const char *ns = get_ns(&ctx->mcps[i]);
-            const char *loc = local_name(pname, ns);
+            const char *ns = srv_get_ns(&ctx->mcps[i]);
+            const char *loc = srv_local_name(pname, ns);
             if (loc != NULL) {
                 backend = &ctx->mcps[i];
                 local_pname = loc;
@@ -611,7 +439,7 @@ static int handle_mcp_request(runtime_ctx *ctx, const char *req_json, char **out
         }
 
         if (backend == NULL) {
-            *out_resp = build_error(id_j, "Prompt not found on any backend");
+            *out_resp = srv_build_error(id_j, "Prompt not found on any backend");
             cJSON_Delete(req);
             return EXIT_SUCCESS;
         }
@@ -631,13 +459,13 @@ static int handle_mcp_request(runtime_ctx *ctx, const char *req_json, char **out
         }
         char *pp_str = cJSON_PrintUnformatted(pp);
         cJSON_Delete(pp);
-        char *req_id = id_node_to_str(id_j);
+        char *req_id = srv_id_to_str(id_j);
         char *get_req = jsonrpc_build_request("prompts/get", pp_str, req_id);
         free(req_id);
         free(pp_str);
 
         if (get_req == NULL) {
-            *out_resp = build_error(id_j, "Failed to build request");
+            *out_resp = srv_build_error(id_j, "Failed to build request");
             cJSON_Delete(req);
             return EXIT_SUCCESS;
         }
@@ -648,203 +476,19 @@ static int handle_mcp_request(runtime_ctx *ctx, const char *req_json, char **out
 
         if (rc != EXIT_SUCCESS || backend_resp == NULL) {
             free(backend_resp);
-            *out_resp = build_error(id_j, "Backend request failed");
+            *out_resp = srv_build_error(id_j, "Backend request failed");
             cJSON_Delete(req);
             return EXIT_SUCCESS;
         }
 
-        *out_resp = rewrite_response_id(id_j, backend_resp);
+        *out_resp = srv_rewrite_response_id(id_j, backend_resp);
         cJSON_Delete(req);
         return EXIT_SUCCESS;
     }
 
     /* ---- Unknown method ---- */
-    *out_resp = build_error(id_j, "Method not supported");
+    *out_resp = srv_build_error(id_j, "Method not supported");
     cJSON_Delete(req);
-    return EXIT_SUCCESS;
-}
-
-/* ------------------------------------------------------------------ */
-/*  stdio proxy loop                                                   */
-/* ------------------------------------------------------------------ */
-
-static int proxy_loop_stdio(runtime_ctx *ctx) {
-    char line[65536];
-
-    while (fgets(line, sizeof(line), stdin) != NULL) {
-        /* Trim trailing newline/whitespace. */
-        size_t len = strlen(line);
-        while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r' || line[len - 1] == ' '))
-            line[--len] = '\0';
-        if (len == 0) continue;
-
-        char *resp = NULL;
-        int rc = handle_mcp_request(ctx, line, &resp);
-        if (rc != EXIT_SUCCESS) return rc;
-
-        if (resp != NULL && resp[0] != '\0') {
-            fprintf(stdout, "%s\n", resp);
-            fflush(stdout);
-        }
-        free(resp);
-    }
-    return EXIT_SUCCESS;
-}
-
-/* ------------------------------------------------------------------ */
-/*  HTTP proxy helpers                                                 */
-/* ------------------------------------------------------------------ */
-
-/* Parse "host:port" into host string and port. Returns 0 on success. */
-static int parse_listen_addr(const char *addr, char *host_out, int host_size, int *port_out) {
-    if (addr == NULL) return -1;
-    const char *colon = strrchr(addr, ':');
-    if (colon == NULL) return -1;
-
-    size_t host_len = (size_t)(colon - addr);
-    if (host_len >= (size_t)host_size) host_len = (size_t)(host_size - 1);
-    memcpy(host_out, addr, host_len);
-    host_out[host_len] = '\0';
-
-    char *end = NULL;
-    long p = strtol(colon + 1, &end, 10);
-    if (end == colon + 1 || p <= 0 || p > 65535) return -1;
-    *port_out = (int)p;
-    return 0;
-}
-
-/* Read an HTTP request body from a socket FILE*. Returns EXIT_SUCCESS
- * or an error code.  This is a minimal HTTP parser. */
-static int read_http_request(FILE *client, char **out_body) {
-    *out_body = NULL;
-
-    /* Read headers until \r\n\r\n or \n\n. */
-    char header_buf[8192];
-    size_t hdr_len = 0;
-    int blank_line = 0;
-
-    while (fgets(header_buf + hdr_len, (int)(sizeof(header_buf) - hdr_len), client) != NULL) {
-        size_t chunk = strlen(header_buf + hdr_len);
-        hdr_len += chunk;
-
-        if (hdr_len >= 2 && memcmp(header_buf + hdr_len - 2, "\n\n", 2) == 0) {
-            blank_line = 1;
-            break;
-        }
-        if (hdr_len >= 4 && memcmp(header_buf + hdr_len - 4, "\r\n\r\n", 4) == 0) {
-            blank_line = 1;
-            break;
-        }
-        if (hdr_len >= sizeof(header_buf) - 1) break;
-    }
-
-    if (!blank_line) return EXIT_MCP_ERR;
-
-    /* Parse Content-Length from headers. */
-    long content_length = 0;
-    {
-        /* Simple search for Content-Length: */
-        const char *cl = strstr(header_buf, "Content-Length:");
-        if (cl == NULL) cl = strstr(header_buf, "content-length:");
-        if (cl != NULL) {
-            cl += 15; /* skip past "Content-Length:" */
-            while (*cl == ' ' || *cl == '\t') cl++;
-            char *end = NULL;
-            long parsed = strtol(cl, &end, 10);
-            if (end == cl || parsed < 0) {
-                content_length = 0;
-            } else {
-                content_length = parsed;
-            }
-        }
-    }
-
-    if (content_length <= 0) return EXIT_SUCCESS;
-
-    /* Read body. */
-    *out_body = malloc((size_t)content_length + 1);
-    if (*out_body == NULL) return EXIT_INTERNAL_ERR;
-
-    size_t total = 0;
-    while (total < (size_t)content_length) {
-        size_t n = fread(*out_body + total, 1, (size_t)(content_length - total), client);
-        if (n == 0) break;
-        total += n;
-    }
-    (*out_body)[total] = '\0';
-    return EXIT_SUCCESS;
-}
-
-/* ------------------------------------------------------------------ */
-/*  HTTP proxy loop                                                    */
-/* ------------------------------------------------------------------ */
-
-static int proxy_loop_http(runtime_ctx *ctx, const char *addr) {
-    char host[256];
-    int port = 0;
-
-    if (parse_listen_addr(addr, host, sizeof(host), &port) != 0) {
-        log_activity("[error] Invalid listen address: %s", addr);
-        return EXIT_ARGS_ERR;
-    }
-
-    int listen_fd = platform_tcp_listen(host, port);
-    if (listen_fd < 0) {
-        log_activity("[error] Failed to bind to %s:%d", host, port);
-        return EXIT_FILE_ERR; /* proxy spec: 3 = Server error (bind failure) */
-    }
-
-    log_activity("[init] Proxy listening on %s:%d", host, port);
-
-    while (1) {
-        int client_fd = platform_tcp_accept(listen_fd, -1);
-        if (client_fd < 0) {
-            log_activity("[error] Accept failed");
-            continue;
-        }
-
-        FILE *client = fdopen(client_fd, "r+");
-        if (client == NULL) {
-            close(client_fd);
-            continue;
-        }
-
-        char *body = NULL;
-        int rc = read_http_request(client, &body);
-        if (rc != EXIT_SUCCESS || body == NULL) {
-            free(body);
-            fclose(client);
-            continue;
-        }
-
-        char *resp = NULL;
-        handle_mcp_request(ctx, body, &resp);
-        free(body);
-
-        /* Write HTTP response. */
-        if (resp != NULL && resp[0] != '\0') {
-            fprintf(client,
-                    "HTTP/1.1 200 OK\r\n"
-                    "Content-Type: application/json\r\n"
-                    "Content-Length: %zu\r\n"
-                    "Connection: close\r\n"
-                    "\r\n"
-                    "%s",
-                    strlen(resp), resp);
-        } else {
-            fprintf(client, "HTTP/1.1 200 OK\r\n"
-                            "Content-Type: application/json\r\n"
-                            "Content-Length: 2\r\n"
-                            "Connection: close\r\n"
-                            "\r\n"
-                            "{}");
-        }
-        fflush(client);
-        free(resp);
-        fclose(client);
-    }
-
-    /* unreachable */
     return EXIT_SUCCESS;
 }
 
@@ -862,11 +506,7 @@ int proxy_run(runtime_ctx *ctx, const char *listen_addr) {
         return rc;
     }
 
-    if (listen_addr != NULL && listen_addr[0] != '\0') {
-        rc = proxy_loop_http(ctx, listen_addr);
-    } else {
-        rc = proxy_loop_stdio(ctx);
-    }
+    rc = srv_serve(ctx, listen_addr, handle_mcp_request, "Proxy");
 
     mcp_disconnect_all(ctx);
     return rc;

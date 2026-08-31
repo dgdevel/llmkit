@@ -1,0 +1,35 @@
+# llmkit gateway — complete configuration example
+#
+# The gateway exposes exactly two MCP tools to its clients:
+#   discover(query)      -> asks the LLM to pick the backend tools matching a
+#                           natural-language query and returns their full
+#                           specs (name, description, inputSchema, server)
+#   invoke(name, args)   -> forwards the call to the backend tool
+#
+# All proxy per-server controls apply to what `discover` can see:
+# namespace, rename, redefine, whitelist, blacklist and hide.
+
+llm:
+  api_base: "https://api.deepseek.com/v1"
+  api_key: "sk-..."
+  model: "deepseek-chat"
+
+mcps:
+  # Discoverable backend — namespace, rename and whitelist all apply
+  - name: "filesystem"
+    cmdline: "npx -y @modelcontextprotocol/server-filesystem /mnt/data"
+    namespace: "fs"
+    whitelist:
+      - "fs.read_file"
+      - "fs.write_file"
+      - "fs.list_directory"
+    rename:
+      fs.list_directory: "fs.ls"
+    redefine:
+      fs.ls: "List the contents of a directory under /mnt/data."
+
+  # Hidden backend — initialized but never visible through the gateway
+  - name: "internal-db"
+    type: http
+    url: "http://localhost:9000/mcp"
+    hide: true

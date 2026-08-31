@@ -6,6 +6,7 @@ LLMKIT is a lightweight C CLI tool with three modes of operation:
 
 - **`llmkit agent`** — Runs an LLM conversation loop with MCP tool support. Reads a YAML config, loads conversation history from JSONL, calls the LLM API, executes MCP tool calls, and writes results back to the JSONL file.
 - **`llmkit proxy`** — Runs an MCP proxy server that fronts one or more backend MCP servers, providing namespace isolation, rename/redefine, and whitelist/blacklist filtering over a single MCP endpoint (stdio or HTTP).
+- **`llmkit gateway`** — Runs an MCP gateway server that fronts one or more backend MCP servers but exposes only two tools: `discover(query)` uses the LLM to select the backend tools matching a natural-language query and returns their full specs (keyword fallback when the LLM is unreachable); `invoke(name, arguments)` forwards the call to the backend tool. Serves stdio or HTTP.
 - **`llmkit response`** — Reads a conversation JSONL file and prints the last assistant response content to stdout. Used to extract the final LLM answer from a completed conversation.
 
 The binary is statically linked, has zero runtime language dependencies, and targets Linux, macOS, and Windows (via MinGW-w64 cross-compilation).
@@ -21,6 +22,10 @@ src/
 ├── agent.h
 ├── proxy.c             — MCP proxy server (stdio/HTTP listeners)
 ├── proxy.h
+├── gateway.c           — MCP gateway server (discover/invoke only)
+├── gateway.h
+├── srv.c               — Shared MCP server plumbing (response builders,
+├── srv.h                 stdio/HTTP serve loops, namespace/filter helpers)
 ├── config.c            — YAML configuration loading & validation
 ├── config.h
 ├── llm.c               — LLM API client (OpenAI-compatible chat completions)
@@ -206,6 +211,39 @@ Validation rules:
 **Rename:** Map `redefine_keys` entries: key = namespaced name, value = new exposed name. Applied after namespacing and filtering.
 
 **Redefine:** Map `redefine_keys` entries: key = namespaced name, value = new description. Applied after namespacing and filtering, after rename.
+
+### 2.5a `gateway.c` / `gateway.h` — MCP Gateway
+
+An MCP server that fronts the same backends as the proxy but exposes exactly
+two tools, for clients that should not receive the full tool catalog up front.
+
+| Function | Purpose |
+|----------|---------|
+| `int gateway_run(runtime_ctx *ctx, const char *listen_addr)` | Validates `llm.api_base`, connects backends, serves via `srv_serve`. |
+| `static int gateway_handle_request(...)` | MCP dispatcher: `initialize`, `notifications/*`, `ping`, `tools/list`, `tools/call`; `resources/list` / `prompts/list` return empty listings, everything else is "Method not supported". |
+| `static int gateway_tools_list(...)` | `tools/list` returns exactly `discover` and `invoke` with their JSON schemas. |
+| `static int gateway_tool_discover(...)` | Builds the filtered backend catalog, asks the LLM to select matches, falls back to keyword matching, returns full tool specs. |
+| `static int gateway_tool_invoke(...)` | Routes by namespace prefix (like proxy `tools/call`) and forwards `name` + `arguments` to the backend unchanged. |
+
+**`discover(query)` semantics:**
+- Catalog: every non-hidden backend's tools, after namespace, whitelist/blacklist, rename and redefine — identical filtering to proxy `tools/list`.
+- LLM selection: one chat completion (no `tools` block) with a system prompt instructing a JSON array of selected catalog names as the only reply; unknown names are ignored; a malformed reply also triggers the fallback.
+- Keyword fallback (LLM unreachable or unparseable): lowercase OR-substring match over `name + description`, ignoring a small stopword list; result is reported with `"matched_by": "keyword"` (vs `"llm"`).
+- Result: MCP text content containing `{"query", "matched_by", "tools":[{name, description, inputSchema, server}]}`.
+
+**`invoke(name, arguments)` semantics:** pure pass-through — find the backend whose namespace prefixes `name`, forward `tools/call` with the local tool name, echo the client's request id in the backend response.
+
+### 2.5b `srv.c` / `srv.h` — Shared MCP Server Plumbing
+
+Code shared verbatim by `proxy` and `gateway` so both serve MCP identically:
+
+| Function | Purpose |
+|----------|---------|
+| `srv_build_response` / `srv_build_success` / `srv_build_error` | JSON-RPC 2.0 response construction (id echoed verbatim; errors use code -32000). |
+| `srv_rewrite_response_id` | Rewrites a forwarded backend response id to the client's request id. |
+| `srv_id_to_str` | cJSON id node → string for `jsonrpc_build_request`. |
+| `srv_get_ns` / `srv_local_name` / `srv_check_filters` / `srv_apply_rename` / `srv_apply_redefine` / `srv_make_namespaced` | Namespace and whitelist/blacklist/rename/redefine helpers. |
+| `srv_serve(ctx, listen_addr, handler, label)` | stdio loop (line-delimited JSON-RPC on stdin/stdout) when `listen_addr` is empty, otherwise an HTTP loop on `host:port` dispatching POST bodies to the handler. |
 
 ### 2.6 `llm.c` / `llm.h` — LLM API Client
 
@@ -701,7 +739,27 @@ Client (MCP) ←→ proxy (stdio/HTTP)
          Response to Client
 ```
 
-### 5.3 Response Mode
+### 5.3 Gateway Mode
+
+```
+Client (MCP) ←→ gateway (stdio/HTTP)
+                    ↓
+         gateway_handle_request()
+                    ↓
+      tools/list → [discover, invoke] only
+                    ↓
+   discover(query):  catalog_build (namespace/filters)
+             → llm_chat_complete("select matching tools")
+             → [LLM failure: keyword fallback matcher]
+             → full specs {name, description, inputSchema, server}
+                    ↓
+   invoke(name, args): namespace-prefix routing
+             → tools/call to backend unchanged
+            ↓
+         Response to Client
+```
+
+### 5.4 Response Mode
 
 ```
 CLI args → main.c

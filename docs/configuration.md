@@ -1,11 +1,12 @@
 # Configuration
 
 llmkit is configured through a single YAML file passed via `-c <config.yml>`.
-Both modes (`agent` and `proxy`) share the same schema; the difference is which
-root keys are accepted.
+All modes (`agent`, `proxy`, `gateway`) share the same schema; the difference
+is which root keys each mode requires.
 
 - **Agent config:** `llm`, `mcps`, `agent` (all optional except `llm.api_base`)
 - **Proxy config:** only `mcps` (required)
+- **Gateway config:** `llm` (required, used by `discover`) + `mcps` (required)
 
 ## LLM (`llm`)
 
@@ -174,3 +175,34 @@ mcps:
     url: "http://localhost:9000/mcp"
     hide: true
 ```
+
+## Gateway (`gateway`)
+
+`llmkit gateway` serves MCP like the proxy but exposes exactly two tools:
+
+- **`discover`** — argument `query` (string, required). Sends the query plus
+  the catalog of backend tools to the configured LLM, which selects the
+  matching tools; the result carries their full specs
+  (`name`, `description`, `inputSchema`, `server`) and a `matched_by` field
+  (`"llm"`, or `"keyword"` when the LLM was unreachable and the stopword-aware
+  keyword fallback answered instead).
+- **`invoke`** — arguments `name` (string, required; a namespaced name as
+  returned by `discover`) and `arguments` (object, optional), forwarded to
+  the backend tool unchanged.
+
+Gateway mode requires the `llm` section (used by `discover`) plus `mcps`.
+Per-server `namespace`, `rename`, `redefine`, `whitelist`, `blacklist` and
+`hide` apply to what `discover` can see.
+
+## Example gateway config
+
+```yaml
+llm:
+  api_base: "http://127.0.0.1:8000/v1"
+  model: "gpt-4o-mini"
+mcps:
+  - name: fs
+    cmdline: "npx -y @modelcontextprotocol/server-filesystem /tmp"
+    namespace: fs
+```
+

@@ -36,6 +36,12 @@ $ llmkit agent -c config.yml -p "How much is 3 + 3?"
 - **`llmkit proxy`** -- Runs an MCP proxy server that fronts one or more
   backend MCP servers, providing namespace isolation, rename/redefine, and
   whitelist/blacklist filtering over a single MCP endpoint (stdio or HTTP).
+- **`llmkit gateway`** -- Runs an MCP gateway server that fronts one or more
+  backend MCP servers but exposes only two tools: `discover` (asks the LLM to
+  select the backend tools matching a natural-language query and returns
+  their full specs, with a keyword fallback if the LLM is unreachable) and
+  `invoke` (forwards a call to a backend tool by namespaced name). Serves
+  stdio or HTTP like the proxy.
 - **`llmkit response`** -- Reads a conversation JSONL file and prints the
   last LLM assistant response to stdout. Useful for extracting the final
   answer from a completed conversation.
@@ -50,11 +56,33 @@ MinGW-w64 cross-compilation).
 ```bash
 llmkit agent -c <agent_config.yml> [--conversation <convo.jsonl>] -p <prompt|prompt_file> [--mode <type>] [--steer] [--max-retries <n>]
 llmkit proxy -c <proxy_config.yml> [-l <host:port>]
+llmkit gateway -c <gateway_config.yml> [-l <host:port>]
 llmkit response --conversation <conversation.jsonl>
 ```
 
-If `-l` (or `--listen`) is omitted from `proxy`, it runs as a stdio MCP server (reads
-JSON-RPC from stdin, writes to stdout). With `-l host:port` it serves HTTP.
+If `-l` (or `--listen`) is omitted from `proxy` or `gateway`, it runs as a
+stdio MCP server (reads JSON-RPC from stdin, writes to stdout). With
+`-l host:port` it serves HTTP.
+
+### Gateway (`gateway`)
+
+The gateway is an MCP server for clients (agents, IDEs) that should not see
+every backend tool up front -- for example when the combined tool catalog is
+too large to fit in the model context. It exposes exactly two tools:
+
+- **`discover`** -- takes a natural-language `query` (e.g. `"write a file"`),
+  sends it to the configured LLM together with the catalog of backend tools,
+  and returns the full specs (`name`, `description`, `inputSchema`, `server`)
+  of the matching tools. If the LLM call fails, it falls back to keyword
+  matching (stopwords ignored) and reports `"matched_by": "keyword"`.
+- **`invoke`** -- takes a namespaced tool `name` (as returned by
+  `discover`) plus an `arguments` object, and passes them through to the
+  real backend MCP tool unchanged.
+
+The gateway config requires the `llm` section (used by `discover`) and at
+least one entry under `mcps`. Proxy per-server controls (`namespace`,
+`rename`, `redefine`, `whitelist`, `blacklist`, `hide`) apply to what
+`discover` can see. See `examples/gateway-complete.yml`.
 
 The `--conversation` flag is **optional** for `agent`. When given, the agent
 appends to the JSONL file and continues prior turns; when omitted, the run uses

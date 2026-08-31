@@ -1,0 +1,11 @@
+# llmkit gateway — minimal configuration example
+# Gateway mode requires `llm` (used by `discover`) and `mcps` with at
+# least one backend server entry.
+
+llm:
+  api_base: "http://127.0.0.1:8000/v1"
+  model: "gpt-4o-mini"
+
+mcps:
+  - name: "fs"                            # Required
+    cmdline: "npx -y @modelcontextprotocol/server-filesystem /tmp"
