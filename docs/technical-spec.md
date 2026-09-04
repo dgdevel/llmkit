@@ -28,7 +28,8 @@ src/
 ├── srv.h                 stdio/HTTP serve loops, namespace/filter helpers)
 ├── config.c            — YAML configuration loading & validation
 ├── config.h
-├── llm.c               — LLM API client (OpenAI-compatible chat completions)
+├── llm.c               — LLM API client (OpenAI-compatible chat completions
+│                          and Anthropic Messages API, selected by llm.provider)
 ├── llm.h
 ├── mcp.c               — MCP server lifecycle & transport abstraction
 ├── mcp.h

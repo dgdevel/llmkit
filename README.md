@@ -227,6 +227,24 @@ llmkit is driven by a single YAML config file passed via `-c <config.yml>`.
 Both modes (`agent` and `proxy`) share the same schema; the difference is which
 root keys are accepted.
 
+LLM endpoints support two wire protocols, selected by `llm.provider`:
+
+- **`openai`** (default) -- any OpenAI-compatible chat-completions endpoint
+  (vLLM, Ollama, LiteLLM, DeepSeek, ...): `{api_base}/chat/completions`.
+- **`anthropic`** -- the Anthropic Messages API: `{api_base}/messages` with
+  `x-api-key` auth and a required `max_tokens`.
+
+```yaml
+llm:
+  provider: "anthropic"
+  api_base: "https://api.anthropic.com/v1"
+  model: "claude-sonnet-4-5"
+  max_tokens: 8192
+```
+
+See [docs/configuration.md](docs/configuration.md#providers-provider) for the
+full provider reference.
+
 See [docs/configuration.md](docs/configuration.md) for the full reference:
 the `llm`, `mcps`, `agent`, and `subagents` fields, all MCP server options,
 and example agent/proxy configs.

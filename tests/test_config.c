@@ -589,6 +589,81 @@ static void test_subagents_errors(void) {
     fprintf(stderr, "  [ok] test_subagents_errors\n");
 }
 
+static void test_llm_provider(void) {
+    /* Valid: provider + max_tokens parsed. */
+    const char *yaml = "llm:\n"
+                       "  api_base: \"https://api.anthropic.com/v1\"\n"
+                       "  provider: \"anthropic\"\n"
+                       "  max_tokens: 8192\n";
+
+    const char *tmp = "/tmp/llmkit_test_llm_provider.yml";
+    write_file(tmp, yaml);
+
+    runtime_ctx ctx;
+    memset(&ctx, 0, sizeof(ctx));
+    int ret = config_load(tmp, &ctx);
+    CHECK_EQ(ret, 0, "anthropic provider config loads");
+    CHECK_EQ(ctx.llm.provider, LLM_PROVIDER_ANTHROPIC, "provider=anthropic parsed");
+    CHECK_EQ((int)ctx.llm.max_tokens, 8192, "max_tokens parsed");
+    config_free(&ctx);
+    unlink(tmp);
+
+    const char *yaml2 = "llm:\n"
+                        "  api_base: \"http://localhost:11434/v1\"\n"
+                        "  provider: \"openai\"\n";
+    write_file(tmp, yaml2);
+    memset(&ctx, 0, sizeof(ctx));
+    ret = config_load(tmp, &ctx);
+    CHECK_EQ(ret, 0, "openai provider config loads");
+    CHECK_EQ(ctx.llm.provider, LLM_PROVIDER_OPENAI, "provider=openai parsed");
+    CHECK_EQ((int)ctx.llm.max_tokens, 0, "max_tokens unset by default");
+    config_free(&ctx);
+    unlink(tmp);
+
+    /* Defaults: provider omitted -> openai. */
+    const char *yaml3 = "llm:\n"
+                        "  api_base: \"http://localhost:11434/v1\"\n";
+    write_file(tmp, yaml3);
+    memset(&ctx, 0, sizeof(ctx));
+    ret = config_load(tmp, &ctx);
+    CHECK_EQ(ret, 0, "no provider config loads");
+    CHECK_EQ(ctx.llm.provider, LLM_PROVIDER_OPENAI, "provider defaults to openai");
+    config_free(&ctx);
+    unlink(tmp);
+
+    /* Invalid provider value. */
+    const char *yaml4 = "llm:\n"
+                        "  api_base: \"http://localhost:11434/v1\"\n"
+                        "  provider: \"claude3\"\n";
+    write_file(tmp, yaml4);
+    memset(&ctx, 0, sizeof(ctx));
+    ret = config_load(tmp, &ctx);
+    CHECK_EQ(ret, EXIT_CONFIG_ERR, "invalid provider rejected");
+    config_free(&ctx);
+    unlink(tmp);
+
+    /* Invalid max_tokens values. */
+    const char *invalid_tokens[] = {"abc", "-5", "0"};
+    for (size_t i = 0; i < sizeof(invalid_tokens) / sizeof(invalid_tokens[0]); i++) {
+        char path[128];
+        snprintf(path, sizeof(path), "/tmp/llmkit_test_llm_tokens_%zu.yml", i);
+        char yamlbuf[256];
+        snprintf(yamlbuf, sizeof(yamlbuf),
+                 "llm:\n"
+                 "  api_base: \"http://localhost:11434/v1\"\n"
+                 "  max_tokens: %s\n",
+                 invalid_tokens[i]);
+        write_file(path, yamlbuf);
+        memset(&ctx, 0, sizeof(ctx));
+        ret = config_load(path, &ctx);
+        CHECK_EQ(ret, EXIT_CONFIG_ERR, "invalid max_tokens rejected");
+        config_free(&ctx);
+        unlink(path);
+    }
+
+    fprintf(stderr, "  [ok] test_llm_provider\n");
+}
+
 int main(void) {
     fprintf(stderr, "=== test_config ===\n");
 
@@ -604,6 +679,7 @@ int main(void) {
     test_subagents_nested();
     test_subagents_reference();
     test_subagents_errors();
+    test_llm_provider();
 
     fprintf(stderr, "\n%d tests, %d failed\n", tests_run, tests_failed);
     return tests_failed > 0 ? 1 : 0;

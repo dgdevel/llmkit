@@ -77,13 +77,21 @@ typedef struct {
     bool reference;
 } mcp_server_cfg;
 
+/* LLM API provider (wire protocol flavor) */
+typedef enum {
+    LLM_PROVIDER_OPENAI = 0,   /* OpenAI-compatible /chat/completions (default) */
+    LLM_PROVIDER_ANTHROPIC = 1 /* Anthropic Messages API {api_base}/messages */
+} llm_provider;
+
 /* LLM configuration */
 typedef struct {
     char *api_base;
     char *api_key;
     char *model;
     char **headers;
-    int retain_reasoning; /* if true, send reasoning_content back to the model on later requests */
+    int retain_reasoning;  /* if true, send reasoning_content back to the model on later requests */
+    llm_provider provider; /* wire protocol flavor; default LLM_PROVIDER_OPENAI */
+    int64_t max_tokens;    /* Anthropic requires it; <= 0 uses the builder default (4096) */
 } llm_cfg;
 
 /* Agent configuration */
@@ -152,7 +160,9 @@ typedef struct {
     int total_tokens;
     int prompt_cache_hit_tokens;  /* DeepSeek: usage.prompt_cache_hit_tokens */
     int prompt_cache_miss_tokens; /* DeepSeek: usage.prompt_cache_miss_tokens */
-    int cached_tokens;            /* OpenAI: usage.prompt_tokens_details.cached_tokens */
+    int cached_tokens;            /* OpenAI: usage.prompt_tokens_details.cached_tokens;
+                                     Anthropic: usage.cache_read_input_tokens */
+    int cache_creation_tokens;    /* Anthropic: usage.cache_creation_input_tokens */
 } usage_info;
 
 /* A single message in the LLM chat request */

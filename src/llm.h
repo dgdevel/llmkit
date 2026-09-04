@@ -4,10 +4,16 @@
 #include "llmkit.h"
 
 /*
- * Send a chat completion request to the OpenAI-compatible API.
+ * Send a chat completion request to the configured LLM provider.
  *
- * Builds a JSON body from the given messages and tools, POSTs it to
- * {api_base}/chat/completions via libcurl, and parses the response.
+ * The wire protocol is selected by ctx->llm.provider:
+ *   - LLM_PROVIDER_OPENAI (default): POSTs an OpenAI chat-completions body
+ *     to {api_base}/chat/completions with "Authorization: Bearer" auth.
+ *   - LLM_PROVIDER_ANTHROPIC: POSTs an Anthropic Messages body to
+ *     {api_base}/messages with "x-api-key" + "anthropic-version" auth.
+ *
+ * Builds a JSON body from the given messages and tools via libcurl and
+ * parses the response.
  *
  * Parameters:
  *   ctx          - runtime context (llm.api_base, llm.api_key, llm.model, llm.headers)
@@ -61,12 +67,52 @@ int llm_parse_response(const char *body, char **out_content, char **out_reasonin
                        tool_call **out_calls, int *out_call_count, usage_info *usage);
 
 /*
+ * Serialize an Anthropic Messages API request body (JSON) from messages and
+ * tools, applying the same transformations the wire format requires:
+ *   - "system" messages are hoisted into the top-level "system" parameter
+ *     (multiple ones joined with blank lines);
+ *   - assistant "tool_calls" become "tool_use" content blocks with the
+ *     arguments parsed into a JSON object;
+ *   - consecutive "tool" messages are merged into a single user message of
+ *     "tool_result" blocks;
+ *   - tools use the flat {name, description, input_schema} shape;
+ *   - "max_tokens" comes from cfg->max_tokens (default 4096 when unset).
+ *
+ * Exposed for tests: the serialization must be deterministic (identical input
+ * always yields identical bytes) and append-only, like the OpenAI builder.
+ *
+ * Returns a malloc'd JSON string, or NULL on allocation failure.
+ * The caller must free the result.
+ */
+char *llm_build_request_body_anthropic(const json_message *msgs, int msg_count,
+                                       const tool_def *tools, int tool_count, const llm_cfg *cfg);
+
+/*
+ * Parse an Anthropic Messages API response body into content, reasoning,
+ * model, tool calls and usage. "text" blocks feed *out_content, "thinking"
+ * blocks feed *out_reasoning, and "tool_use" blocks become tool calls with
+ * their "input" object re-serialized as the arguments string. Usage maps
+ * input_tokens/output_tokens onto the OpenAI-named fields, folds
+ * cache_creation_input_tokens/cache_read_input_tokens into the prompt-side
+ * totals, and reports cache_read_input_tokens as cached_tokens.
+ *
+ * Returns EXIT_SUCCESS, EXIT_LLM_ERR on a malformed/error response, or
+ * EXIT_INTERNAL_ERR on allocation failure. The caller must free *out_content,
+ * *out_reasoning, *out_model and *out_calls (including nested strings).
+ */
+int llm_parse_response_anthropic(const char *body, char **out_content, char **out_reasoning,
+                                 char **out_model, tool_call **out_calls, int *out_call_count,
+                                 usage_info *usage);
+
+/*
  * Serialize just the "messages" array of a chat-completion request body.
  *
  * Uses the same deterministic serialization as llm_build_request_body, so the
- * bytes are exactly what a provider would see for those messages. Used by the
- * prefix-cache-aware compactor to hash the covered prefix and to persist the
- * projection in the sidecar.
+ * bytes are exactly what an OpenAI-compatible provider would see for those
+ * messages. This OpenAI-shaped serialization is provider-independent and is
+ * kept as the canonical internal form regardless of llm.provider: it is used
+ * by the prefix-cache-aware compactor to hash the covered prefix and to
+ * persist the projection in the sidecar (determinism is all it needs).
  *
  * Returns a malloc'd JSON array string, or NULL on failure.
  * The caller must free the result.

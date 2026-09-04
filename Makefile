@@ -63,7 +63,7 @@ TIDY_FLAGS := -std=c17 -D_DEFAULT_SOURCE -I $(SRCDIR) \
 .PHONY: all debug profile test clean install uninstall dist check-ascii \
         vendors check-deps test_utf8 test_util test_config test_jsonrpc test_transport \
         test_mcp test_conversation test_llm test_compact test_cli test_agent test_agent_retries \
-        test_agent_compaction test_agent_subagent test_proxy test_gateway \
+        test_agent_compaction test_agent_subagent test_agent_anthropic test_proxy test_gateway \
         format format-check lint lint-analyzer windows windows32 clean-win \
         macos dist-linux dist-windows dist-macos
 
@@ -259,7 +259,7 @@ check-deps:
 
 test: test_utf8 test_util test_config test_jsonrpc test_transport test_mcp test_conversation test_subagent \
        test_llm test_compact test_steering test_cli test_agent test_agent_retries \
-       test_agent_compaction test_agent_subagent test_proxy test_gateway
+       test_agent_compaction test_agent_subagent test_agent_anthropic test_proxy test_gateway
 	@echo "All tests passed."
 
 test_utf8: tests/test_utf8.c src/utf8.c
@@ -329,6 +329,9 @@ test_agent_retries: $(TARGET) tests/test_agent_retries.py
 
 test_agent_subagent: $(TARGET) tests/fixtures/fake_mcp.py tests/test_agent_subagent.py
 	python3 tests/test_agent_subagent.py
+
+test_agent_anthropic: $(TARGET) tests/fixtures/fake_mcp.py tests/test_agent_integration_anthropic.py
+	python3 tests/test_agent_integration_anthropic.py
 
 test_proxy: $(TARGET) tests/fixtures/fake_mcp.py tests/test_proxy_integration.py
 	python3 tests/test_proxy_integration.py

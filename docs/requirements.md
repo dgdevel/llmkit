@@ -99,10 +99,12 @@ The `proxy` command ignores `llm` and `agent` keys if present.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `api_base` | string | Yes | - | Base URL for OpenAI-compatible API (e.g., `http://localhost:11434/v1`) |
-| `api_key` | string | No | `""` | API key for Authorization header |
+| `api_base` | string | Yes | - | Provider base URL (e.g., `http://localhost:11434/v1`) |
+| `provider` | enum | No | `openai` | Wire protocol: `openai` (chat completions) or `anthropic` (Messages API) |
+| `api_key` | string | No | `""` | API key (`Authorization: Bearer` for openai, `x-api-key` for anthropic) |
 | `model` | string | No | `"gpt-4o-mini"` | Model identifier |
 | `headers` | map<string,string> | No | `{}` | Additional HTTP headers |
+| `max_tokens` | integer | No | 4096 (anthropic) | Maximum output tokens; required by the Anthropic Messages API |
 
 **Headers Behavior:** All headers merged with `Authorization: Bearer <api_key>` (if api_key provided) and `Content-Type: application/json`. User-provided headers take precedence over auto-generated ones on conflict.
 

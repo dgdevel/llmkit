@@ -976,6 +976,7 @@ static int cfg_parse_llm(cfg_parse *p, runtime_ctx *ctx) {
     cfg_event_done(p);
 
     ctx->llm.model = util_strdup("gpt-4o-mini");
+    ctx->llm.provider = LLM_PROVIDER_OPENAI;
 
     while (1) {
         if (cfg_next(p) != 0) goto err;
@@ -996,6 +997,39 @@ static int cfg_parse_llm(cfg_parse *p, runtime_ctx *ctx) {
             cfg_event_done(p);
             free(ctx->llm.model);
             if (cfg_read_scalar(p, &ctx->llm.model) != 0) goto err;
+
+        } else if (strcmp(key, "provider") == 0) {
+            cfg_event_done(p);
+            char *v = NULL;
+            if (cfg_read_scalar(p, &v) != 0) goto err;
+            if (strcmp(v, "openai") == 0) {
+                ctx->llm.provider = LLM_PROVIDER_OPENAI;
+            } else if (strcmp(v, "anthropic") == 0) {
+                ctx->llm.provider = LLM_PROVIDER_ANTHROPIC;
+            } else {
+                snprintf(p->error_msg, sizeof(p->error_msg),
+                         "Invalid provider '%s' (expected \"openai\" or \"anthropic\")", v);
+                free(v);
+                p->error_code = EXIT_CONFIG_ERR;
+                goto err;
+            }
+            free(v);
+
+        } else if (strcmp(key, "max_tokens") == 0) {
+            cfg_event_done(p);
+            char *v = NULL;
+            if (cfg_read_scalar(p, &v) != 0) goto err;
+            char *end = NULL;
+            long n = strtol(v, &end, 10);
+            if (end == v || *end != '\0' || n <= 0) {
+                snprintf(p->error_msg, sizeof(p->error_msg),
+                         "Invalid integer '%s' for llm.max_tokens", v);
+                free(v);
+                p->error_code = EXIT_CONFIG_ERR;
+                goto err;
+            }
+            ctx->llm.max_tokens = (int64_t)n;
+            free(v);
 
         } else if (strcmp(key, "headers") == 0) {
             cfg_event_done(p);

@@ -153,6 +153,9 @@ static int write_entry_core(FILE *fp, const conv_scope *scope, entry_type type, 
                                             usage->prompt_cache_miss_tokens);
                 if (usage->cached_tokens > 0)
                     cJSON_AddNumberToObject(u, "cached_tokens", usage->cached_tokens);
+                if (usage->cache_creation_tokens > 0)
+                    cJSON_AddNumberToObject(u, "cache_creation_tokens",
+                                            usage->cache_creation_tokens);
                 cJSON_AddItemToObject(root, "usage", u);
             }
         }

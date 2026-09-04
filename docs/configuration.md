@@ -12,11 +12,57 @@ is which root keys each mode requires.
 
 | Field      | Required | Default        | Description                          |
 |------------|----------|----------------|--------------------------------------|
-| `api_base` | Yes      | -              | OpenAI-compatible base URL           |
-| `api_key`  | No       | `""`           | API key for Authorization header     |
+| `api_base` | Yes      | -              | Provider base URL (e.g. `http://127.0.0.1:8000/v1`) |
+| `provider` | No       | `openai`       | Wire protocol: `openai` (OpenAI-compatible chat completions) or `anthropic` (Anthropic Messages API) |
+| `api_key`  | No       | `""`           | API key (`Authorization: Bearer` for openai, `x-api-key` for anthropic) |
 | `model`    | No       | `gpt-4o-mini`  | Model identifier                     |
 | `headers`  | No       | `{}`           | Additional HTTP headers              |
+| `max_tokens` | No     | provider-specific | Maximum output tokens (Anthropic requires it; default 4096 when unset) |
 | `retain_reasoning` | No | `false` | Re-send reasoning on later turns (see below) |
+
+### Providers (`provider`)
+
+Two wire protocols are supported, selected by `llm.provider`:
+
+- **`openai`** (default) -- any OpenAI-compatible chat-completions endpoint
+  (vLLM, Ollama, LiteLLM, DeepSeek, OpenAI, ...). Requests go to
+  `{api_base}/chat/completions` with a `Authorization: Bearer <api_key>`
+  header.
+- **`anthropic`** -- the Anthropic Messages API. Requests go to
+  `{api_base}/messages` with `x-api-key: <api_key>` and
+  `anthropic-version: 2023-06-01` headers:
+
+```yaml
+llm:
+  provider: "anthropic"
+  api_base: "https://api.anthropic.com/v1"
+  api_key: "${ANTHROPIC_API_KEY}"
+  model: "claude-sonnet-4-5"
+  max_tokens: 8192
+```
+
+Anthropic-specific mapping and behavior:
+
+- `agent.system_prompt` (and any system message) is sent as the top-level
+  `system` parameter, not as a message.
+- Assistant tool calls are sent as `tool_use` content blocks, and tool
+  results are folded into the following user message as `tool_result`
+  blocks (the Messages API requires strictly alternating roles).
+- `thinking` blocks returned by extended-thinking models are captured into
+  the conversation's `reasoning` field like any other reasoning, but they
+  are **not** re-sent on later turns (`retain_reasoning` applies to
+  OpenAI-style `reasoning_content` only; Anthropic requires signed thinking
+  blocks that llmkit does not currently persist).
+- Usage mapping: `input_tokens` + `cache_read_input_tokens` +
+  `cache_creation_input_tokens` are folded into `prompt_tokens`,
+  `output_tokens` becomes `completion_tokens`, `cache_read_input_tokens`
+  is reported as `cached_tokens`, and `cache_creation_input_tokens` as
+  `cache_creation_tokens`.
+- `anthropic-beta` or other extra headers can be added via `llm.headers`.
+- Pointing `api_base` at Anthropic's OpenAI-compatible endpoint
+  (`https://api.anthropic.com/v1/` with the default `openai` provider) also
+  works, but it is a lossy compatibility layer; prefer
+  `provider: "anthropic"` for full fidelity.
 
 ### `retain_reasoning`
 
