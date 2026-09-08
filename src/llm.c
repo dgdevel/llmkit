@@ -843,16 +843,32 @@ int llm_chat_complete(runtime_ctx *ctx, const json_message *messages, int msg_co
     headers = curl_slist_append(headers, "Content-Type: application/json");
     if (ctx->llm.provider == LLM_PROVIDER_ANTHROPIC) {
         if (ctx->llm.api_key != NULL && ctx->llm.api_key[0] != '\0') {
-            char auth[1024];
-            snprintf(auth, sizeof(auth), "x-api-key: %s", ctx->llm.api_key);
+            size_t n = strlen("x-api-key: ") + strlen(ctx->llm.api_key) + 1;
+            char *auth = malloc(n);
+            if (auth == NULL) {
+                curl_slist_free_all(headers);
+                curl_easy_cleanup(curl);
+                free(body);
+                return EXIT_INTERNAL_ERR;
+            }
+            snprintf(auth, n, "x-api-key: %s", ctx->llm.api_key);
             headers = curl_slist_append(headers, auth);
+            free(auth);
         }
         headers = curl_slist_append(headers, "anthropic-version: 2023-06-01");
     } else {
         if (ctx->llm.api_key != NULL && ctx->llm.api_key[0] != '\0') {
-            char auth[1024];
-            snprintf(auth, sizeof(auth), "Authorization: Bearer %s", ctx->llm.api_key);
+            size_t n = strlen("Authorization: Bearer ") + strlen(ctx->llm.api_key) + 1;
+            char *auth = malloc(n);
+            if (auth == NULL) {
+                curl_slist_free_all(headers);
+                curl_easy_cleanup(curl);
+                free(body);
+                return EXIT_INTERNAL_ERR;
+            }
+            snprintf(auth, n, "Authorization: Bearer %s", ctx->llm.api_key);
             headers = curl_slist_append(headers, auth);
+            free(auth);
         }
     }
     headers = headers_to_slist(ctx->llm.headers, headers);

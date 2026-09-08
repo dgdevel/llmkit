@@ -44,6 +44,7 @@ void platform_random_bytes(void *buf, size_t len);
 void platform_timestamp_now(char *buf, size_t len);
 int platform_tcp_listen(const char *addr, int port);
 int platform_tcp_accept(int fd, int64_t timeout_ms);
+int platform_socket_set_read_timeout(int client_fd, int64_t timeout_ms);
 bool platform_stderr_is_tty(void);
 
 /* Monotonic clock in milliseconds. Untyped epoch; only deltas are meaningful. */

@@ -160,23 +160,57 @@ char *srv_make_namespaced(const char *ns, const char *original) {
     return out;
 }
 
+/* Cap on HTTP request bodies accepted from the network; larger requests
+ * are rejected before any allocation (DoS mitigation). */
+#define MAX_HTTP_BODY (16 * 1024 * 1024)
+
+/* Receive timeout per accepted HTTP client; stalled senders are dropped. */
+#define HTTP_CLIENT_READ_TIMEOUT_MS 30000
+
 /* ------------------------------------------------------------------ */
 /*  stdio serve loop                                                   */
 /* ------------------------------------------------------------------ */
 
 static int srv_loop_stdio(runtime_ctx *ctx, srv_handler_fn handler) {
-    char line[65536];
+    /* Growable line buffer: a JSON-RPC request larger than 64 KiB must stay
+     * on one logical line or the handler cannot parse it. */
+    size_t cap = 65536;
+    char *line = malloc(cap);
+    if (line == NULL) return EXIT_INTERNAL_ERR;
 
-    while (fgets(line, sizeof(line), stdin) != NULL) {
-        /* Trim trailing newline/whitespace. */
+    while (fgets(line, cap, stdin) != NULL) {
+        /* If the buffer was filled without a newline, keep reading into a
+         * larger buffer (up to MAX_HTTP_BODY) until the line ends. */
         size_t len = strlen(line);
+        while (len == cap - 1 && line[len - 1] != '\n') {
+            if (cap >= MAX_HTTP_BODY) {
+                log_activity("[error] stdio request line too large (>%zu bytes)", cap - 1);
+                free(line);
+                return EXIT_MCP_ERR;
+            }
+            cap *= 2;
+            if (cap > MAX_HTTP_BODY) cap = MAX_HTTP_BODY + 1;
+            char *tmp = realloc(line, cap);
+            if (tmp == NULL) {
+                free(line);
+                return EXIT_INTERNAL_ERR;
+            }
+            line = tmp;
+            if (fgets(line + len, cap - len, stdin) == NULL) break;
+            len = strlen(line);
+        }
+
+        /* Trim trailing newline/whitespace. */
         while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r' || line[len - 1] == ' '))
             line[--len] = '\0';
         if (len == 0) continue;
 
         char *resp = NULL;
         int rc = handler(ctx, line, &resp);
-        if (rc != EXIT_SUCCESS) return rc;
+        if (rc != EXIT_SUCCESS) {
+            free(line);
+            return rc;
+        }
 
         if (resp != NULL && resp[0] != '\0') {
             fprintf(stdout, "%s\n", resp);
@@ -184,6 +218,7 @@ static int srv_loop_stdio(runtime_ctx *ctx, srv_handler_fn handler) {
         }
         free(resp);
     }
+    free(line);
     return EXIT_SUCCESS;
 }
 
@@ -257,6 +292,12 @@ static int read_http_request(FILE *client, char **out_body) {
 
     if (content_length <= 0) return EXIT_SUCCESS;
 
+    /* Reject oversized bodies: 16 MiB cap. */
+    if (content_length > (long)MAX_HTTP_BODY) {
+        log_activity("[error] HTTP request body too large: %ld bytes", content_length);
+        return EXIT_MCP_ERR;
+    }
+
     /* Read body. */
     *out_body = malloc((size_t)content_length + 1);
     if (*out_body == NULL) return EXIT_INTERNAL_ERR;
@@ -300,6 +341,10 @@ static int srv_loop_http(runtime_ctx *ctx, srv_handler_fn handler, const char *a
             continue;
         }
 
+        /* Bound the time a single client can stall the loop: drop
+         * connections that stop sending mid-request (slowloris). */
+        platform_socket_set_read_timeout(client_fd, HTTP_CLIENT_READ_TIMEOUT_MS);
+
         FILE *client = fdopen(client_fd, "r+");
         if (client == NULL) {
             close(client_fd);
@@ -315,7 +360,10 @@ static int srv_loop_http(runtime_ctx *ctx, srv_handler_fn handler, const char *a
         }
 
         char *resp = NULL;
-        handler(ctx, body, &resp);
+        int hrc = handler(ctx, body, &resp);
+        if (hrc != EXIT_SUCCESS) {
+            log_activity("[error] %s handler failed (code %d) for one request", server_label, hrc);
+        }
         free(body);
 
         /* Write HTTP response. */

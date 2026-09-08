@@ -441,8 +441,15 @@ static int gateway_tool_discover(runtime_ctx *ctx, const cJSON *id_node, cJSON *
         if (cat_text != NULL) {
             size_t off = 0;
             for (int i = 0; i < entry_count; i++) {
-                off += (size_t)snprintf(cat_text + off, cap - off, "%d. %s: %s\n", i + 1,
-                                        entries[i].name, entries[i].description);
+                int written = snprintf(cat_text + off, cap - off, "%d. %s: %s\n", i + 1,
+                                       entries[i].name, entries[i].description);
+                if (written < 0) break; /* encoding error: stop */
+                if ((size_t)written >= cap - off) {
+                    /* Would have truncated: clamp and stop appending. */
+                    off = cap - 1;
+                    break;
+                }
+                off += (size_t)written;
             }
             user_text = malloc(strlen(query) + strlen(cat_text) + 64);
             if (user_text != NULL) {

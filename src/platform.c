@@ -144,7 +144,11 @@ int platform_process_spawn(const char *cmdline, platform_process *out_proc, plat
                 argv[argc++] = p;
                 while (*p && *p != ' ') p++;
             }
-            if (argc >= 60) break;
+            if (argc >= 60) {
+                /* Too many tokens: silently dropping the rest would exec a
+                 * different program than the config asked for. Fail loudly. */
+                _exit(126);
+            }
         }
         if (argc == 0) {
             /* empty/whitespace cmdline: fall back to the raw string so execvp
@@ -374,6 +378,23 @@ int platform_tcp_accept(int fd, int64_t timeout_ms) {
     }
     int client = accept(fd, NULL, NULL);
     return client;
+#endif
+}
+
+/* Set a receive timeout on an accepted client socket. Returns 0 on success.
+ * Used by the HTTP serve loop so a stalled client cannot block forever. */
+int platform_socket_set_read_timeout(int client_fd, int64_t timeout_ms) {
+#ifdef _WIN32
+    DWORD ms = (DWORD)timeout_ms;
+    return (setsockopt((SOCKET)client_fd, SOL_SOCKET, SO_RCVTIMEO, (const char *)&ms, sizeof(ms)) ==
+            0)
+               ? 0
+               : -1;
+#else
+    struct timeval tv;
+    tv.tv_sec = (time_t)(timeout_ms / 1000);
+    tv.tv_usec = (suseconds_t)((timeout_ms % 1000) * 1000);
+    return (setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) == 0) ? 0 : -1;
 #endif
 }
 
