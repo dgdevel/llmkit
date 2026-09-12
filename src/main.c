@@ -7,6 +7,7 @@
 #include "agent.h"
 #include "proxy.h"
 #include "gateway.h"
+#include "tools.h"
 #include "conversation.h"
 #include "util.h"
 #include "platform.h"
@@ -19,6 +20,7 @@ static void print_usage(void) {
                     "-p <prompt|prompt_file> [--mode <type>]\n"
                     "  llmkit proxy -c <config.yml> [-l <host:port>]\n"
                     "  llmkit gateway -c <config.yml> [-l <host:port>]\n"
+                    "  llmkit mcp <tools> [-l <host:port>]\n"
                     "  llmkit response --conversation <conversation.jsonl>\n"
                     "\n"
                     "Commands:\n"
@@ -26,6 +28,9 @@ static void print_usage(void) {
                     "  proxy     Run MCP proxy server (stdio or HTTP)\n"
                     "  gateway   Run MCP gateway server exposing discover/invoke\n"
                     "            tools only (stdio or HTTP)\n"
+                    "  mcp       Run MCP server exposing built-in tools (stdio or\n"
+                    "            HTTP); <tools> is a comma-separated list, e.g.\n"
+                    "            online_search,online_fetch\n"
                     "  response  Print the last LLM response from a conversation\n"
                     "\n"
                     "Flags:\n"
@@ -52,7 +57,7 @@ static void print_usage(void) {
                     "  --stats                    Print prefix-cache hit/miss tokens of the last\n"
                     "                             assistant entry (response only)\n"
                     "  -l, --listen <host:port>   Listen address; omit for stdio mode "
-                    "(proxy, gateway)\n"
+                    "(proxy, gateway, mcp)\n"
                     "  -h, --help                 Print this help and exit\n"
                     "  -V, --version              Print version and exit\n");
 }
@@ -242,6 +247,30 @@ int main(int argc, char **argv) {
 
         rc = gateway_run(&ctx, listen_addr);
         config_free(&ctx);
+        return rc;
+    }
+
+    /* ---- mcp (built-in tools server) ---- */
+    if (strcmp(argv[1], "mcp") == 0) {
+        const char *listen_addr = get_flag(argc, argv, "-l", "--listen");
+
+        /* The tool list is the first positional argument: skip flags and
+         * their values. */
+        const char *tool_list = NULL;
+        for (int i = 2; i < argc; i++) {
+            if (argv[i][0] == '-') {
+                /* Skip the value of flags that take one. */
+                if ((strcmp(argv[i], "-l") == 0 || strcmp(argv[i], "--listen") == 0) &&
+                    i + 1 < argc) {
+                    i++;
+                }
+                continue;
+            }
+            tool_list = argv[i];
+            break;
+        }
+
+        int rc = tools_run(tool_list, listen_addr);
         return rc;
     }
 

@@ -8,6 +8,44 @@
 #include <stdarg.h>
 #include <openssl/sha.h>
 
+void util_growbuf_append(util_growbuf *gb, const char *src, size_t n) {
+    if (n == 0) return;
+    if (gb->len + n + 1 > gb->cap) {
+        size_t new_cap = gb->cap ? gb->cap : 256;
+        while (new_cap < gb->len + n + 1) new_cap *= 2;
+        char *tmp = (char *)realloc(gb->buf, new_cap);
+        if (tmp == NULL) {
+            log_activity("[error] OOM in growbuf");
+            exit(EXIT_INTERNAL_ERR);
+        }
+        gb->buf = tmp;
+        gb->cap = new_cap;
+    }
+    memcpy(gb->buf + gb->len, src, n);
+    gb->len += n;
+}
+
+void util_growbuf_append_str(util_growbuf *gb, const char *s) {
+    if (s != NULL) util_growbuf_append(gb, s, strlen(s));
+}
+
+char *util_growbuf_release(util_growbuf *gb) {
+    if (gb->buf == NULL) return NULL;
+    gb->buf[gb->len] = '\0';
+    char *out = gb->buf;
+    gb->buf = NULL;
+    gb->len = 0;
+    gb->cap = 0;
+    return out;
+}
+
+void util_growbuf_free(util_growbuf *gb) {
+    free(gb->buf);
+    gb->buf = NULL;
+    gb->len = 0;
+    gb->cap = 0;
+}
+
 int64_t util_parse_duration(const char *s) {
     if (s == NULL || *s == '\0') return -1;
 

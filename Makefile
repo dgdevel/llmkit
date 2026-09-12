@@ -64,6 +64,7 @@ TIDY_FLAGS := -std=c17 -D_DEFAULT_SOURCE -I $(SRCDIR) \
         vendors check-deps test_utf8 test_util test_config test_jsonrpc test_transport \
         test_mcp test_conversation test_llm test_compact test_cli test_agent test_agent_retries \
         test_agent_compaction test_agent_subagent test_agent_anthropic test_proxy test_gateway \
+        test_htmlmd test_tools test_mcp_tools \
         format format-check lint lint-analyzer windows windows32 clean-win \
         macos dist-linux dist-windows dist-macos
 
@@ -137,7 +138,8 @@ $(OBJDIR):
 
 TEST_BINS := tests/test_utf8 tests/test_util tests/test_config tests/test_jsonrpc \
              tests/test_transport tests/test_mcp tests/test_conversation tests/test_llm \
-             tests/test_compact tests/test_steering tests/test_subagent
+             tests/test_compact tests/test_steering tests/test_subagent tests/test_htmlmd \
+             tests/test_tools
 
 clean:
 	rm -rf $(OBJDIR) $(TARGET) build-win llmkit.exe $(TEST_BINS) dist
@@ -258,8 +260,9 @@ check-deps:
 	@echo "Done."
 
 test: test_utf8 test_util test_config test_jsonrpc test_transport test_mcp test_conversation test_subagent \
-       test_llm test_compact test_steering test_cli test_agent test_agent_retries \
-       test_agent_compaction test_agent_subagent test_agent_anthropic test_proxy test_gateway
+       test_llm test_compact test_steering test_htmlmd test_tools test_cli test_agent test_agent_retries \
+       test_agent_compaction test_agent_subagent test_agent_anthropic test_proxy test_gateway \
+       test_mcp_tools
 	@echo "All tests passed."
 
 test_utf8: tests/test_utf8.c src/utf8.c
@@ -312,6 +315,16 @@ test_steering: tests/test_steering.c src/steering.c src/platform.c src/util.c
 	$(CC) $(CFLAGS) -Isrc -o tests/test_steering tests/test_steering.c src/steering.c src/platform.c src/util.c $(LIBS)
 	./tests/test_steering
 
+test_htmlmd: tests/test_htmlmd.c src/htmlmd.c src/util.c src/utf8.c src/platform.c
+	$(CC) $(CFLAGS) -Isrc -o tests/test_htmlmd tests/test_htmlmd.c src/htmlmd.c src/util.c src/utf8.c src/platform.c $(LIBS)
+	./tests/test_htmlmd
+
+test_tools: tests/test_tools.c src/tools.c src/srv.c src/htmlmd.c src/util.c src/utf8.c \
+            src/platform.c $(CJSON_SRC)
+	$(CC) $(CFLAGS) -Isrc -o tests/test_tools tests/test_tools.c src/tools.c src/srv.c \
+		src/htmlmd.c src/util.c src/utf8.c src/platform.c $(CJSON_SRC) $(LIBS)
+	./tests/test_tools
+
 # --- Integration tests (Phase 12) --------------------------------------
 # These exercise the compiled binary end-to-end. They require python3
 # (for the mock LLM/MCP helpers) and a freshly built `llmkit` binary.
@@ -338,4 +351,7 @@ test_proxy: $(TARGET) tests/fixtures/fake_mcp.py tests/test_proxy_integration.py
 
 test_gateway: $(TARGET) tests/fixtures/fake_mcp.py tests/test_gateway_integration.py
 	python3 tests/test_gateway_integration.py
+
+test_mcp_tools: $(TARGET) tests/test_mcp_tools_integration.py
+	python3 tests/test_mcp_tools_integration.py
 

@@ -42,6 +42,10 @@ $ llmkit agent -c config.yml -p "How much is 3 + 3?"
   their full specs, with a keyword fallback if the LLM is unreachable) and
   `invoke` (forwards a call to a backend tool by namespaced name). Serves
   stdio or HTTP like the proxy.
+- **`llmkit mcp`** -- Runs an MCP server exposing llmkit's built-in tools
+  (currently `online_search` and `online_fetch`), selected with a
+  comma-separated list on the command line. No config file or backend
+  servers are needed. Serves stdio or HTTP like proxy/gateway.
 - **`llmkit response`** -- Reads a conversation JSONL file and prints the
   last LLM assistant response to stdout. Useful for extracting the final
   answer from a completed conversation.
@@ -57,11 +61,12 @@ MinGW-w64 cross-compilation).
 llmkit agent -c <agent_config.yml> [--conversation <convo.jsonl>] -p <prompt|prompt_file> [--mode <type>] [--steer] [--max-retries <n>]
 llmkit proxy -c <proxy_config.yml> [-l <host:port>]
 llmkit gateway -c <gateway_config.yml> [-l <host:port>]
+llmkit mcp <tool[,tool...]> [-l <host:port>]
 llmkit response --conversation <conversation.jsonl>
 ```
 
-If `-l` (or `--listen`) is omitted from `proxy` or `gateway`, it runs as a
-stdio MCP server (reads JSON-RPC from stdin, writes to stdout). With
+If `-l` (or `--listen`) is omitted from `proxy`, `gateway` or `mcp`, it runs
+as a stdio MCP server (reads JSON-RPC from stdin, writes to stdout). With
 `-l host:port` it serves HTTP.
 
 ### Gateway (`gateway`)
@@ -83,6 +88,39 @@ The gateway config requires the `llm` section (used by `discover`) and at
 least one entry under `mcps`. Proxy per-server controls (`namespace`,
 `rename`, `redefine`, `whitelist`, `blacklist`, `hide`) apply to what
 `discover` can see. See `examples/gateway-complete.yml`.
+
+### Built-in tools (`mcp`)
+
+`llmkit mcp` exposes tools implemented inside llmkit itself -- no config
+file, backend servers, API keys or LLM endpoint are involved:
+
+```bash
+$ llmkit mcp online_search,online_fetch            # stdio MCP server
+$ llmkit mcp online_search -l 127.0.0.1:8080       # or HTTP
+```
+
+The tool list is a comma-separated subset of the available tools (unknown
+or duplicate names exit with code 2). Available tools:
+
+- **`online_search`** -- Web search via DuckDuckGo's free, unauthenticated
+  HTML endpoint. Takes a `query` string and returns every result as
+  entries separated by blank lines, each in the form:
+  `Title: [title]`, `URL: [url]`, `Description: [description]`.
+  DuckDuckGo redirect links are unwrapped to the real target URLs.
+- **`online_fetch`** -- Fetches an `http(s)` URL and returns its main
+  content as markdown. Boilerplate (scripts, styles, navigation, footers)
+  is stripped with a simplified readability pass (preferring
+  `<article>`/`<main>` content) and the HTML is converted to markdown
+  (headings, lists, links, images, fenced code, blockquotes, tables).
+  Non-200 responses return `HTTP Status <code>`; output over 100000
+  characters is truncated with a note.
+
+Example stdio session:
+
+```
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}
+{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"online_search","arguments":{"query":"c17 standard pdf"}}}
+```
 
 The `--conversation` flag is **optional** for `agent`. When given, the agent
 appends to the JSONL file and continues prior turns; when omitted, the run uses

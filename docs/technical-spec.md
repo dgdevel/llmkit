@@ -7,6 +7,7 @@ LLMKIT is a lightweight C CLI tool with three modes of operation:
 - **`llmkit agent`** — Runs an LLM conversation loop with MCP tool support. Reads a YAML config, loads conversation history from JSONL, calls the LLM API, executes MCP tool calls, and writes results back to the JSONL file.
 - **`llmkit proxy`** — Runs an MCP proxy server that fronts one or more backend MCP servers, providing namespace isolation, rename/redefine, and whitelist/blacklist filtering over a single MCP endpoint (stdio or HTTP).
 - **`llmkit gateway`** — Runs an MCP gateway server that fronts one or more backend MCP servers but exposes only two tools: `discover(query)` uses the LLM to select the backend tools matching a natural-language query and returns their full specs (keyword fallback when the LLM is unreachable); `invoke(name, arguments)` forwards the call to the backend tool. Serves stdio or HTTP.
+- **`llmkit mcp`** — Runs an MCP server exposing llmkit's built-in tools (`online_search`, `online_fetch`) selected with a comma-separated command-line list, no config file required. Serves stdio or HTTP like proxy/gateway.
 - **`llmkit response`** — Reads a conversation JSONL file and prints the last assistant response content to stdout. Used to extract the final LLM answer from a completed conversation.
 
 The binary is statically linked, has zero runtime language dependencies, and targets Linux, macOS, and Windows (via MinGW-w64 cross-compilation).
@@ -24,6 +25,10 @@ src/
 ├── proxy.h
 ├── gateway.c           — MCP gateway server (discover/invoke only)
 ├── gateway.h
+├── tools.c             — Built-in tools MCP server (online_search,
+├── tools.h               online_fetch)
+├── htmlmd.c            — HTML-to-markdown converter with simplified
+├── htmlmd.h              readability pass
 ├── srv.c               — Shared MCP server plumbing (response builders,
 ├── srv.h                 stdio/HTTP serve loops, namespace/filter helpers)
 ├── config.c            — YAML configuration loading & validation
@@ -246,6 +251,51 @@ Code shared verbatim by `proxy` and `gateway` so both serve MCP identically:
 | `srv_get_ns` / `srv_local_name` / `srv_check_filters` / `srv_apply_rename` / `srv_apply_redefine` / `srv_make_namespaced` | Namespace and whitelist/blacklist/rename/redefine helpers. |
 | `srv_serve(ctx, listen_addr, handler, label)` | stdio loop (line-delimited JSON-RPC on stdin/stdout) when `listen_addr` is empty, otherwise an HTTP loop on `host:port` dispatching POST bodies to the handler. |
 
+### 2.5c `tools.c` / `tools.h` + `htmlmd.c` / `htmlmd.h` — Built-in Tools Server
+
+`llmkit mcp <tools> [-l host:port]` serves MCP over stdio/HTTP (via `srv_serve`,
+no config file needed) exposing only built-in tools implemented inside llmkit.
+`<tools>` is a comma-separated subset of `online_search,online_fetch`; unknown
+or duplicate names exit with code 2.
+
+| Function | Purpose |
+|----------|---------|
+| `int tools_run(const char *tool_list, const char *listen_addr)` | Parses/validates the enabled set, serves via `srv_serve`. |
+| `static int tools_handle_request(...)` | MCP dispatcher identical in shape to the gateway's (`initialize`, `notifications/*`, `ping`, `tools/list`, `tools/call`, empty resources/prompts). serverInfo name: `llmkit-tools`. |
+| `char *tools_parse_search_results(const char *html, const char *query)` | Parses a DDG HTML results page into the user-visible text list (exported for tests). |
+| `static int http_get(...)` | libcurl GET: follows redirects, browser User-Agent, transparent gzip, 30 s timeout, 32 MiB download cap; copies Content-Type before handle cleanup. |
+| `static int tool_online_search(...) / tool_online_fetch(...)` | tools/call implementations returning MCP text content; missing arguments are JSON-RPC errors, runtime failures are `isError:true` content. |
+| `char *htmlmd_convert(const char *html)` | Full HTML → markdown pipeline (see below). |
+| `htmlmd_match *htmlmd_find_by_class(...)` | Finds elements by class token with their text content and one attribute (used by the DDG parser). |
+
+**`online_search(query)`:** GETs `https://html.duckduckgo.com/html/?q=<urlencoded>`
+(free, unauthenticated) and parses the result anchors (`class="result__a"`,
+URLs unwrapped from the `//duckduckgo.com/l/?uddg=<encoded>` redirect) and
+snippets (`class="result__snippet"`). Returns all results, entries separated
+by blank lines in the form `Title: [title]\nURL: [url]\nDescription:
+[description]`; "No results found for: <query>" when the page has no anchors;
+non-200 responses (e.g. DDG bot challenges) yield `isError:true`.
+
+**`online_fetch(url)`:** GETs the URL (http/https only). Non-200 responses
+return the text `HTTP Status <code>`. HTML/XML bodies go through
+`htmlmd_convert`; other text content types pass through unchanged; binary
+content is announced, not returned. Output over 100000 characters is
+truncated at a UTF-8 boundary with a `[content truncated at 100000
+characters]` note.
+
+**`htmlmd_convert` pipeline:** (1) parse into a minimal DOM — forgiving
+parser with implicit closes (`li`, `p`, `tr`, `td`), quoted/unquoted
+attribute values and entity decoding (named, decimal, hex); (2) simplified
+readability — prune boilerplate subtrees (script/style/nav/header/footer/
+aside/forms/...) and prefer the first `<article>`, else `<main>`, else
+`<body>` as content root; the `<title>` is prepended as a level-1 heading;
+(3) render markdown — headings, paragraphs, nested ordered/unordered lists,
+links (autolinks when the text equals the href), images, fenced code blocks
+(fence length grows past inner backticks), blockquotes (`> ` prefix),
+horizontal rules, inline `**`/`_`/`~~`/backticks and simple tables with a
+header separator and `|` escaping. Unknown tags render as block containers;
+tables inside table cells are flattened.
+
 ### 2.6 `llm.c` / `llm.h` — LLM API Client
 
 | Function | Purpose |
@@ -377,6 +427,7 @@ Implementation manually walks bytes checking continuation byte validity without 
 | `void util_sha256(const char *data, size_t len, char *hex_out)` | Compute SHA256 hex digest. Uses OpenSSL's `SHA256()` or libcrypto. |
 | `char *util_read_file(const char *path)` | Read entire file into malloc'd string. |
 | `char *util_strdup(const char *s)` | Safe strdup with OOM check. |
+| `util_growbuf` + `util_growbuf_append` / `_append_str` / `_release` / `_free` | Growable byte buffer shared by the HTML-to-markdown converter and the built-in tools' HTTP downloads; OOM exits like the other util helpers. |
 
 ### 2.13 `platform.c` / `platform.h` — Platform Abstraction
 
