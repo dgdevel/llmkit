@@ -7,7 +7,7 @@ LLMKIT is a lightweight C CLI tool with three modes of operation:
 - **`llmkit agent`** — Runs an LLM conversation loop with MCP tool support. Reads a YAML config, loads conversation history from JSONL, calls the LLM API, executes MCP tool calls, and writes results back to the JSONL file.
 - **`llmkit proxy`** — Runs an MCP proxy server that fronts one or more backend MCP servers, providing namespace isolation, rename/redefine, and whitelist/blacklist filtering over a single MCP endpoint (stdio or HTTP).
 - **`llmkit gateway`** — Runs an MCP gateway server that fronts one or more backend MCP servers but exposes only two tools: `discover(query)` uses the LLM to select the backend tools matching a natural-language query and returns their full specs (keyword fallback when the LLM is unreachable); `invoke(name, arguments)` forwards the call to the backend tool. Serves stdio or HTTP.
-- **`llmkit mcp`** — Runs an MCP server exposing llmkit's built-in tools (`online_search`, `online_fetch`) selected with a comma-separated command-line list, no config file required. Serves stdio or HTTP like proxy/gateway.
+- **`llmkit mcp`** — Runs an MCP server exposing llmkit's built-in tools (`online_search`, `online_fetch`, `file_scan`) selected with a comma-separated command-line list, no config file required. Serves stdio or HTTP like proxy/gateway.
 - **`llmkit response`** — Reads a conversation JSONL file and prints the last assistant response content to stdout. Used to extract the final LLM answer from a completed conversation.
 
 The binary is statically linked, has zero runtime language dependencies, and targets Linux, macOS, and Windows (via MinGW-w64 cross-compilation).
@@ -26,7 +26,7 @@ src/
 ├── gateway.c           — MCP gateway server (discover/invoke only)
 ├── gateway.h
 ├── tools.c             — Built-in tools MCP server (online_search,
-├── tools.h               online_fetch)
+├── tools.h               online_fetch, file_scan)
 ├── htmlmd.c            — HTML-to-markdown converter with simplified
 ├── htmlmd.h              readability pass
 ├── srv.c               — Shared MCP server plumbing (response builders,
@@ -255,8 +255,8 @@ Code shared verbatim by `proxy` and `gateway` so both serve MCP identically:
 
 `llmkit mcp <tools> [-l host:port]` serves MCP over stdio/HTTP (via `srv_serve`,
 no config file needed) exposing only built-in tools implemented inside llmkit.
-`<tools>` is a comma-separated subset of `online_search,online_fetch`; unknown
-or duplicate names exit with code 2.
+`<tools>` is a comma-separated subset of `online_search,online_fetch,file_scan`;
+unknown or duplicate names exit with code 2.
 
 | Function | Purpose |
 |----------|---------|
@@ -264,7 +264,8 @@ or duplicate names exit with code 2.
 | `static int tools_handle_request(...)` | MCP dispatcher identical in shape to the gateway's (`initialize`, `notifications/*`, `ping`, `tools/list`, `tools/call`, empty resources/prompts). serverInfo name: `llmkit-tools`. |
 | `char *tools_parse_search_results(const char *html, const char *query)` | Parses a DDG HTML results page into the user-visible text list (exported for tests). |
 | `static int http_get(...)` | libcurl GET: follows redirects, browser User-Agent, transparent gzip, 30 s timeout, 32 MiB download cap; copies Content-Type before handle cleanup. |
-| `static int tool_online_search(...) / tool_online_fetch(...)` | tools/call implementations returning MCP text content; missing arguments are JSON-RPC errors, runtime failures are `isError:true` content. |
+| `static int tool_online_search(...) / tool_online_fetch(...) / tool_file_scan(...)` | tools/call implementations returning MCP text content; missing arguments are JSON-RPC errors, runtime failures are `isError:true` content. |
+| `char *tools_file_scan(const char *glob_pattern, const char *lines_regex, char **out_err)` | file_scan core (exported for tests): parses the glob into `/`-separated segments, walks the working directory pruning by segment, renders/sorts/dedupes records and applies the 20-record cap. |
 | `char *htmlmd_convert(const char *html)` | Full HTML → markdown pipeline (see below). |
 | `htmlmd_match *htmlmd_find_by_class(...)` | Finds elements by class token with their text content and one attribute (used by the DDG parser). |
 
@@ -282,6 +283,25 @@ return the text `HTTP Status <code>`. HTML/XML bodies go through
 content is announced, not returned. Output over 100000 characters is
 truncated at a UTF-8 boundary with a `[content truncated at 100000
 characters]` note.
+
+**`file_scan(filenames_glob, content_lines_regex)`:** the glob is parsed
+into `/`-separated segments (`\` normalizes to `/`, `./` and empty
+segments are dropped) where a whole `**` segment matches any number of
+directories and `*`/`?` match within a single name; absolute patterns and
+any `..` segment are rejected with a JSON-RPC error. A depth-first walk
+from the process working directory matches one segment per path level
+(pruning unrelated subtrees) and never follows symlinks (`lstat`
+classifies them as neither directories nor regular files), so nothing
+outside the working directory is reachable. Files are sniffed for a NUL
+byte in the first 8 KiB: binary files are listed without a `Lines` field
+and never match the optional POSIX-extended regex, text files (read in
+full, capped at 32 MiB) report their line count and — under the regex —
+their matching line numbers (up to 50, then a trailing `+`). Each record
+is `Path:` (relative), `Size:` (`b`/`Kb`/`Mb`/`Gb`), optional `Lines:`,
+optional `Matching lines:`; records are sorted by path and separated by
+blank lines. More than 20 matches truncate the list with a
+`<N> more files matching` note; zero matches return
+`No files matching: <glob>`.
 
 **`htmlmd_convert` pipeline:** (1) parse into a minimal DOM — forgiving
 parser with implicit closes (`li`, `p`, `tr`, `td`), quoted/unquoted

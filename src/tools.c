@@ -3,9 +3,14 @@
 #include "jsonrpc.h"
 #include "srv.h"
 #include "util.h"
+#include <dirent.h>
+#include <regex.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include <curl/curl.h>
 #include <cJSON.h>
 
@@ -24,13 +29,28 @@
 /* DuckDuckGo's free, unauthenticated HTML search endpoint. */
 #define TOOLS_DDG_URL "https://html.duckduckgo.com/html/?q="
 
+/* file_scan result limits: at most 20 records are returned (a "<N> more
+ * files matching" line is appended beyond that) and at most 50 matching
+ * line numbers are listed per record (a trailing "+" marks more). */
+#define TOOLS_SCAN_MAX_RECORDS      20
+#define TOOLS_SCAN_MAX_LISTED_LINES 50
+
+/* Bytes sniffed at the start of a file to tell text from binary (a NUL
+ * byte means binary), and the largest file that is fully read for line
+ * counting / content matching (larger files are listed without lines). */
+#define TOOLS_SCAN_SNIFF_BYTES    8192
+#define TOOLS_SCAN_MAX_TEXT_BYTES (32 * 1024 * 1024)
+
+/* Longest relative path collected by the file_scan walker. */
+#define TOOLS_SCAN_PATH_MAX 4096
+
 /* A browser User-Agent: the DDG HTML endpoint (and many sites) reject
  * requests without one. */
 #define TOOLS_USER_AGENT                                                      \
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) " \
     "Chrome/124.0.0.0 Safari/537.36"
 
-const char *const TOOLS_BUILTIN_NAMES[] = {"online_search", "online_fetch", NULL};
+const char *const TOOLS_BUILTIN_NAMES[] = {"online_search", "online_fetch", "file_scan", NULL};
 
 /* ------------------------------------------------------------------ */
 /*  HTTP GET helper                                                    */
@@ -454,6 +474,457 @@ static int tool_online_fetch(const cJSON *id_node, cJSON *args, char **out_resp)
 }
 
 /* ------------------------------------------------------------------ */
+/*  file_scan                                                          */
+/* ------------------------------------------------------------------ */
+
+#define SCAN_DESC "Search local files by name glob, optionally by per-line regex"
+
+/* Match one glob segment against one path component. Supports '*' (any
+ * run of characters, including none) and '?' (exactly one character).
+ * Returns true when the whole name is consumed. */
+static bool scan_segment_matches(const char *pat, const char *name) {
+    const char *p = pat;
+    const char *n = name;
+    const char *star_p = NULL;
+    const char *star_n = NULL;
+    while (*n != '\0') {
+        if (*p == '*') {
+            star_p = ++p;
+            star_n = n;
+        } else if (*p == '?' || *p == *n) {
+            p++;
+            n++;
+        } else if (star_p != NULL) {
+            p = star_p;
+            n = ++star_n;
+        } else {
+            return false;
+        }
+    }
+    while (*p == '*') p++;
+    return *p == '\0';
+}
+
+/* Split the glob pattern into '/'-separated segments (pointers into
+ * *out_copy, which the caller owns). Backslashes become separators so
+ * Windows-style patterns work everywhere; leading "./" and empty
+ * segments are dropped. Absolute patterns and any ".." segment are
+ * rejected: matching always starts at the working directory and can
+ * never escape it. Returns the segment count, or -1 with *out_err set
+ * on a rejected pattern. */
+static int scan_parse_segments(const char *pattern, char ***out_segs, char **out_copy,
+                               char **out_err) {
+    *out_segs = NULL;
+    *out_copy = NULL;
+    *out_err = NULL;
+
+    if (pattern[0] == '/' || pattern[0] == '\\') {
+        *out_err = util_strdup("file_scan: pattern must be relative to the working directory");
+        return -1;
+    }
+    char *copy = util_strdup(pattern);
+    if (copy == NULL) {
+        *out_err = util_strdup("Out of memory");
+        return -1;
+    }
+    for (char *c = copy; *c != '\0'; c++) {
+        if (*c == '\\') *c = '/';
+    }
+
+    char **segs = NULL;
+    int count = 0;
+    int cap = 0;
+    char *saveptr = NULL;
+    for (char *seg = strtok_r(copy, "/", &saveptr); seg != NULL;
+         seg = strtok_r(NULL, "/", &saveptr)) {
+        if (strcmp(seg, "..") == 0) {
+            *out_err = util_strdup("file_scan: '..' is not allowed in the pattern");
+            free(copy);
+            free(segs);
+            return -1;
+        }
+        if (strcmp(seg, ".") == 0) continue;
+        if (count == cap) {
+            int new_cap = cap ? cap * 2 : 8;
+            char **tmp = realloc(segs, (size_t)new_cap * sizeof(*tmp));
+            if (tmp == NULL) {
+                *out_err = util_strdup("Out of memory");
+                free(copy);
+                free(segs);
+                return -1;
+            }
+            segs = tmp;
+            cap = new_cap;
+        }
+        segs[count++] = seg;
+    }
+    if (count == 0) {
+        *out_err = util_strdup("file_scan: empty pattern");
+        free(copy);
+        free(segs);
+        return -1;
+    }
+    *out_segs = segs;
+    *out_copy = copy;
+    return count;
+}
+
+/* A collected result: the relative path plus its rendered record. */
+typedef struct {
+    char *path;
+    char *record;
+} scan_result;
+
+typedef struct {
+    char **segs; /* pattern segments (owned via segs_copy) */
+    char *segs_copy;
+    int nsegs;
+    regex_t *re; /* optional compiled content filter */
+    scan_result *results;
+    int count;
+    int cap;
+    bool oom;
+} scan_state;
+
+static void scan_state_free(scan_state *st) {
+    for (int i = 0; i < st->count; i++) {
+        free(st->results[i].path);
+        free(st->results[i].record);
+    }
+    free(st->results);
+    free(st->segs);
+    free(st->segs_copy);
+    if (st->re != NULL) {
+        regfree(st->re);
+        free(st->re);
+    }
+}
+
+static void scan_add_result(scan_state *st, char *path, char *record) {
+    if (st->count == st->cap) {
+        int new_cap = st->cap ? st->cap * 2 : 32;
+        scan_result *tmp = realloc(st->results, (size_t)new_cap * sizeof(*tmp));
+        if (tmp == NULL) {
+            st->oom = true;
+            free(path);
+            free(record);
+            return;
+        }
+        st->results = tmp;
+        st->cap = new_cap;
+    }
+    st->results[st->count].path = path;
+    st->results[st->count].record = record;
+    st->count++;
+}
+
+/* Human-readable size: plain bytes below 1 KiB, otherwise one decimal of
+ * Kb/Mb/Gb ("512b", "12.3Kb", "1.5Mb", "2.0Gb"). */
+static void scan_format_size(unsigned long long size, char *out, size_t out_len) {
+    const unsigned long long UNIT = 1024;
+    if (size < UNIT) {
+        snprintf(out, out_len, "%llub", size);
+        return;
+    }
+    static const char *const SUFFIXES[] = {"Kb", "Mb", "Gb"};
+    unsigned long long scale = UNIT;
+    for (int i = 0; i < 3; i++) {
+        if (size < scale * UNIT || i == 2) {
+            snprintf(out, out_len, "%llu.%llu%s", size / scale, (size % scale) * 10 / scale,
+                     SUFFIXES[i]);
+            return;
+        }
+        scale *= UNIT;
+    }
+}
+
+/* Evaluate one glob-matching file and, when it satisfies the content
+ * filter, collect its rendered record. Files that vanish mid-scan are
+ * skipped; binary files are listed without lines and never match a
+ * content filter. */
+static void scan_evaluate(scan_state *st, const char *rel) {
+    if (st->oom) return;
+
+    struct stat sb;
+    if (lstat(rel, &sb) != 0 || !S_ISREG(sb.st_mode)) return;
+    unsigned long long size = (unsigned long long)sb.st_size;
+
+    long line_count = 0;
+    long match_count = 0;
+    util_growbuf lines_list = {0};
+    bool textual = size <= TOOLS_SCAN_MAX_TEXT_BYTES;
+    if (textual) {
+        FILE *fp = fopen(rel, "rb");
+        if (fp == NULL) return;
+        util_growbuf gb = {0};
+        char chunk[65536];
+        size_t n;
+        while ((n = fread(chunk, 1, sizeof(chunk), fp)) > 0) util_growbuf_append(&gb, chunk, n);
+        fclose(fp);
+        size_t len = gb.len;
+        char *buf = util_growbuf_release(&gb); /* NUL-terminated; NULL when empty */
+
+        /* A NUL byte in the leading bytes marks a binary file. */
+        size_t sniff = len < (size_t)TOOLS_SCAN_SNIFF_BYTES ? len : (size_t)TOOLS_SCAN_SNIFF_BYTES;
+        if (buf != NULL && memchr(buf, '\0', sniff) != NULL) {
+            textual = false;
+        } else {
+            /* Walk NUL-terminated lines in place (the newline bytes are
+             * the terminator slots growbuf already provides). */
+            char *p = buf;
+            char *end = buf != NULL ? buf + len : NULL;
+            while (p != NULL && p < end) {
+                char *nl = memchr(p, '\n', (size_t)(end - p));
+                char *line_end = nl ? nl : end;
+                *line_end = '\0';
+                line_count++;
+                if (st->re != NULL && regexec(st->re, p, 0, NULL, 0) == 0) {
+                    match_count++;
+                    if (match_count <= TOOLS_SCAN_MAX_LISTED_LINES) {
+                        if (match_count > 1) util_growbuf_append_str(&lines_list, ", ");
+                        char num[32];
+                        snprintf(num, sizeof(num), "%ld", line_count);
+                        util_growbuf_append_str(&lines_list, num);
+                    }
+                }
+                p = nl ? nl + 1 : NULL;
+            }
+            if (match_count > TOOLS_SCAN_MAX_LISTED_LINES) {
+                util_growbuf_append_str(&lines_list, "+");
+            }
+            /* growbuf_append leaves the terminator slot unwritten: reading
+             * the list as a C string below needs it explicit. */
+            if (lines_list.buf != NULL) lines_list.buf[lines_list.len] = '\0';
+        }
+        free(buf);
+    }
+
+    /* A content filter excludes files with no matching line. */
+    if (st->re != NULL && match_count == 0) {
+        util_growbuf_free(&lines_list);
+        return;
+    }
+
+    char size_str[48];
+    scan_format_size(size, size_str, sizeof(size_str));
+    util_growbuf record = {0};
+    util_growbuf_append_str(&record, "Path: ");
+    util_growbuf_append_str(&record, rel);
+    util_growbuf_append_str(&record, "\nSize: ");
+    util_growbuf_append_str(&record, size_str);
+    if (textual) {
+        char num[32];
+        snprintf(num, sizeof(num), "\nLines: %ld", line_count);
+        util_growbuf_append_str(&record, num);
+    }
+    if (st->re != NULL) {
+        util_growbuf_append_str(&record, "\nMatching lines: ");
+        util_growbuf_append_str(&record, lines_list.buf ? lines_list.buf : "");
+    }
+    util_growbuf_free(&lines_list);
+
+    char *path_copy = util_strdup(rel);
+    char *record_str = util_growbuf_release(&record);
+    if (path_copy == NULL || record_str == NULL) {
+        st->oom = true;
+        free(path_copy);
+        free(record_str);
+        return;
+    }
+    scan_add_result(st, path_copy, record_str);
+}
+
+/* Add every regular file under dir_rel to the result set (filtered and
+ * rendered like any other match). Used when the pattern ends in '**',
+ * which matches any number of trailing path segments. */
+static void scan_collect_all(scan_state *st, const char *dir_rel) {
+    if (st->oom) return;
+    DIR *dir = opendir(dir_rel[0] == '\0' ? "." : dir_rel);
+    if (dir == NULL) return;
+    struct dirent *ent;
+    while ((ent = readdir(dir)) != NULL) {
+        const char *name = ent->d_name;
+        if (name[0] == '.' && (name[1] == '\0' || (name[1] == '.' && name[2] == '\0'))) continue;
+        char rel[TOOLS_SCAN_PATH_MAX];
+        int printed = dir_rel[0] == '\0' ? snprintf(rel, sizeof(rel), "%s", name)
+                                         : snprintf(rel, sizeof(rel), "%s/%s", dir_rel, name);
+        if (printed < 0 || printed >= (int)sizeof(rel)) continue;
+        struct stat sb;
+        if (lstat(rel, &sb) != 0) continue;
+        if (S_ISDIR(sb.st_mode)) {
+            scan_collect_all(st, rel);
+        } else if (S_ISREG(sb.st_mode)) {
+            scan_evaluate(st, rel);
+        }
+    }
+    closedir(dir);
+}
+
+/* Depth-first walk from the working directory, matching one pattern
+ * segment per path level so unrelated subtrees are pruned early.
+ * Symlinks are never followed: lstat classifies them as neither
+ * directories nor regular files, so nothing outside the working
+ * directory can be reached. */
+static void scan_walk(scan_state *st, const char *dir_rel, int seg_i) {
+    if (st->oom || seg_i >= st->nsegs) return;
+
+    const char *seg = st->segs[seg_i];
+    bool deep = strcmp(seg, "**") == 0;
+    bool last = seg_i == st->nsegs - 1;
+    if (deep && last) {
+        scan_collect_all(st, dir_rel);
+        return;
+    }
+    if (deep) {
+        /* '**' also matches zero directories: try the rest of the
+         * pattern against this same directory. */
+        scan_walk(st, dir_rel, seg_i + 1);
+    }
+
+    DIR *dir = opendir(dir_rel[0] == '\0' ? "." : dir_rel);
+    if (dir == NULL) return;
+    struct dirent *ent;
+    while ((ent = readdir(dir)) != NULL) {
+        const char *name = ent->d_name;
+        if (name[0] == '.' && (name[1] == '\0' || (name[1] == '.' && name[2] == '\0'))) continue;
+        char rel[TOOLS_SCAN_PATH_MAX];
+        int printed = dir_rel[0] == '\0' ? snprintf(rel, sizeof(rel), "%s", name)
+                                         : snprintf(rel, sizeof(rel), "%s/%s", dir_rel, name);
+        if (printed < 0 || printed >= (int)sizeof(rel)) continue;
+        struct stat sb;
+        if (lstat(rel, &sb) != 0) continue;
+
+        if (deep) {
+            /* A '**' segment absorbs one more directory level. */
+            if (S_ISDIR(sb.st_mode)) scan_walk(st, rel, seg_i);
+        } else if (scan_segment_matches(seg, name)) {
+            if (last) {
+                if (S_ISREG(sb.st_mode)) scan_evaluate(st, rel);
+            } else if (S_ISDIR(sb.st_mode)) {
+                scan_walk(st, rel, seg_i + 1);
+            }
+        }
+    }
+    closedir(dir);
+}
+
+static int scan_result_cmp(const void *a, const void *b) {
+    const scan_result *ra = a;
+    const scan_result *rb = b;
+    return strcmp(ra->path, rb->path);
+}
+
+/* Run a file_scan query against the process working directory.
+ * glob_pattern is mandatory; lines_regex (POSIX extended) is optional.
+ * Returns a malloc'd report (records separated by blank lines, capped at
+ * TOOLS_SCAN_MAX_RECORDS with a "<N> more files matching" note), or NULL
+ * with *out_err set for a rejected pattern or regex. */
+char *tools_file_scan(const char *glob_pattern, const char *lines_regex, char **out_err) {
+    *out_err = NULL;
+    if (glob_pattern == NULL || glob_pattern[0] == '\0') {
+        *out_err = util_strdup("file_scan requires a non-empty 'filenames_glob'");
+        return NULL;
+    }
+
+    scan_state st = {0};
+    st.nsegs = scan_parse_segments(glob_pattern, &st.segs, &st.segs_copy, out_err);
+    if (st.nsegs < 0) return NULL;
+
+    if (lines_regex != NULL && lines_regex[0] != '\0') {
+        st.re = malloc(sizeof(*st.re));
+        if (st.re == NULL) {
+            scan_state_free(&st);
+            *out_err = util_strdup("Out of memory");
+            return NULL;
+        }
+        int rc = regcomp(st.re, lines_regex, REG_EXTENDED | REG_NOSUB);
+        if (rc != 0) {
+            char msg[256];
+            regerror(rc, st.re, msg, sizeof(msg));
+            size_t len = strlen("file_scan: invalid 'content_lines_regex': ") + strlen(msg) + 1;
+            *out_err = malloc(len);
+            if (*out_err != NULL) {
+                snprintf(*out_err, len, "file_scan: invalid 'content_lines_regex': %s", msg);
+            }
+            scan_state_free(&st);
+            return NULL;
+        }
+    }
+
+    scan_walk(&st, "", 0);
+
+    char *out = NULL;
+    if (st.oom) {
+        *out_err = util_strdup("Out of memory");
+    } else {
+        qsort(st.results, (size_t)st.count, sizeof(*st.results), scan_result_cmp);
+        /* Consecutive '**' segments can reach one file through several
+         * pattern alignments: drop the duplicates. */
+        int total = 0;
+        for (int i = 0; i < st.count; i++) {
+            if (total > 0 && strcmp(st.results[total - 1].path, st.results[i].path) == 0) {
+                free(st.results[i].path);
+                free(st.results[i].record);
+                continue;
+            }
+            st.results[total++] = st.results[i];
+        }
+        st.count = total;
+
+        if (total == 0) {
+            util_growbuf gb = {0};
+            util_growbuf_append_str(&gb, "No files matching: ");
+            util_growbuf_append_str(&gb, glob_pattern);
+            out = util_growbuf_release(&gb);
+        } else {
+            int shown = total < TOOLS_SCAN_MAX_RECORDS ? total : TOOLS_SCAN_MAX_RECORDS;
+            util_growbuf gb = {0};
+            for (int i = 0; i < shown; i++) {
+                if (i > 0) util_growbuf_append_str(&gb, "\n\n");
+                util_growbuf_append_str(&gb, st.results[i].record);
+            }
+            if (total > shown) {
+                char note[64];
+                snprintf(note, sizeof(note), "\n\n%d more files matching", total - shown);
+                util_growbuf_append_str(&gb, note);
+            }
+            out = util_growbuf_release(&gb);
+        }
+    }
+
+    scan_state_free(&st);
+    return out;
+}
+
+static int tool_file_scan(const cJSON *id_node, cJSON *args, char **out_resp) {
+    *out_resp = NULL;
+
+    cJSON *glob_j = args ? cJSON_GetObjectItem(args, "filenames_glob") : NULL;
+    const char *glob = (glob_j && cJSON_IsString(glob_j)) ? glob_j->valuestring : "";
+    if (glob[0] == '\0') {
+        *out_resp =
+            srv_build_error(id_node, "file_scan requires a string 'filenames_glob' argument");
+        return EXIT_SUCCESS;
+    }
+    cJSON *re_j = args ? cJSON_GetObjectItem(args, "content_lines_regex") : NULL;
+    const char *re =
+        (re_j && cJSON_IsString(re_j) && re_j->valuestring[0] != '\0') ? re_j->valuestring : NULL;
+
+    char *err = NULL;
+    char *text = tools_file_scan(glob, re, &err);
+    if (text == NULL) {
+        *out_resp = srv_build_error(id_node, err ? err : "Out of memory");
+        free(err);
+        return EXIT_SUCCESS;
+    }
+    cJSON *result = build_tool_text_result(text, false);
+    free(text);
+    if (result == NULL) return EXIT_INTERNAL_ERR;
+    *out_resp = srv_build_response(id_node, result, NULL);
+    return EXIT_SUCCESS;
+}
+
+/* ------------------------------------------------------------------ */
 /*  Registry                                                           */
 /* ------------------------------------------------------------------ */
 
@@ -484,9 +955,23 @@ static char *fetch_schema(void) {
     return build_tool_schema(props, 3, required, 1);
 }
 
+static char *file_scan_schema(void) {
+    const char *props[] = {
+        "filenames_glob",
+        "string",
+        "glob pattern resolved relative to the current working directory",
+        "content_lines_regex",
+        "string",
+        "optional POSIX extended regex",
+    };
+    const char *required[] = {"filenames_glob"};
+    return build_tool_schema(props, 6, required, 1);
+}
+
 static const builtin_tool TOOLS[] = {
     {"online_search", SEARCH_DESC, search_schema, tool_online_search},
     {"online_fetch", FETCH_DESC, fetch_schema, tool_online_fetch},
+    {"file_scan", SCAN_DESC, file_scan_schema, tool_file_scan},
     {NULL, NULL, NULL, NULL},
 };
 
@@ -653,7 +1138,7 @@ static int tools_handle_request(runtime_ctx *ctx, const char *req_json, char **o
 int tools_run(const char *tool_list, const char *listen_addr) {
     if (tool_list == NULL || tool_list[0] == '\0') {
         fprintf(stderr, "error: mcp requires a comma-separated tool list\n"
-                        "available tools: online_search, online_fetch\n");
+                        "available tools: online_search, online_fetch, file_scan\n");
         return EXIT_ARGS_ERR;
     }
 
@@ -707,7 +1192,7 @@ int tools_run(const char *tool_list, const char *listen_addr) {
 
     if (g_enabled_count == 0) {
         fprintf(stderr, "error: mcp requires a comma-separated tool list\n"
-                        "available tools: online_search, online_fetch\n");
+                        "available tools: online_search, online_fetch, file_scan\n");
         return EXIT_ARGS_ERR;
     }
 

@@ -14,18 +14,25 @@ HTTP server, validating:
   - online_fetch returns "HTTP Status <code>" for non-200 responses
   - online_fetch truncates output over 100000 characters with a note
   - online_search without a string `query` argument is an error
+  - file_scan matches files by glob, filters by per-line regex, omits
+    Lines for binary files, caps at 20 records with an exact "<N> more
+    files matching" note, and rejects '..' and absolute globs
   - unknown tools and unknown methods are JSON-RPC errors
   - notifications get no reply; ping answers {}
   - HTTP listen mode serves the same protocol
 
 online_search's live DuckDuckGo call is intentionally not exercised here
-(network-dependent); its parser is covered by tests/test_tools.c.
+(network-dependent); its parser is covered by tests/test_tools.c. file_scan
+runs against a throwaway tree under the system temp dir (it resolves globs
+against the server process's working directory).
 """
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -54,12 +61,13 @@ def free_port():
     return port
 
 
-def run_tools(args, requests, timeout=60):
+def run_tools(args, requests, timeout=60, cwd=None):
     """Run `llmkit mcp` over stdio; return (returncode, list_of_parsed_json)."""
     stdin = "\n".join(json.dumps(r) for r in requests) + "\n"
     proc = subprocess.run(
         [BIN, "mcp"] + args,
-        input=stdin, capture_output=True, text=True, timeout=timeout, cwd=ROOT,
+        input=stdin, capture_output=True, text=True, timeout=timeout,
+        cwd=cwd if cwd is not None else ROOT,
     )
     responses = []
     for line in proc.stdout.splitlines():
@@ -285,6 +293,105 @@ def test_online_search_errors():
     check("disabled tool is unknown", "error" in resp, f"{resp}")
 
 
+def test_file_scan():
+    print("file_scan:")
+    root = tempfile.mkdtemp(prefix="llmkit_fs_")
+    os.makedirs(os.path.join(root, "sub", "deep"))
+
+    def write(rel, data):
+        with open(os.path.join(root, rel), "wb") as f:
+            f.write(data if isinstance(data, bytes) else data.encode("utf-8"))
+
+    write("hello.txt", "alpha one\nbeta two\nalpha three\n")
+    write("sub/notes.md", "hello\n")
+    write("sub/deep/d.txt", "needle\nplain\nneedle again\n")
+    write("b.log", b"BIN\x00ARY\n")
+    for i in range(1, 26):
+        write(f"t{i:02d}.tmp", f"tmp {i:02d}\n")
+
+    def scan(glob, regex=None, rid=1):
+        args = {"filenames_glob": glob}
+        if regex is not None:
+            args["content_lines_regex"] = regex
+        return run_tools(["file_scan"], [
+            {"jsonrpc": "2.0", "id": rid, "method": "tools/call",
+             "params": {"name": "file_scan", "arguments": args}},
+        ], cwd=root)
+
+    try:
+        rc, responses = run_tools(["file_scan"], [
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+        ])
+        listing = resp_for(responses, 1)
+        tools = listing.get("result", {}).get("tools", [])
+        names = [t["name"] for t in tools]
+        check("file_scan listed alone", names == ["file_scan"], f"{names}")
+        schema = tools[0].get("inputSchema", {}) if tools else {}
+        check("schema requires filenames_glob",
+              schema.get("required") == ["filenames_glob"], f"{schema}")
+        check("content_lines_regex is optional",
+              "content_lines_regex" in schema.get("properties", {}), f"{schema}")
+
+        rc, responses = scan("**/*.txt", regex="alpha")
+        resp = resp_for(responses, 1)
+        check("glob+regex answered", resp is not None)
+        check("glob+regex is not an error", resp.get("result", {}).get("isError") is False,
+              f"{resp}")
+        text = text_of(resp)
+        check("record has relative path", "Path: hello.txt\nSize: 31b\nLines: 3" in text,
+              f"{text!r}")
+        check("matching lines listed", "Matching lines: 1, 3" in text, f"{text!r}")
+        check("non-matching files excluded", "sub/deep/d.txt" not in text, f"{text!r}")
+        check("no absolute paths leaked", root not in text, f"{text!r}")
+
+        rc, responses = scan("*.tmp")
+        text = text_of(resp_for(responses, 1))
+        check("results capped at 20", text.count("Path: ") == 20, f"{text.count('Path: ')}")
+        check("exact remaining count note", "\n\n5 more files matching" in text, f"{text[-80:]!r}")
+
+        rc, responses = scan("**")
+        text = text_of(resp_for(responses, 1))
+        check("double-star spans directories", "Path: sub/deep/d.txt" in text, f"{text!r}")
+        check("binary file has no Lines field",
+              "Path: b.log\nSize: 8b\n\n" in text, f"{text!r}")
+
+        rc, responses = scan("*.log", regex="BIN")
+        text = text_of(resp_for(responses, 1))
+        check("binary excluded from regex scan", text == "No files matching: *.log", f"{text!r}")
+
+        rc, responses = scan("*.zzz")
+        text = text_of(resp_for(responses, 1))
+        check("no-match message", text == "No files matching: *.zzz", f"{text!r}")
+
+        rc, responses = scan("sub/../../etc")
+        resp = resp_for(responses, 1)
+        check("'..' glob rejected", "error" in resp and "'..'" in resp["error"]["message"],
+              f"{resp}")
+
+        rc, responses = scan("/etc/*")
+        resp = resp_for(responses, 1)
+        check("absolute glob rejected", "error" in resp and "relative" in resp["error"]["message"],
+              f"{resp}")
+
+        rc, responses = scan("*.txt", regex="(")
+        resp = resp_for(responses, 1)
+        check("invalid regex rejected", "error" in resp and "content_lines_regex" in
+              resp["error"]["message"], f"{resp}")
+
+        rc, responses = scan("")
+        resp = resp_for(responses, 1)
+        check("empty glob rejected", "error" in resp, f"{resp}")
+
+        rc, responses = run_tools(["online_fetch"], [
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+             "params": {"name": "file_scan", "arguments": {"filenames_glob": "*"}}},
+        ])
+        resp = resp_for(responses, 1)
+        check("file_scan unknown when not selected", "error" in resp, f"{resp}")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def test_http_mode(base):
     print("HTTP listen mode:")
     import http.client
@@ -335,6 +442,7 @@ def main():
         test_initialize_and_listing()
         test_online_fetch(base)
         test_online_search_errors()
+        test_file_scan()
         test_http_mode(base)
     finally:
         srv.shutdown()

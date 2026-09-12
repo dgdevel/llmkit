@@ -43,9 +43,9 @@ $ llmkit agent -c config.yml -p "How much is 3 + 3?"
   `invoke` (forwards a call to a backend tool by namespaced name). Serves
   stdio or HTTP like the proxy.
 - **`llmkit mcp`** -- Runs an MCP server exposing llmkit's built-in tools
-  (currently `online_search` and `online_fetch`), selected with a
-  comma-separated list on the command line. No config file or backend
-  servers are needed. Serves stdio or HTTP like proxy/gateway.
+  (currently `online_search`, `online_fetch` and `file_scan`), selected
+  with a comma-separated list on the command line. No config file or
+  backend servers are needed. Serves stdio or HTTP like proxy/gateway.
 - **`llmkit response`** -- Reads a conversation JSONL file and prints the
   last LLM assistant response to stdout. Useful for extracting the final
   answer from a completed conversation.
@@ -114,6 +114,18 @@ or duplicate names exit with code 2). Available tools:
   (headings, lists, links, images, fenced code, blockquotes, tables).
   Non-200 responses return `HTTP Status <code>`; output over 100000
   characters is truncated with a note.
+- **`file_scan`** -- Searches local files, resolving the mandatory
+  `filenames_glob` against the server process's working directory
+  (`**` matches any number of directories, `*` and `?` match within a
+  single name). Absolute paths and any `..` segment are rejected and
+  symlinks are never followed, so the scan cannot leave the working
+  directory. The optional `content_lines_regex` (POSIX extended) keeps
+  only files with at least one matching line. Each record reports the
+  relative path, the size (`b`/`Kb`/`Mb`/`Gb`), the line count for text
+  files, and -- when the regex is given -- the matching line numbers
+  (up to 50, a trailing `+` marks more). At most 20 records are
+  returned, followed by an `<N> more files matching` note; binary files
+  are listed without line counts and never match a content filter.
 
 Example stdio session:
 
