@@ -32,8 +32,21 @@ typedef struct platform_pipe platform_pipe;
 
 int platform_process_spawn(const char *cmdline, platform_process *out_proc, platform_pipe *in_pipe,
                            platform_pipe *out_pipe);
+/* Spawn cmdline under the system shell ("/bin/sh -c cmdline" on POSIX,
+ * "<COMSPEC> /c cmdline" on Windows) with stdin detached and both stdout
+ * and stderr redirected to out_path (created or truncated). Unlike
+ * platform_process_spawn the command is not tokenized: the shell parses
+ * it, so pipes, quotes and redirections all work. Returns 0 on success;
+ * the caller owns reaping the process. */
+int platform_shell_spawn(const char *cmdline, const char *out_path, platform_process *out_proc);
 int platform_process_kill(platform_process *proc);
-int platform_process_wait(platform_process *proc, int64_t timeout_ms);
+/* Wait for the process, at most timeout_ms (< 0 waits forever). Returns 0
+ * when it exited, -1 on timeout or error; *out_code (may be NULL) gets
+ * the exit status, with a signal death reported as 128+signal. */
+int platform_process_wait(platform_process *proc, int64_t timeout_ms, int *out_code);
+/* Non-blocking check: returns 1 when the process exited (*out_code set as
+ * in platform_process_wait), 0 while still running, -1 on error. */
+int platform_process_trywait(platform_process *proc, int *out_code);
 void platform_process_close(platform_process *proc);
 
 int platform_pipe_read(platform_pipe *p, char *buf, size_t size, int64_t timeout_ms);

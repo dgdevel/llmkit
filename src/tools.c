@@ -1,9 +1,11 @@
 #include "tools.h"
 #include "htmlmd.h"
 #include "jsonrpc.h"
+#include "platform.h"
 #include "srv.h"
 #include "util.h"
 #include <dirent.h>
+#include <errno.h>
 #include <regex.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -50,7 +52,8 @@
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) " \
     "Chrome/124.0.0.0 Safari/537.36"
 
-const char *const TOOLS_BUILTIN_NAMES[] = {"online_search", "online_fetch", "file_scan", NULL};
+const char *const TOOLS_BUILTIN_NAMES[] = {"online_search", "online_fetch", "file_scan",
+                                           "exec",          "exec_status",  NULL};
 
 /* ------------------------------------------------------------------ */
 /*  HTTP GET helper                                                    */
@@ -925,6 +928,350 @@ static int tool_file_scan(const cJSON *id_node, cJSON *args, char **out_resp) {
 }
 
 /* ------------------------------------------------------------------ */
+/*  exec / exec_status                                                 */
+/* ------------------------------------------------------------------ */
+
+#define EXEC_DESC "Execute a shell command line"
+
+#define EXEC_STATUS_DESC "Check the status of a pid"
+
+/* How long exec waits for the command before replying with its pid and
+ * leaving it running in the background for exec_status to poll. */
+#define EXEC_WAIT_MS 10000
+
+/* Output size returned to the caller: the tail of the full output, cut
+ * at the first newline so the report never starts mid-line. */
+#define EXEC_OUTPUT_KEEP (3 * 1024)
+
+/* Directory (relative to the working directory) holding every command's
+ * full output; the truncation note points into it. */
+#define EXEC_OUTPUT_DIR ".output"
+
+/* Bytes sniffed at the start of the output to tell text from binary
+ * (a NUL byte means binary), matching file_scan's rule. */
+#define EXEC_SNIFF_BYTES 8192
+
+/* One tracked command. The exec tool server is single-threaded, so a
+ * plain process-global array is safe; entries are never removed (they
+ * are small and keep exec_status answers valid for the server's life). */
+typedef struct {
+    platform_process proc;
+    char *out_path; /* full output file, relative to the cwd */
+    int64_t start_ms;
+    bool done;
+    int exit_code;  /* valid once done */
+    int64_t end_ms; /* valid once done */
+} exec_record;
+
+static exec_record *g_execs = NULL;
+static int g_exec_count = 0;
+
+/* Reap every finished background command so none linger as zombies when
+ * the caller never polls a finished pid again. */
+static void exec_sweep(void) {
+    for (int i = 0; i < g_exec_count; i++) {
+        if (g_execs[i].done) continue;
+        int code = 0;
+        if (platform_process_trywait(&g_execs[i].proc, &code) == 1) {
+            g_execs[i].done = true;
+            g_execs[i].exit_code = code;
+            g_execs[i].end_ms = platform_now_ms();
+        }
+    }
+}
+
+static exec_record *exec_find(int pid) {
+    for (int i = 0; i < g_exec_count; i++) {
+        if (g_execs[i].proc.pid == pid) return &g_execs[i];
+    }
+    return NULL;
+}
+
+/* Human-readable duration: "350ms", "12.3s", "2m05s", "3h02m". */
+static void exec_format_duration(int64_t ms, char *out, size_t out_len) {
+    if (ms < 0) ms = 0;
+    if (ms < 1000) {
+        snprintf(out, out_len, "%lldms", (long long)ms);
+    } else if (ms < 60000) {
+        snprintf(out, out_len, "%.1fs", ms / 1000.0);
+    } else if (ms < 3600000) {
+        snprintf(out, out_len, "%dm%02ds", (int)(ms / 60000), (int)((ms / 1000) % 60));
+    } else {
+        snprintf(out, out_len, "%dh%02dm", (int)(ms / 3600000), (int)((ms / 60000) % 60));
+    }
+}
+
+/* Streaming reader over an exec output file: tracks the total size, the
+ * text/binary sniff, the newline count, and always keeps the last
+ * EXEC_OUTPUT_KEEP bytes so arbitrarily large outputs can be rendered
+ * without buffering them. */
+typedef struct {
+    char tail[EXEC_OUTPUT_KEEP];
+    size_t tail_len;
+    unsigned long long total;
+    long long lines;
+    bool textual;
+} exec_out_reader;
+
+static void exec_out_init(exec_out_reader *r) {
+    r->tail_len = 0;
+    r->total = 0;
+    r->lines = 0;
+    r->textual = true;
+}
+
+static void exec_out_feed(exec_out_reader *r, const char *data, size_t n) {
+    if (r->total < EXEC_SNIFF_BYTES) {
+        size_t sniff = EXEC_SNIFF_BYTES - (size_t)r->total;
+        if (sniff > n) sniff = n;
+        if (memchr(data, '\0', sniff) != NULL) r->textual = false;
+    }
+    if (r->textual) {
+        for (size_t i = 0; i < n; i++) {
+            if (data[i] == '\n') r->lines++;
+        }
+    }
+    r->total += n;
+
+    if (n >= EXEC_OUTPUT_KEEP) {
+        memcpy(r->tail, data + n - EXEC_OUTPUT_KEEP, EXEC_OUTPUT_KEEP);
+        r->tail_len = EXEC_OUTPUT_KEEP;
+    } else if (r->tail_len + n > EXEC_OUTPUT_KEEP) {
+        size_t drop = r->tail_len + n - EXEC_OUTPUT_KEEP;
+        memmove(r->tail, r->tail + drop, r->tail_len - drop);
+        memcpy(r->tail + (r->tail_len - drop), data, n);
+        r->tail_len = EXEC_OUTPUT_KEEP;
+    } else {
+        memcpy(r->tail + r->tail_len, data, n);
+        r->tail_len += n;
+    }
+}
+
+/* Render the shared report ("Exit code / Duration / Output" plus the
+ * output tail). When the whole output did not fit in the tail, a note
+ * points at the full output file, with a line count for text files. */
+static char *exec_build_report(const exec_record *rec) {
+    exec_out_reader r;
+    exec_out_init(&r);
+    FILE *fp = fopen(rec->out_path, "rb");
+    if (fp != NULL) {
+        char chunk[65536];
+        size_t n;
+        while ((n = fread(chunk, 1, sizeof(chunk), fp)) > 0) exec_out_feed(&r, chunk, n);
+        fclose(fp);
+    }
+
+    int64_t end_ms = rec->end_ms;
+    if (!rec->done) end_ms = platform_now_ms();
+    int64_t duration = end_ms - rec->start_ms;
+    char dur[32];
+    exec_format_duration(duration, dur, sizeof(dur));
+
+    util_growbuf out = {0};
+    char line[128];
+    snprintf(line, sizeof(line), "Exit code: %d\n", rec->exit_code);
+    util_growbuf_append_str(&out, line);
+    snprintf(line, sizeof(line), "Duration: %s\n", dur);
+    util_growbuf_append_str(&out, line);
+    util_growbuf_append_str(&out, "Output:\n");
+    /* The report is a C string headed into a JSON text payload: show NUL
+     * bytes as '.' so a binary tail cannot cut the report (and the
+     * truncation note below) short. The full output file stays raw. */
+    for (size_t i = 0; i < r.tail_len; i++) {
+        if (r.tail[i] == '\0') r.tail[i] = '.';
+    }
+    if (r.tail_len > 0) util_growbuf_append(&out, r.tail, r.tail_len);
+
+    if (r.total > EXEC_OUTPUT_KEEP) {
+        if (r.tail_len == 0 || r.tail[r.tail_len - 1] != '\n') {
+            util_growbuf_append_str(&out, "\n");
+        }
+        char size_str[48];
+        scan_format_size(r.total, size_str, sizeof(size_str));
+        util_growbuf_append_str(&out, "Output truncated, full output in file ");
+        util_growbuf_append_str(&out, rec->out_path);
+        util_growbuf_append_str(&out, " (size ");
+        util_growbuf_append_str(&out, size_str);
+        if (r.textual) {
+            snprintf(line, sizeof(line), ", %lld lines", r.lines);
+            util_growbuf_append_str(&out, line);
+        }
+        util_growbuf_append_str(&out, ")\n");
+    }
+    return util_growbuf_release(&out);
+}
+
+/* Run cmdline in a subshell. Returns the report once the command either
+ * finished within EXEC_WAIT_MS or was left running in the background
+ * (a "PID: ... still running" reply). Returns NULL with *out_err set for
+ * a rejected argument or a spawn failure. */
+char *tools_exec(const char *cmdline, char **out_err) {
+    *out_err = NULL;
+    if (cmdline == NULL || cmdline[0] == '\0') {
+        *out_err = util_strdup("exec requires a non-empty 'cmdline' argument");
+        return NULL;
+    }
+
+    exec_sweep();
+
+#ifdef _WIN32
+    if (_mkdir(EXEC_OUTPUT_DIR) != 0 && errno != EEXIST) {
+#else
+    if (mkdir(EXEC_OUTPUT_DIR, 0777) != 0 && errno != EEXIST) {
+#endif
+        *out_err = util_strdup("exec: cannot create the " EXEC_OUTPUT_DIR " directory");
+        return NULL;
+    }
+
+    /* Every command gets a unique file so separate server runs (and
+     * concurrent servers) sharing a working directory never overwrite
+     * each other's full output. */
+    char uid[37];
+    util_uuid_v4(uid);
+    char *path = malloc(strlen(EXEC_OUTPUT_DIR) + 48);
+    if (path == NULL) {
+        *out_err = util_strdup("Out of memory");
+        return NULL;
+    }
+    snprintf(path, strlen(EXEC_OUTPUT_DIR) + 48, EXEC_OUTPUT_DIR "/exec_%s.log", uid);
+
+    platform_process proc;
+    memset(&proc, 0, sizeof(proc));
+    if (platform_shell_spawn(cmdline, path, &proc) != 0) {
+        int spawn_errno = errno;
+        size_t msg_len =
+            strlen("exec: failed to spawn the command: ") + strlen(strerror(spawn_errno)) + 1;
+        *out_err = malloc(msg_len);
+        if (*out_err != NULL) {
+            snprintf(*out_err, msg_len, "exec: failed to spawn the command: %s",
+                     strerror(spawn_errno));
+        }
+        free(path);
+        return NULL;
+    }
+
+    exec_record *tmp = realloc(g_execs, (size_t)(g_exec_count + 1) * sizeof(*tmp));
+    if (tmp == NULL) {
+        *out_err = util_strdup("Out of memory");
+        free(path);
+        return NULL;
+    }
+    g_execs = tmp;
+    exec_record *rec = &g_execs[g_exec_count++];
+    memset(rec, 0, sizeof(*rec));
+    rec->proc = proc;
+    rec->out_path = path;
+    rec->start_ms = platform_now_ms();
+
+    int code = 0;
+    if (platform_process_wait(&rec->proc, EXEC_WAIT_MS, &code) == 0) {
+        rec->done = true;
+        rec->exit_code = code;
+        rec->end_ms = platform_now_ms();
+        return exec_build_report(rec);
+    }
+
+    /* Still running after EXEC_WAIT_MS: hand the pid to the caller and
+     * leave the command in the background for exec_status to poll. */
+    util_growbuf out = {0};
+    char line[128];
+    snprintf(line, sizeof(line), "PID: %d\n", rec->proc.pid);
+    util_growbuf_append_str(&out, line);
+    util_growbuf_append_str(&out, "Process still running, use exec_status(");
+    snprintf(line, sizeof(line), "%d) to get the current status.\n", rec->proc.pid);
+    util_growbuf_append_str(&out, line);
+    return util_growbuf_release(&out);
+}
+
+/* Report on a previously exec'd command: its report once finished, or a
+ * "still running, started ... ago" note while it is not. Unknown pids
+ * get a plain answer (NULL only on OOM). */
+char *tools_exec_status(int pid, char **out_err) {
+    (void)out_err;
+    *out_err = NULL;
+
+    exec_sweep();
+
+    exec_record *rec = exec_find(pid);
+    if (rec == NULL) {
+        char msg[96];
+        snprintf(msg, sizeof(msg), "No exec process with pid %d.", pid);
+        return util_strdup(msg);
+    }
+
+    if (!rec->done) {
+        char dur[32];
+        exec_format_duration(platform_now_ms() - rec->start_ms, dur, sizeof(dur));
+        util_growbuf out = {0};
+        char head[64];
+        snprintf(head, sizeof(head), "PID %d still running, started ", rec->proc.pid);
+        util_growbuf_append_str(&out, head);
+        util_growbuf_append_str(&out, dur);
+        util_growbuf_append_str(&out, " ago.");
+        return util_growbuf_release(&out);
+    }
+
+    return exec_build_report(rec);
+}
+
+static int tool_exec(const cJSON *id_node, cJSON *args, char **out_resp) {
+    *out_resp = NULL;
+
+    cJSON *cmd_j = args ? cJSON_GetObjectItem(args, "cmdline") : NULL;
+    const char *cmdline = (cmd_j && cJSON_IsString(cmd_j)) ? cmd_j->valuestring : "";
+    if (cmdline[0] == '\0') {
+        *out_resp = srv_build_error(id_node, "exec requires a string 'cmdline' argument");
+        return EXIT_SUCCESS;
+    }
+
+    char *err = NULL;
+    char *text = tools_exec(cmdline, &err);
+    if (text == NULL) {
+        *out_resp = srv_build_error(id_node, err ? err : "Out of memory");
+        free(err);
+        return EXIT_SUCCESS;
+    }
+    cJSON *result = build_tool_text_result(text, false);
+    free(text);
+    if (result == NULL) return EXIT_INTERNAL_ERR;
+    *out_resp = srv_build_response(id_node, result, NULL);
+    return EXIT_SUCCESS;
+}
+
+static int tool_exec_status(const cJSON *id_node, cJSON *args, char **out_resp) {
+    *out_resp = NULL;
+
+    /* Accept a JSON number or a numeric string: pids circulate as text
+     * once the LLM copies them out of an exec reply. */
+    cJSON *pid_j = args ? cJSON_GetObjectItem(args, "pid") : NULL;
+    int pid = 0;
+    if (pid_j != NULL && cJSON_IsNumber(pid_j)) {
+        pid = (int)pid_j->valuedouble;
+    } else if (pid_j != NULL && cJSON_IsString(pid_j) && pid_j->valuestring[0] != '\0') {
+        char *end = NULL;
+        long v = strtol(pid_j->valuestring, &end, 10);
+        if (end != pid_j->valuestring && *end == '\0') pid = (int)v;
+    }
+    if (pid <= 0) {
+        *out_resp = srv_build_error(id_node, "exec_status requires an integer 'pid' argument");
+        return EXIT_SUCCESS;
+    }
+
+    char *err = NULL;
+    char *text = tools_exec_status(pid, &err);
+    if (text == NULL) {
+        *out_resp = srv_build_error(id_node, err ? err : "Out of memory");
+        free(err);
+        return EXIT_SUCCESS;
+    }
+    cJSON *result = build_tool_text_result(text, false);
+    free(text);
+    if (result == NULL) return EXIT_INTERNAL_ERR;
+    *out_resp = srv_build_response(id_node, result, NULL);
+    return EXIT_SUCCESS;
+}
+
+/* ------------------------------------------------------------------ */
 /*  Registry                                                           */
 /* ------------------------------------------------------------------ */
 
@@ -968,10 +1315,32 @@ static char *file_scan_schema(void) {
     return build_tool_schema(props, 6, required, 1);
 }
 
+static char *exec_schema(void) {
+    const char *props[] = {
+        "cmdline",
+        "string",
+        "shell command line",
+    };
+    const char *required[] = {"cmdline"};
+    return build_tool_schema(props, 3, required, 1);
+}
+
+static char *exec_status_schema(void) {
+    const char *props[] = {
+        "pid",
+        "integer",
+        "",
+    };
+    const char *required[] = {"pid"};
+    return build_tool_schema(props, 3, required, 1);
+}
+
 static const builtin_tool TOOLS[] = {
     {"online_search", SEARCH_DESC, search_schema, tool_online_search},
     {"online_fetch", FETCH_DESC, fetch_schema, tool_online_fetch},
     {"file_scan", SCAN_DESC, file_scan_schema, tool_file_scan},
+    {"exec", EXEC_DESC, exec_schema, tool_exec},
+    {"exec_status", EXEC_STATUS_DESC, exec_status_schema, tool_exec_status},
     {NULL, NULL, NULL, NULL},
 };
 
@@ -992,6 +1361,28 @@ static int tool_enabled(const char *name) {
         if (strcmp(g_enabled[i], name) == 0) return 1;
     }
     return 0;
+}
+
+/* Add a tool to the enabled set unless it is already there (exec_status
+ * is auto-added with exec, so an explicit listing must not trip the
+ * duplicate check). Returns EXIT_ARGS_ERR on a user-typed duplicate. */
+static int add_enabled_tool(const char *name) {
+    if (tool_enabled(name)) return EXIT_ARGS_ERR;
+    char **tmp = realloc(g_enabled, (size_t)(g_enabled_count + 1) * sizeof(*tmp));
+    if (tmp == NULL) return EXIT_INTERNAL_ERR;
+    g_enabled = tmp;
+    char *copy = util_strdup(name);
+    if (copy == NULL) return EXIT_INTERNAL_ERR;
+    g_enabled[g_enabled_count++] = copy;
+    return EXIT_SUCCESS;
+}
+
+static void print_available_tools(void) {
+    fprintf(stderr, "available tools:");
+    for (int i = 0; TOOLS_BUILTIN_NAMES[i] != NULL; i++) {
+        fprintf(stderr, " %s", TOOLS_BUILTIN_NAMES[i]);
+    }
+    fprintf(stderr, "\n");
 }
 
 /* ------------------------------------------------------------------ */
@@ -1135,10 +1526,21 @@ static int tools_handle_request(runtime_ctx *ctx, const char *req_json, char **o
 /*  tools_run                                                          */
 /* ------------------------------------------------------------------ */
 
+/* Free the enabled set. Called on re-entry and before returning, so a
+ * failed parse never leaves entries behind for the next call. */
+static void reset_enabled(void) {
+    for (int i = 0; i < g_enabled_count; i++) free(g_enabled[i]);
+    free(g_enabled);
+    g_enabled = NULL;
+    g_enabled_count = 0;
+}
+
 int tools_run(const char *tool_list, const char *listen_addr) {
+    reset_enabled();
+
     if (tool_list == NULL || tool_list[0] == '\0') {
-        fprintf(stderr, "error: mcp requires a comma-separated tool list\n"
-                        "available tools: online_search, online_fetch, file_scan\n");
+        fprintf(stderr, "error: mcp requires a comma-separated tool list\n");
+        print_available_tools();
         return EXIT_ARGS_ERR;
     }
 
@@ -1164,35 +1566,37 @@ int tools_run(const char *tool_list, const char *listen_addr) {
         name[len] = '\0';
 
         if (find_tool(name) == NULL) {
-            fprintf(stderr, "error: unknown mcp tool '%s'\navailable tools:", name);
-            for (int i = 0; TOOLS_BUILTIN_NAMES[i] != NULL; i++) {
-                fprintf(stderr, " %s", TOOLS_BUILTIN_NAMES[i]);
-            }
-            fprintf(stderr, "\n");
+            fprintf(stderr, "error: unknown mcp tool '%s'\n", name);
+            print_available_tools();
             free(name);
             return EXIT_ARGS_ERR;
         }
-        for (int i = 0; i < g_enabled_count; i++) {
-            if (strcmp(g_enabled[i], name) == 0) {
-                fprintf(stderr, "error: duplicate tool '%s' in list\n", name);
-                free(name);
-                return EXIT_ARGS_ERR;
-            }
+        int rc = add_enabled_tool(name);
+        if (rc == EXIT_ARGS_ERR) {
+            fprintf(stderr, "error: duplicate tool '%s' in list\n", name);
+            free(name);
+            return EXIT_ARGS_ERR;
         }
-
-        char **tmp = realloc(g_enabled, (size_t)(g_enabled_count + 1) * sizeof(*tmp));
-        if (tmp == NULL) {
+        if (rc != EXIT_SUCCESS) {
             fprintf(stderr, "error: out of memory\n");
             free(name);
             return EXIT_INTERNAL_ERR;
         }
-        g_enabled = tmp;
-        g_enabled[g_enabled_count++] = name;
+        free(name);
+    }
+
+    /* exec_status is exec's companion: polling a background command needs
+     * it, so enabling exec enables both. */
+    if (tool_enabled("exec") && !tool_enabled("exec_status")) {
+        if (add_enabled_tool("exec_status") != EXIT_SUCCESS) {
+            fprintf(stderr, "error: out of memory\n");
+            return EXIT_INTERNAL_ERR;
+        }
     }
 
     if (g_enabled_count == 0) {
-        fprintf(stderr, "error: mcp requires a comma-separated tool list\n"
-                        "available tools: online_search, online_fetch, file_scan\n");
+        fprintf(stderr, "error: mcp requires a comma-separated tool list\n");
+        print_available_tools();
         return EXIT_ARGS_ERR;
     }
 
@@ -1209,9 +1613,6 @@ int tools_run(const char *tool_list, const char *listen_addr) {
 
     int rc = srv_serve(&ctx, listen_addr, tools_handle_request, "Tools");
 
-    for (int i = 0; i < g_enabled_count; i++) free(g_enabled[i]);
-    free(g_enabled);
-    g_enabled = NULL;
-    g_enabled_count = 0;
+    reset_enabled();
     return rc;
 }

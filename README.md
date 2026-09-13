@@ -126,6 +126,23 @@ or duplicate names exit with code 2). Available tools:
   (up to 50, a trailing `+` marks more). At most 20 records are
   returned, followed by an `<N> more files matching` note; binary files
   are listed without line counts and never match a content filter.
+- **`exec`** -- Runs a shell command line in a subshell (`/bin/sh -c`,
+  `cmd.exe /c` on Windows) with this server's privileges and in its
+  working directory; stdin is detached and stdout+stderr are captured
+  together. Once the command finishes within 10 seconds, the reply is
+  an `Exit code:` / `Duration:` / `Output:` block holding the last 3KB
+  of output, cut at the first newline. Longer output is kept in full
+  under `.output/` and the reply gains an `Output truncated, full
+  output in file .output/... (size ..., N lines)` note (no line count
+  for binary output). A command still running after 10 seconds keeps
+  running in the background; the reply names its pid for polling, and
+  enabling `exec` automatically enables `exec_status` with it.
+- **`exec_status`** -- Polls a background command by `pid`. While it is
+  still running the reply is `PID <pid> still running, started
+  <duration> ago.`; once it has terminated (a signal death is reported
+  as 128+signal), the reply is the same report as `exec`: exit code,
+  total duration and the output tail. A pid this server never started
+  gets a plain `No exec process with pid <pid>.` answer.
 
 Example stdio session:
 

@@ -17,6 +17,14 @@ HTTP server, validating:
   - file_scan matches files by glob, filters by per-line regex, omits
     Lines for binary files, caps at 20 records with an exact "<N> more
     files matching" note, and rejects '..' and absolute globs
+  - exec runs a subshell command, reports Exit code/Duration/Output,
+    captures stderr with stdout, truncates the tail to the last 3KB
+    with a note pointing at the full output under .output/ (no line
+    count for binary output), and enabling exec auto-enables
+    exec_status
+  - exec_status answers for background commands: running pids report
+    their uptime, killed pids report 128+signal with the output section,
+    unknown pids get a plain answer
   - unknown tools and unknown methods are JSON-RPC errors
   - notifications get no reply; ping answers {}
   - HTTP listen mode serves the same protocol
@@ -28,7 +36,9 @@ against the server process's working directory).
 """
 import json
 import os
+import re
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -392,6 +402,166 @@ def test_file_scan():
         shutil.rmtree(root, ignore_errors=True)
 
 
+def test_exec():
+    print("exec / exec_status (stdio):")
+    root = tempfile.mkdtemp(prefix="llmkit_exec_")
+
+    # Enabling exec auto-enables its companion status tool.
+    rc, responses = run_tools(["exec"], [
+        {"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+    ], cwd=root)
+    check("exec server exits cleanly", rc == 0, f"rc={rc}")
+    names = [t["name"] for t in resp_for(responses, 1)["result"]["tools"]]
+    check("exec enables exec_status", names == ["exec", "exec_status"], f"{names}")
+    shutil.rmtree(root)
+
+    root = tempfile.mkdtemp(prefix="llmkit_exec_")
+    rc, responses = run_tools(["exec,exec_status"], [
+        {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+         "params": {"name": "exec", "arguments": {"cmdline": "echo hello"}}},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+         "params": {"name": "exec", "arguments": {"cmdline": "echo boom >&2; exit 7"}}},
+        {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+         "params": {"name": "exec_status", "arguments": {"pid": 4242424}}},
+        {"jsonrpc": "2.0", "id": 4, "method": "tools/call",
+         "params": {"name": "exec", "arguments": {}}},
+    ], cwd=root)
+    check("explicit exec_status list accepted", rc == 0, f"rc={rc}")
+    text = text_of(resp_for(responses, 1))
+    check("exec reports exit code", text.startswith("Exit code: 0\n"), repr(text[:40]))
+    check("exec reports duration", "\nDuration: " in text, repr(text))
+    check("exec captures stdout", text.endswith("Output:\nhello\n"), repr(text))
+    check("small output not truncated", "Output truncated" not in text, repr(text))
+    text = text_of(resp_for(responses, 2))
+    check("nonzero exit code", "Exit code: 7\n" in text, repr(text[:40]))
+    check("stderr captured with stdout", "Output:\nboom\n" in text, repr(text))
+    check("unknown pid answered",
+          "No exec process with pid 4242424" in text_of(resp_for(responses, 3)),
+          repr(text_of(resp_for(responses, 3))))
+    check("missing cmdline is an error", "error" in resp_for(responses, 4),
+          f"{resp_for(responses, 4)}")
+
+    # Output past the 3KB tail window: note with size + line count, and
+    # the full output kept under .output/.
+    rc, responses = run_tools(["exec"], [
+        {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+         "params": {"name": "exec",
+                    "arguments": {"cmdline":
+                                  "awk 'BEGIN{for(i=1;i<=20000;i++) print \"line\",i}'"}}},
+    ], cwd=root)
+    text = text_of(resp_for(responses, 1))
+    check("truncation note present",
+          "Output truncated, full output in file .output/exec_" in text, repr(text[-120:]))
+    check("note carries size and line count",
+          re.search(r"\(size \d+(\.\d+)?Kb, 20000 lines\)", text) is not None, repr(text[-120:]))
+    check("tail keeps the last line at a line boundary",
+          "line 20000\nOutput truncated" in text, repr(text[-120:]))
+    # Three exec calls ran in this cwd (echo, exit 7, awk): one log each,
+    # and awk's holds the complete output.
+    logs = sorted(os.listdir(os.path.join(root, ".output")))
+    check("one output log per exec call", len(logs) == 3, f"{logs}")
+    full = None
+    for name in logs:
+        with open(os.path.join(root, ".output", name)) as f:
+            data = f.read()
+        if data.count("\n") == 20000:
+            full = data
+            break
+    check("full output kept in .output", full is not None, "no 20000-line log found")
+    check("full output starts at the first line",
+          full is not None and full.startswith("line 1\n"), repr(full[:20] if full else ""))
+
+    # Binary output: still truncated, but the note omits the line count.
+    rc, responses = run_tools(["exec"], [
+        {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+         "params": {"name": "exec", "arguments": {"cmdline": "head -c 100000 /dev/zero"}}},
+    ], cwd=root)
+    text = text_of(resp_for(responses, 1))
+    check("binary truncation note present", "Output truncated" in text, repr(text[-120:]))
+    check("binary note omits the line count", " lines)" not in text, repr(text[-120:]))
+    shutil.rmtree(root, ignore_errors=True)
+
+
+def test_exec_background():
+    print("exec background lifecycle (HTTP):")
+    import http.client
+    import time
+    root = tempfile.mkdtemp(prefix="llmkit_exec_bg_")
+    port = free_port()
+    proc = subprocess.Popen([BIN, "mcp", "exec", "-l", f"127.0.0.1:{port}"],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=root)
+    conn = None
+    pid = None
+    try:
+        # Probe with complete ping requests: the server is single-
+        # threaded and a connect-only probe would stall it in its
+        # slowloris read until the idle-connection timeout.
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            try:
+                c = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+                body = json.dumps({"jsonrpc": "2.0", "id": 0, "method": "ping"})
+                c.request("POST", "/", body=body, headers={"Content-Type": "application/json"})
+                c.getresponse().read()
+                c.close()
+                conn = True
+                break
+            except OSError:
+                time.sleep(0.1)
+        check("HTTP exec server came up", conn is not None)
+        if conn is None:
+            return
+
+        def call(name, args, rid):
+            # One connection per call (the server closes after each
+            # response); exec blocks up to 10s server-side, so give the
+            # read enough room.
+            body = json.dumps({"jsonrpc": "2.0", "id": rid, "method": "tools/call",
+                               "params": {"name": name, "arguments": args}})
+            c = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
+            c.request("POST", "/", body=body, headers={"Content-Type": "application/json"})
+            resp = json.loads(c.getresponse().read().decode("utf-8"))
+            c.close()
+            return resp
+
+        text = call("exec", {"cmdline": "sleep 30"}, 1)["result"]["content"][0]["text"]
+        m = re.search(r"^PID: (\d+)$", text, re.M)
+        check("background reply names the pid", m is not None, repr(text))
+        check("background reply points at exec_status",
+              "Process still running, use exec_status(" in text, repr(text))
+        if m is None:
+            return
+        pid = int(m.group(1))
+
+        text = call("exec_status", {"pid": pid}, 2)["result"]["content"][0]["text"]
+        check("running pid reports its uptime",
+              re.fullmatch(rf"PID {pid} still running, started \S+ ago\.", text) is not None,
+              repr(text))
+
+        # SIGKILL is async: poll like a real caller until the exit shows.
+        os.kill(pid, signal.SIGKILL)
+        text = ""
+        for _ in range(100):
+            text = call("exec_status", {"pid": pid}, 3)["result"]["content"][0]["text"]
+            if "Exit code:" in text:
+                break
+            time.sleep(0.05)
+        check("killed pid reports 128+signal", "Exit code: 137" in text, repr(text))
+        check("terminated status reports duration", "\nDuration: " in text, repr(text))
+        check("terminated status reports output", "Output:\n" in text, repr(text))
+        text = call("exec_status", {"pid": pid}, 4)["result"]["content"][0]["text"]
+        check("terminated status is repeatable", "Exit code: 137" in text, repr(text))
+    finally:
+        if pid is not None:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+        proc.terminate()
+        proc.wait(timeout=10)
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def test_http_mode(base):
     print("HTTP listen mode:")
     import http.client
@@ -443,6 +613,8 @@ def main():
         test_online_fetch(base)
         test_online_search_errors()
         test_file_scan()
+        test_exec()
+        test_exec_background()
         test_http_mode(base)
     finally:
         srv.shutdown()

@@ -1,3 +1,5 @@
+#include <dirent.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -82,7 +84,9 @@ static void test_registry_names(void) {
     CHECK(strcmp(TOOLS_BUILTIN_NAMES[0], "online_search") == 0, "online_search registered");
     CHECK(strcmp(TOOLS_BUILTIN_NAMES[1], "online_fetch") == 0, "online_fetch registered");
     CHECK(strcmp(TOOLS_BUILTIN_NAMES[2], "file_scan") == 0, "file_scan registered");
-    CHECK(TOOLS_BUILTIN_NAMES[3] == NULL, "builtin list NULL-terminated");
+    CHECK(strcmp(TOOLS_BUILTIN_NAMES[3], "exec") == 0, "exec registered");
+    CHECK(strcmp(TOOLS_BUILTIN_NAMES[4], "exec_status") == 0, "exec_status registered");
+    CHECK(TOOLS_BUILTIN_NAMES[5] == NULL, "builtin list NULL-terminated");
 }
 
 static void test_parse_results(void) {
@@ -217,8 +221,22 @@ static void setup_fixture(void) {
 static void teardown_fixture(void) {
     chdir(g_orig_cwd);
     /* Best-effort cleanup; failures are ignored. */
-    char path[600];
+    char path[700];
     char name[700];
+    /* exec/exec_status tests leave their full-output logs behind. */
+    snprintf(path, sizeof(path), "%s/.output", g_fixture_dir);
+    DIR *dot = opendir(path);
+    if (dot != NULL) {
+        struct dirent *ent;
+        while ((ent = readdir(dot)) != NULL) {
+            if (ent->d_name[0] == '.') continue;
+            char log[1024];
+            snprintf(log, sizeof(log), "%s/%s", path, ent->d_name);
+            unlink(log);
+        }
+        closedir(dot);
+    }
+    rmdir(path);
     snprintf(path, sizeof(path), "%s/hits", g_fixture_dir);
     for (int i = 1; i <= 60; i++) {
         snprintf(name, sizeof(name), "%s/h%02d.dat", path, i);
@@ -409,6 +427,119 @@ static void test_file_scan_errors(void) {
 }
 
 /* ------------------------------------------------------------------ */
+/*  exec / exec_status (runs inside the fixture cwd)                   */
+/* ------------------------------------------------------------------ */
+
+static void test_exec_basic(void) {
+    char *err = NULL;
+
+    char *out = tools_exec("echo hello", &err);
+    CHECK(err == NULL, "plain exec succeeds");
+    CHECK(out != NULL, "exec returns a report");
+    CHECK_STR_CONTAINS(out, "Exit code: 0\n", "zero exit code reported");
+    CHECK_STR_CONTAINS(out, "Duration: ", "duration reported");
+    CHECK_STR_CONTAINS(out, "Output:\nhello\n", "stdout captured");
+    CHECK_STR_NOT_CONTAINS(out, "Output truncated", "small output not truncated");
+    free(out);
+
+    err = NULL;
+    out = tools_exec("echo oops >&2; exit 3", &err);
+    CHECK(err == NULL, "exec with stderr succeeds");
+    CHECK_STR_CONTAINS(out, "Exit code: 3\n", "nonzero exit code reported");
+    CHECK_STR_CONTAINS(out, "oops\n", "stderr captured with stdout");
+    free(out);
+
+    /* The cmdline is one shell string, not a tokenized argv: quotes,
+     * pipes and multiple spaces must survive intact. */
+    err = NULL;
+    out = tools_exec("printf '%s\\n' 'a  b' | tr a-z A-Z", &err);
+    CHECK_STR_CONTAINS(out, "A  B\n", "quotes and pipes work in the subshell");
+    free(out);
+}
+
+static void test_exec_truncation(void) {
+    char *err = NULL;
+
+    /* 20000 numbered lines (~210KB): far past the 3KB tail window. */
+    char *out = tools_exec("awk 'BEGIN{for(i=1;i<=20000;i++) print \"line\",i}'", &err);
+    CHECK(err == NULL, "big exec succeeds");
+    CHECK_STR_CONTAINS(out, "Exit code: 0\n", "big exec exit code reported");
+    CHECK_STR_CONTAINS(out, "Output truncated, full output in file .output/exec_",
+                       "truncation note names the .output file");
+    CHECK_STR_CONTAINS(out, "Kb, 20000 lines)", "note carries size and line count");
+    CHECK_STR_CONTAINS(out, "line 20000\n", "tail reaches the last line");
+    CHECK(strstr(out, "Output:\nline 1\n") == NULL, "head of the output is not included");
+    free(out);
+
+    /* Binary output: no line count in the note, and the report stays a
+     * valid C string despite NUL bytes in the tail. */
+    err = NULL;
+    out = tools_exec("head -c 100000 /dev/zero", &err);
+    CHECK_STR_CONTAINS(out, "Output truncated, full output in file .output/exec_",
+                       "binary truncation note present");
+    CHECK_STR_CONTAINS(out, "b)", "binary note carries a plain byte size");
+    CHECK(strstr(out, " lines)") == NULL, "binary output has no line count");
+    free(out);
+}
+
+static void test_exec_status_lifecycle(void) {
+    char *err = NULL;
+
+    /* A command past the 10s wait is left running and reported by pid. */
+    char *out = tools_exec("sleep 30", &err);
+    CHECK(err == NULL, "background exec accepted");
+    CHECK_STR_CONTAINS(out, "PID: ", "background reply names the pid");
+    CHECK_STR_CONTAINS(out, "Process still running, use exec_status(",
+                       "background reply points at exec_status");
+    CHECK_STR_NOT_CONTAINS(out, "Exit code:", "no exit code while running");
+    int pid = (int)strtol(strstr(out, "PID: ") + 5, NULL, 10);
+    CHECK(pid > 0, "pid parseable from the reply");
+    free(out);
+
+    err = NULL;
+    char *st = tools_exec_status(pid, &err);
+    CHECK_STR_CONTAINS(st, "still running, started ", "status reports the running pid");
+    CHECK(strstr(st, "Exit code:") == NULL, "still no exit code while running");
+    free(st);
+
+    /* Kill it: the next status reaps it and reports the signal death as
+     * 128+signal, with the (empty) output section. SIGKILL is async, so
+     * poll like a real caller until the exit shows up. */
+    err = NULL;
+    CHECK(kill(pid, SIGKILL) == 0, "background command killed");
+    st = NULL;
+    for (int i = 0; i < 100; i++) {
+        free(st);
+        err = NULL;
+        st = tools_exec_status(pid, &err);
+        if (strstr(st, "Exit code: ") != NULL) break;
+        usleep(10 * 1000);
+    }
+    CHECK_STR_CONTAINS(st, "Exit code: 137", "signal death reported as 128+signal");
+    CHECK_STR_CONTAINS(st, "Duration: ", "duration reported after termination");
+    CHECK_STR_CONTAINS(st, "Output:\n", "output section present after termination");
+    /* The same answer repeats on a second poll. */
+    err = NULL;
+    char *st2 = tools_exec_status(pid, &err);
+    CHECK_STR_CONTAINS(st2, "Exit code: 137", "status repeatable after termination");
+    free(st2);
+    free(st);
+
+    err = NULL;
+    st = tools_exec_status(999999, &err);
+    CHECK_STR_CONTAINS(st, "No exec process with pid 999999", "unknown pid answered plainly");
+    free(st);
+}
+
+static void test_exec_errors(void) {
+    char *err = NULL;
+
+    CHECK(tools_exec("", &err) == NULL, "empty cmdline rejected");
+    CHECK(err != NULL && strstr(err, "cmdline") != NULL, "empty cmdline error names the argument");
+    free(err);
+}
+
+/* ------------------------------------------------------------------ */
 
 int main(void) {
     test_registry_names();
@@ -420,6 +551,10 @@ int main(void) {
     test_file_scan_content_regex();
     test_file_scan_binary_and_sizes();
     test_file_scan_errors();
+    test_exec_basic();
+    test_exec_truncation();
+    test_exec_status_lifecycle();
+    test_exec_errors();
     teardown_fixture();
 
     printf("test_tools: %d checks, %d failed\n", tests_run, tests_failed);

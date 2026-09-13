@@ -174,6 +174,100 @@ int platform_process_spawn(const char *cmdline, platform_process *out_proc, plat
 #endif
 }
 
+/* Map a waitpid status to an exit code: the process's own code, or
+ * 128+signal when it was killed by a signal (the shell convention). */
+static int platform_wait_status_code(int status) {
+    if (WIFEXITED(status)) return WEXITSTATUS(status);
+    if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
+    return -1;
+}
+
+int platform_shell_spawn(const char *cmdline, const char *out_path, platform_process *out_proc) {
+#ifdef _WIN32
+    const char *comspec = getenv("COMSPEC");
+    if (comspec == NULL || comspec[0] == '\0') comspec = "cmd.exe";
+
+    size_t cmd_len = strlen(comspec) + strlen(cmdline) + 8;
+    char *cmd = malloc(cmd_len);
+    if (cmd == NULL) return -1;
+    snprintf(cmd, cmd_len, "\"%s\" /c %s", comspec, cmdline);
+
+    SECURITY_ATTRIBUTES sa;
+    ZeroMemory(&sa, sizeof(sa));
+    sa.nLength = sizeof(sa);
+    sa.bInheritHandle = TRUE;
+
+    HANDLE out = CreateFileA(out_path, GENERIC_WRITE, FILE_SHARE_READ, &sa, CREATE_ALWAYS,
+                             FILE_ATTRIBUTE_NORMAL, NULL);
+    HANDLE nul = INVALID_HANDLE_VALUE;
+    if (out != INVALID_HANDLE_VALUE) {
+        nul = CreateFileA("NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa,
+                          OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    }
+
+    STARTUPINFOA si;
+    ZeroMemory(&si, sizeof(si));
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdInput = nul;
+    si.hStdOutput = out;
+    si.hStdError = out;
+
+    PROCESS_INFORMATION pi;
+    ZeroMemory(&pi, sizeof(pi));
+    BOOL success =
+        (out != INVALID_HANDLE_VALUE) &&
+        CreateProcessA(NULL, cmd, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
+
+    if (out != INVALID_HANDLE_VALUE) CloseHandle(out);
+    if (nul != INVALID_HANDLE_VALUE) CloseHandle(nul);
+    free(cmd);
+    if (!success) return -1;
+
+    CloseHandle(pi.hThread);
+    out_proc->hProcess = pi.hProcess;
+    out_proc->pid = pi.dwProcessId;
+    return 0;
+#else
+    int out_fd = open(out_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (out_fd < 0) return -1;
+    int devnull = open("/dev/null", O_RDONLY);
+    if (devnull < 0) {
+        close(out_fd);
+        return -1;
+    }
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        close(out_fd);
+        close(devnull);
+        return -1;
+    }
+
+    if (pid == 0) {
+        dup2(devnull, STDIN_FILENO);
+        dup2(out_fd, STDOUT_FILENO);
+        dup2(out_fd, STDERR_FILENO);
+        close(out_fd);
+        close(devnull);
+        /* Drop every inherited descriptor (listen/client sockets, MCP
+         * pipes): the command must not share the server's I/O. */
+        long max_fd = sysconf(_SC_OPEN_MAX);
+        if (max_fd < 3 || max_fd > 4096) max_fd = 4096;
+        for (int fd = 3; fd < (int)max_fd; fd++) close(fd);
+        execl("/bin/sh", "sh", "-c", cmdline, (char *)NULL);
+        _exit(127);
+    }
+
+    close(out_fd);
+    close(devnull);
+    out_proc->pid = pid;
+    out_proc->stdin_fd = -1;
+    out_proc->stdout_fd = -1;
+    return 0;
+#endif
+}
+
 int platform_process_kill(platform_process *proc) {
 #ifdef _WIN32
     if (!TerminateProcess(proc->hProcess, 1)) return -1;
@@ -184,20 +278,31 @@ int platform_process_kill(platform_process *proc) {
 #endif
 }
 
-int platform_process_wait(platform_process *proc, int64_t timeout_ms) {
+int platform_process_wait(platform_process *proc, int64_t timeout_ms, int *out_code) {
+    if (out_code != NULL) *out_code = -1;
 #ifdef _WIN32
     DWORD ret = WaitForSingleObject(proc->hProcess, timeout_ms < 0 ? INFINITE : (DWORD)timeout_ms);
-    return (ret == WAIT_OBJECT_0) ? 0 : -1;
+    if (ret != WAIT_OBJECT_0) return -1;
+    if (out_code != NULL) {
+        DWORD code = 0;
+        if (!GetExitCodeProcess(proc->hProcess, &code)) return -1;
+        *out_code = (int)code;
+    }
+    return 0;
 #else
     int status;
     if (timeout_ms < 0) {
         if (waitpid(proc->pid, &status, 0) < 0) return -1;
+        if (out_code != NULL) *out_code = platform_wait_status_code(status);
         return 0;
     }
     int64_t elapsed = 0;
     while (elapsed < timeout_ms) {
         pid_t ret = waitpid(proc->pid, &status, WNOHANG);
-        if (ret == proc->pid) return 0;
+        if (ret == proc->pid) {
+            if (out_code != NULL) *out_code = platform_wait_status_code(status);
+            return 0;
+        }
         if (ret < 0) return -1;
         struct pollfd pfd = {.fd = -1, .events = 0};
         int64_t remaining = timeout_ms - elapsed;
@@ -206,6 +311,28 @@ int platform_process_wait(platform_process *proc, int64_t timeout_ms) {
         elapsed += delay;
     }
     return -1;
+#endif
+}
+
+int platform_process_trywait(platform_process *proc, int *out_code) {
+    if (out_code != NULL) *out_code = -1;
+#ifdef _WIN32
+    DWORD ret = WaitForSingleObject(proc->hProcess, 0);
+    if (ret == WAIT_TIMEOUT) return 0;
+    if (ret != WAIT_OBJECT_0) return -1;
+    if (out_code != NULL) {
+        DWORD code = 0;
+        if (!GetExitCodeProcess(proc->hProcess, &code)) return -1;
+        *out_code = (int)code;
+    }
+    return 1;
+#else
+    int status;
+    pid_t ret = waitpid(proc->pid, &status, WNOHANG);
+    if (ret == 0) return 0;
+    if (ret < 0) return -1;
+    if (out_code != NULL) *out_code = platform_wait_status_code(status);
+    return 1;
 #endif
 }
 

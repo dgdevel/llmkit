@@ -187,9 +187,9 @@ static void transport_stdio_close(mcp_connection *conn) {
     if (!conn->proc_spawned) return;
     conn->proc_spawned = false;
     platform_pipe_close(&conn->pipe_in); /* signal EOF to child stdin */
-    if (platform_process_wait(&conn->proc, 1000) != 0) {
+    if (platform_process_wait(&conn->proc, 1000, NULL) != 0) {
         platform_process_kill(&conn->proc);
-        platform_process_wait(&conn->proc, 5000);
+        platform_process_wait(&conn->proc, 5000, NULL);
     }
     platform_pipe_close(&conn->pipe_out);
     platform_process_close(&conn->proc);
