@@ -724,3 +724,11 @@ int platform_install_sigint_handler(void) {
 int platform_sigint_pending(void) {
     return s_sigint_pending != 0;
 }
+
+int platform_ignore_sigpipe(void) {
+#ifndef _WIN32
+    return signal(SIGPIPE, SIG_IGN) == SIG_ERR ? -1 : 0;
+#else
+    return 0; /* no SIGPIPE on Windows; closed-pipe writes fail with an error */
+#endif
+}

@@ -99,6 +99,10 @@ static int hash_config_file(const char *path, char out[65]) {
 }
 
 int main(int argc, char **argv) {
+    /* A dead MCP backend or a client that disconnects mid-response must
+     * surface as a write error the code can handle, not a SIGPIPE kill. */
+    platform_ignore_sigpipe();
+
     if (argc < 2) {
         print_usage();
         return EXIT_ARGS_ERR;

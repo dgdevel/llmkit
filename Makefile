@@ -60,7 +60,7 @@ LIBS := $(YAML_LIBS) $(CURL_LIBS) $(CRYPTO_LIBS) $(SSL_LIBS) $(CJSON_LIBS)
 TIDY_FLAGS := -std=c17 -D_DEFAULT_SOURCE -I $(SRCDIR) \
               $(YAML_CFLAGS) $(CURL_CFLAGS) $(CRYPTO_CFLAGS) $(CJSON_CFLAGS)
 
-.PHONY: all debug profile test clean install uninstall dist check-ascii \
+.PHONY: all debug profile test coverage clean install uninstall dist check-ascii \
         vendors check-deps test_utf8 test_util test_config test_jsonrpc test_transport \
         test_mcp test_conversation test_llm test_compact test_cli test_agent test_agent_retries \
         test_agent_compaction test_agent_subagent test_agent_anthropic test_proxy test_gateway \
@@ -142,7 +142,8 @@ TEST_BINS := tests/test_utf8 tests/test_util tests/test_config tests/test_jsonrp
              tests/test_tools
 
 clean:
-	rm -rf $(OBJDIR) $(TARGET) build-win llmkit.exe $(TEST_BINS) dist
+	rm -rf $(OBJDIR) $(TARGET) build-win llmkit.exe $(TEST_BINS) dist $(COVERAGE_DIR)
+	rm -f tests/*.gcda tests/*.gcno *.gcov
 
 install: $(TARGET)
 	install -m 755 $(TARGET) $(DESTDIR)/usr/local/bin/$(TARGET)
@@ -357,4 +358,32 @@ test_gateway: $(TARGET) tests/fixtures/fake_mcp.py tests/test_gateway_integratio
 
 test_mcp_tools: $(TARGET) tests/test_mcp_tools_integration.py
 	python3 tests/test_mcp_tools_integration.py
+
+# --- Test coverage --------------------------------------------------------
+# Rebuilds the whole suite with GCC profiling instrumentation (--coverage),
+# runs it, and reports line+branch coverage for src/*.c (vendored code
+# excluded). Produces a terminal summary plus an HTML report with per-line
+# annotation under $(COVERAGE_DIR)/. Requires gcovr as the report front-end
+# (gcov itself ships with GCC):
+#   Arch:   sudo pacman -S gcovr
+#   Debian: sudo apt install gcovr
+#   macOS:  brew install gcovr
+#   any:    pip install gcovr
+# lcov works too if you prefer it: collect with
+#   lcov --capture --directory . --exclude '*/vendor/*' --ignore-errors unused
+COVERAGE_FLAGS := -O0 -g --coverage -Wall -Wextra -std=c17 -D_DEFAULT_SOURCE
+COVERAGE_DIR   := coverage
+
+coverage:
+	@command -v gcovr >/dev/null 2>&1 || { \
+		echo "Error: 'make coverage' needs gcovr (pacman -S gcovr / apt install gcovr / pip install gcovr)." >&2; \
+		exit 1; \
+	}
+	$(MAKE) clean
+	$(MAKE) test CFLAGS="$(COVERAGE_FLAGS)"
+	mkdir -p $(COVERAGE_DIR)
+	gcovr --root . --filter 'src/' --exclude '.*vendor.*' \
+	      --txt - --txt-metric line --txt-metric branch \
+	      --html-details $(COVERAGE_DIR)/index.html --html-title "$(TARGET) coverage"
+	@echo "[coverage] HTML report -> $(COVERAGE_DIR)/index.html"
 

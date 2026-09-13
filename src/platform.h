@@ -101,4 +101,12 @@ int platform_install_sigint_handler(void);
  * `volatile sig_atomic_t`. */
 int platform_sigint_pending(void);
 
+/* Ignore SIGPIPE for the whole process. A dead MCP backend or a client that
+ * disconnected mid-response must surface as an EPIPE write error the caller
+ * can handle (the proxy/gateway "Backend request failed" paths depend on
+ * this); the default disposition would instead kill the process. Windows has
+ * no SIGPIPE (writes to closed pipes already fail with an error), so this is
+ * a no-op there. Returns 0 on success, -1 on failure. */
+int platform_ignore_sigpipe(void);
+
 #endif

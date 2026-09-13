@@ -1,0 +1,17 @@
+# Build artifacts
+/build/
+/build-win/
+/dist/
+/coverage/
+/llmkit
+/llmkit.exe
+
+# Compiled test binaries (sources under tests/ stay tracked)
+/tests/test_*
+!/tests/*.*
+
+# Coverage data and object files
+*.o
+*.gcda
+*.gcno
+*.gcov
