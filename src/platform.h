@@ -83,4 +83,22 @@ const char *platform_temp_dir(void);
  * does not exist; returns -1 on other errors. */
 int platform_delete_file(const char *path);
 
+/* Truncate the file at the given path to exactly `length` bytes. Returns 0
+ * on success, -1 on error. Used to drop a trailing partial line from an
+ * append-only JSONL file after an interrupted write. */
+int platform_truncate_file(const char *path, int64_t length);
+
+/* Install the agent's SIGINT handler. The first SIGINT only sets a pending
+ * flag (see platform_sigint_pending) so the conversation loop can finish the
+ * in-flight tool call, record the outcome and exit cleanly; a second SIGINT
+ * while the flag is still pending restores the default disposition and
+ * re-raises, terminating the process immediately. Returns 0 on success,
+ * -1 if the handler could not be installed. */
+int platform_install_sigint_handler(void);
+
+/* Whether an interrupt is pending: a SIGINT was received but the process has
+ * not yet shut down. Safe to call from anywhere; the underlying flag is
+ * `volatile sig_atomic_t`. */
+int platform_sigint_pending(void);
+
 #endif

@@ -1,4 +1,5 @@
 #include "llm.h"
+#include "platform.h"
 #include "util.h"
 #include "utf8.h"
 #include <stdlib.h>
@@ -791,6 +792,20 @@ done:
 /*  llm_chat_complete                                                  */
 /* ------------------------------------------------------------------ */
 
+/* Progress callback: abort the transfer promptly when an interrupt is
+ * pending (SIGINT handling in platform.c), so Ctrl-C does not have to wait
+ * for the LLM response or the 120s timeout. A non-zero return makes
+ * curl_easy_perform fail with CURLE_ABORTED_BY_CALLBACK. */
+static int llm_xferinfo_cb(void *clientp, curl_off_t dltotal, curl_off_t dlnow, curl_off_t ultotal,
+                           curl_off_t ulnow) {
+    (void)clientp;
+    (void)dltotal;
+    (void)dlnow;
+    (void)ultotal;
+    (void)ulnow;
+    return platform_sigint_pending() ? 1 : 0;
+}
+
 int llm_chat_complete(runtime_ctx *ctx, const json_message *messages, int msg_count,
                       const tool_def *tools, int tool_count, char **out_content,
                       char **out_reasoning, char **out_model, tool_call **out_calls,
@@ -884,6 +899,9 @@ int llm_chat_complete(runtime_ctx *ctx, const json_message *messages, int msg_co
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &gb);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, 120000L);
     curl_easy_setopt(curl, CURLOPT_USERAGENT, "llmkit/" LLMKIT_VERSION);
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+    curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+    curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, llm_xferinfo_cb);
 
     log_activity("[progress] Waiting for LLM response...");
     CURLcode cc = curl_easy_perform(curl);

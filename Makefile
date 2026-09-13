@@ -261,7 +261,7 @@ check-deps:
 
 test: test_utf8 test_util test_config test_jsonrpc test_transport test_mcp test_conversation test_subagent \
        test_llm test_compact test_steering test_htmlmd test_tools test_cli test_agent test_agent_retries \
-       test_agent_compaction test_agent_subagent test_agent_anthropic test_proxy test_gateway \
+       test_agent_sigint test_agent_compaction test_agent_subagent test_agent_anthropic test_proxy test_gateway \
        test_mcp_tools
 	@echo "All tests passed."
 
@@ -339,6 +339,9 @@ test_agent_compaction: $(TARGET) tests/fixtures/fake_mcp.py tests/test_agent_com
 
 test_agent_retries: $(TARGET) tests/test_agent_retries.py
 	python3 tests/test_agent_retries.py
+
+test_agent_sigint: $(TARGET) tests/fixtures/fake_mcp.py tests/test_agent_sigint.py
+	python3 tests/test_agent_sigint.py
 
 test_agent_subagent: $(TARGET) tests/fixtures/fake_mcp.py tests/test_agent_subagent.py
 	python3 tests/test_agent_subagent.py

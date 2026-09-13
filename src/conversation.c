@@ -1,4 +1,5 @@
 #include "conversation.h"
+#include "platform.h"
 #include "util.h"
 #include "utf8.h"
 #include <stdlib.h>
@@ -30,23 +31,183 @@ static cJSON *make_entry_base(const char *type_str) {
     return root;
 }
 
+/* Value of a string field, or def when absent / not a string. */
+static const char *json_str(cJSON *obj, const char *field, const char *def) {
+    cJSON *j = cJSON_GetObjectItem(obj, field);
+    return (j && cJSON_IsString(j)) ? j->valuestring : def;
+}
+
 /* ------------------------------------------------------------------ */
 /*  conversation_open                                                  */
 /* ------------------------------------------------------------------ */
+
+/* A tool_call seen without its tool_result so far. */
+typedef struct {
+    char *call_id;
+    char *name;
+    char *server;
+    char *run_id; /* NULL for top-level entries, scope UUID otherwise */
+    char *subagent;
+    int depth;
+} pending_call;
+
+static void pending_free(pending_call *p) {
+    free(p->call_id);
+    free(p->name);
+    free(p->server);
+    free(p->run_id);
+    free(p->subagent);
+}
+
+static int pending_matches(const pending_call *p, const char *call_id, const char *run_id) {
+    if (p->call_id == NULL || call_id == NULL || strcmp(p->call_id, call_id) != 0) return 0;
+    if (p->run_id == NULL) return run_id == NULL;
+    return run_id != NULL && strcmp(p->run_id, run_id) == 0;
+}
+
+/* Append a synthetic error tool_result for every tool_call that has no
+ * matching tool_result in content (top-level or inside a subagent trace),
+ * so an interrupted run never reconstructs into an invalid LLM request
+ * sequence. Returns EXIT_SUCCESS or EXIT_FILE_ERR. */
+static int repair_dangling_tool_calls(const char *path, const char *content) {
+    pending_call *pending = NULL;
+    int pcount = 0, pcap = 0;
+    int rc = EXIT_SUCCESS;
+
+    char *buf = util_strdup(content);
+    if (buf == NULL) return EXIT_INTERNAL_ERR;
+
+    char *line = buf;
+    while (rc == EXIT_SUCCESS && line != NULL && *line != '\0') {
+        char *next = strchr(line, '\n');
+        if (next != NULL) *next = '\0';
+
+        cJSON *j = cJSON_Parse(line);
+        if (j != NULL) {
+            cJSON *tj = cJSON_GetObjectItem(j, "type");
+            const char *ts = (tj && cJSON_IsString(tj)) ? tj->valuestring : NULL;
+
+            if (ts != NULL && strcmp(ts, "tool_call") == 0) {
+                if (pcount == pcap) {
+                    int ncap = pcap ? pcap * 2 : 8;
+                    pending_call *tmp = realloc(pending, (size_t)ncap * sizeof(pending_call));
+                    if (tmp == NULL) {
+                        rc = EXIT_INTERNAL_ERR;
+                    } else {
+                        pending = tmp;
+                        pcap = ncap;
+                    }
+                }
+                if (rc == EXIT_SUCCESS) {
+                    pending_call *p = &pending[pcount];
+                    memset(p, 0, sizeof(*p));
+                    p->call_id = util_strdup(json_str(j, "id", ""));
+                    p->name = util_strdup(json_str(j, "name", ""));
+                    p->server = util_strdup(json_str(j, "mcp_server", ""));
+                    cJSON *rj = cJSON_GetObjectItem(j, "run_id");
+                    p->run_id = (rj && cJSON_IsString(rj)) ? util_strdup(rj->valuestring) : NULL;
+                    cJSON *sj = cJSON_GetObjectItem(j, "subagent");
+                    p->subagent = (sj && cJSON_IsString(sj)) ? util_strdup(sj->valuestring) : NULL;
+                    cJSON *dj = cJSON_GetObjectItem(j, "depth");
+                    p->depth = (dj && cJSON_IsNumber(dj)) ? dj->valueint : 1;
+                    if (p->call_id == NULL || p->name == NULL || p->server == NULL ||
+                        (rj && cJSON_IsString(rj) && p->run_id == NULL)) {
+                        rc = EXIT_INTERNAL_ERR;
+                    } else {
+                        pcount++;
+                    }
+                }
+            } else if (ts != NULL && strcmp(ts, "tool_result") == 0) {
+                const char *call_id = json_str(j, "call_id", "");
+                cJSON *rj = cJSON_GetObjectItem(j, "run_id");
+                const char *run_id = (rj && cJSON_IsString(rj)) ? rj->valuestring : NULL;
+                /* Latest matching call first: each result follows its own
+                 * call, so a LIFO match resolves repeated ids correctly. */
+                for (int i = pcount - 1; i >= 0; i--) {
+                    if (pending_matches(&pending[i], call_id, run_id)) {
+                        pending_free(&pending[i]);
+                        memmove(&pending[i], &pending[i + 1],
+                                (size_t)(pcount - 1 - i) * sizeof(pending_call));
+                        pcount--;
+                        break;
+                    }
+                }
+            }
+            cJSON_Delete(j);
+        }
+        line = next ? next + 1 : NULL;
+    }
+    free(buf);
+
+    if (rc == EXIT_SUCCESS && pcount > 0) {
+        FILE *fp = fopen(path, "a");
+        if (fp == NULL) {
+            log_activity("[error] Cannot open conversation file for repair: %s", path);
+            rc = EXIT_FILE_ERR;
+        } else {
+            for (int i = 0; i < pcount; i++) {
+                const pending_call *p = &pending[i];
+                if (p->run_id != NULL) {
+                    conv_scope scope = {p->depth, p->subagent ? p->subagent : "", p->run_id};
+                    conversation_write_scoped(fp, &scope, ENTRY_TOOL_RESULT, p->call_id, p->name,
+                                              CONV_INTERRUPTED_TOOL_RESULT, 1, 0, p->server);
+                } else {
+                    conversation_write_entry(fp, ENTRY_TOOL_RESULT, p->call_id, p->name,
+                                             CONV_INTERRUPTED_TOOL_RESULT, 1, 0, p->server);
+                }
+            }
+            if (ferror(fp)) rc = EXIT_FILE_ERR;
+            fclose(fp);
+            if (rc == EXIT_SUCCESS) {
+                log_activity("[warn] Repaired %d tool_call(s) without result (interrupted run)",
+                             pcount);
+            }
+        }
+    }
+
+    for (int i = 0; i < pcount; i++) pending_free(&pending[i]);
+    free(pending);
+    return rc;
+}
 
 int conversation_open(const char *path, FILE **out_fp) {
     if (path == NULL || out_fp == NULL) return EXIT_INTERNAL_ERR;
     *out_fp = NULL;
 
-    char *existing = util_read_file(path);
+    size_t len = 0;
+    char *existing = util_read_file_sized(path, &len);
     if (existing != NULL) {
-        size_t len = strlen(existing);
+        /* Trim a trailing partial line: entries are always terminated with
+         * '\n', so bytes after the last newline are a write torn by a crash
+         * or kill. Dropping them on disk (before the UTF-8 validation) also
+         * removes a cut inside a multi-byte character. Uses the real byte
+         * length: embedded NULs are corruption, not a terminator, and must
+         * reach the UTF-8 validation instead of hiding the tail. */
+        if (len > 0 && existing[len - 1] != '\n') {
+            const char *last_nl = strrchr(existing, '\n');
+            size_t keep = last_nl ? (size_t)(last_nl - existing) + 1 : 0;
+            if (platform_truncate_file(path, (int64_t)keep) != 0) {
+                log_activity("[error] Cannot trim partial last line from conversation file: %s",
+                             path);
+                free(existing);
+                return EXIT_FILE_ERR;
+            }
+            log_activity("[warn] Trimmed %zu trailing byte(s) (partial line) from conversation "
+                         "file",
+                         len - keep);
+            existing[keep] = '\0';
+            len = keep;
+        }
+
         if (!utf8_validate(existing, len)) {
             log_activity("[error] Conversation file contains invalid UTF-8: %s", path);
             free(existing);
             return EXIT_FILE_ERR;
         }
+
+        int rc = repair_dangling_tool_calls(path, existing);
         free(existing);
+        if (rc != EXIT_SUCCESS) return rc;
     }
 
     *out_fp = fopen(path, "a");
@@ -323,11 +484,6 @@ static tool_call *grow_tcalls(tool_call *arr, int *cap, int need) {
     memset(tmp + *cap, 0, (size_t)(new_cap - *cap) * sizeof(tool_call));
     *cap = new_cap;
     return tmp;
-}
-
-static const char *json_str(cJSON *obj, const char *field, const char *def) {
-    cJSON *j = cJSON_GetObjectItem(obj, field);
-    return (j && cJSON_IsString(j)) ? j->valuestring : def;
 }
 
 static void free_entries(void *p, int count) {

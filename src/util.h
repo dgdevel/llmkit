@@ -31,6 +31,10 @@ void util_timestamp_now(char *buf, size_t len);
 void util_uuid_v4(char *buf);
 void util_sha256(const char *data, size_t len, char *hex_out);
 char *util_read_file(const char *path);
+/* Same as util_read_file, also storing the byte length (which may include
+ * embedded NUL bytes - do not rely on strlen of the result). out_len may be
+ * NULL. */
+char *util_read_file_sized(const char *path, size_t *out_len);
 char *util_strdup(const char *s);
 void log_activity(const char *fmt, ...);
 void log_activity_set_enabled(bool enabled);

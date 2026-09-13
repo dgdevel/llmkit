@@ -16,6 +16,10 @@
 #define EXIT_MCP_ERR      5
 #define EXIT_MCP_INIT_ERR 6
 #define EXIT_INTERNAL_ERR 7
+/* Graceful interrupt (128+SIGINT, shell convention): the SIGINT handler let
+ * the in-flight tool call finish and the conversation file was closed
+ * consistently. */
+#define EXIT_SIGINT 130
 
 /* Transport type */
 typedef enum {

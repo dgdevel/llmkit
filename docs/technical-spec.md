@@ -920,14 +920,20 @@ exit 0
 | MCP connection | Return exit code 5, write error entry to JSONL |
 | MCP init timeout | exit code 6 after killing process |
 | UTF-8 validation failure | Immediate exit with code 1 (config) or 7 (other) |
-| Partial data written | Keep JSONL file open, flush on each write; on error, close preserving written entries |
+| Partial data written | Keep JSONL file open, flush on each write; on error, close preserving written entries; a trailing partial line is trimmed at the next open |
+| SIGINT (agent) | First SIGINT is graceful: abort the LLM request, wait for the in-flight tool, record its result + an `error` entry (code 130), exit 130. Second SIGINT kills immediately; the dangling-call repair and partial-line trim restore the file at the next open |
+| Dangling tool_call | Repaired at conversation open: synthetic `tool_result` with `is_error: true` per dangling call |
 
 ---
 
 ## 8. Threading / Concurrency Model
 
 - **Single-threaded, blocking I/O**
-- No threads, no async, no signal handlers (except SIGCHLD for process reaping on POSIX)
+- No threads, no async. The only signal handler is the agent's SIGINT
+  handler (`platform_install_sigint_handler`), which flips a
+  `volatile sig_atomic_t` flag that the conversation loop polls; pipe reads,
+  writes and `waitpid` retry on `EINTR` so an in-flight tool call is not
+  aborted by the signal itself
 - On Linux/macOS: `platform_pipe_read()` uses `poll()` for stdio timeouts
 - On Windows: `platform_pipe_read()` uses `WaitForMultipleObjects()` on pipe handles with a timeout
 - libcurl used in blocking (easy) mode — no multi interface

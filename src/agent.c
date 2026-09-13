@@ -321,6 +321,16 @@ static void emit_steer_event(const char *content) {
     /* quiet: nothing */
 }
 
+/* Record the interrupt in the conversation file and on stdout, then stop
+ * with the 128+SIGINT exit code. The conversation file is left a valid
+ * sequence at every call site. */
+static int interrupted_exit(FILE *fp) {
+    log_activity("[interrupt] SIGINT received, stopping");
+    emit_error_event(EXIT_SIGINT, "Interrupted by SIGINT");
+    conversation_write_entry(fp, ENTRY_ERROR, EXIT_SIGINT, "Interrupted by SIGINT", 1);
+    return EXIT_SIGINT;
+}
+
 /* Drain any pending steering messages from stdin and append each as a user
  * entry to the conversation file. Returns the number of messages injected.
  * A no-op when steering is disabled. */
@@ -394,6 +404,7 @@ static int startup_sequence(runtime_ctx *ctx, const char *convo_path, const char
     rc = mcp_connect_all(ctx);
     if (rc != EXIT_SUCCESS) {
         log_activity("[error] Failed to connect to MCP servers");
+        conversation_write_entry(*out_fp, ENTRY_ERROR, rc, "Failed to connect to MCP servers", 0);
         return rc;
     }
 
@@ -403,6 +414,7 @@ static int startup_sequence(runtime_ctx *ctx, const char *convo_path, const char
     rc = mcp_discover_tools(ctx);
     if (rc != EXIT_SUCCESS) {
         log_activity("[error] Failed to discover tools");
+        conversation_write_entry(*out_fp, ENTRY_ERROR, rc, "Failed to discover tools", 0);
         return rc;
     }
 
@@ -412,6 +424,7 @@ static int startup_sequence(runtime_ctx *ctx, const char *convo_path, const char
     rc = subagent_register_tools(ctx);
     if (rc != EXIT_SUCCESS) {
         log_activity("[error] Failed to register subagent tools");
+        conversation_write_entry(*out_fp, ENTRY_ERROR, rc, "Failed to register subagent tools", 0);
         return rc;
     }
 
@@ -427,6 +440,13 @@ static int conversation_loop(runtime_ctx *ctx, FILE *fp) {
     int max_turns = 50; /* safety limit */
 
     for (int turn = 0; turn < max_turns; turn++) {
+        /* ---- Graceful interrupt: stop on a consistent file boundary ---- */
+        /* Nothing is in flight here (the previous turn or the startup
+         * sequence completed), so no repair is needed. */
+        if (platform_sigint_pending()) {
+            return interrupted_exit(fp);
+        }
+
         emit_turn_start(turn + 1);
 
         /* ---- Drain any pending steering messages from stdin ---- */
@@ -442,6 +462,7 @@ static int conversation_loop(runtime_ctx *ctx, FILE *fp) {
         rc = conversation_reconstruct(ctx->convo_path, &msgs, &msg_count);
         if (rc != EXIT_SUCCESS) {
             log_activity("[error] Failed to reconstruct conversation");
+            conversation_write_entry(fp, ENTRY_ERROR, rc, "Failed to reconstruct conversation", 0);
             return rc;
         }
 
@@ -496,9 +517,10 @@ static int conversation_loop(runtime_ctx *ctx, FILE *fp) {
                                &reasoning, &model, &calls, &call_count, &usage);
 
         /* Retry on LLM API failure, waiting util_fibonacci(k) seconds before
-         * the k-th retry: 1, 1, 2, 3, 5, 8, 13, 21, 34, 55, ... */
+         * the k-th retry: 1, 1, 2, 3, 5, 8, 13, 21, 34, 55, ... Never retry
+         * once an interrupt is pending: the user asked to stop. */
         int retry = 0;
-        while (rc != EXIT_SUCCESS && retry < g_max_retries) {
+        while (rc != EXIT_SUCCESS && retry < g_max_retries && !platform_sigint_pending()) {
             retry++;
             int64_t delay_s = util_fibonacci(retry);
             emit_retry_event(retry, g_max_retries, delay_s);
@@ -526,10 +548,38 @@ static int conversation_loop(runtime_ctx *ctx, FILE *fp) {
 
         int64_t elapsed_ms = platform_now_ms() - t0;
 
+        /* ---- Graceful interrupt after the LLM call ---- */
+        /* The call itself was aborted via the curl progress callback (or
+         * completed while the interrupt arrived). Record the reply if one
+         * exists, close its tool calls with synthetic error results so the
+         * file stays a valid sequence, and stop. */
+        if (platform_sigint_pending()) {
+            if (rc == EXIT_SUCCESS) {
+                conversation_write_entry(fp, ENTRY_ASSISTANT, content ? content : "",
+                                         reasoning ? reasoning : "", model ? model : "", &usage);
+                for (int i = 0; i < call_count; i++) {
+                    const char *name = calls[i].name ? calls[i].name : "";
+                    const tool_def *td = find_tool(ctx->tools, ctx->tool_count, name);
+                    const char *server = td ? td->mcp_server : "";
+                    conversation_write_entry(fp, ENTRY_TOOL_CALL, calls[i].id ? calls[i].id : "",
+                                             name, calls[i].arguments ? calls[i].arguments : "{}",
+                                             server);
+                    conversation_write_entry(fp, ENTRY_TOOL_RESULT, calls[i].id ? calls[i].id : "",
+                                             name, CONV_INTERRUPTED_TOOL_RESULT, 1, 0, server);
+                }
+            }
+            free(content);
+            free(reasoning);
+            free(model);
+            free(calls);
+            return interrupted_exit(fp);
+        }
+
         if (rc != EXIT_SUCCESS) {
             log_activity("[error] LLM API call failed after %d %s", g_max_retries,
                          g_max_retries == 1 ? "retry" : "retries");
             emit_error_event(EXIT_LLM_ERR, "LLM API call failed");
+            conversation_write_entry(fp, ENTRY_ERROR, EXIT_LLM_ERR, "LLM API call failed", 0);
             free(content);
             free(reasoning);
             free(model);
@@ -593,6 +643,18 @@ static int conversation_loop(runtime_ctx *ctx, FILE *fp) {
             const char *tc_args = calls[i].arguments ? calls[i].arguments : "{}";
             const char *tc_id = calls[i].id ? calls[i].id : "";
 
+            /* Graceful interrupt: stop before starting further work. The
+             * tool calls already executed have their results recorded; the
+             * remaining ones were never written, so the file stays a valid
+             * sequence. */
+            if (platform_sigint_pending()) {
+                free(content);
+                free(reasoning);
+                free(model);
+                free(calls);
+                return interrupted_exit(fp);
+            }
+
             log_activity("[tool] %s", tc_name);
 
             /* Look up the tool definition to find the backend server and original name. */
@@ -612,7 +674,10 @@ static int conversation_loop(runtime_ctx *ctx, FILE *fp) {
             conversation_write_entry(fp, ENTRY_TOOL_CALL, tc_id, tc_name, tc_args, td->mcp_server);
             emit_tool_call_event(tc_id, tc_name, tc_args, td->mcp_server);
 
-            /* Execute via MCP, or dispatch to a subagent (agent-as-tool). */
+            /* Execute via MCP, or dispatch to a subagent (agent-as-tool).
+             * This blocks until the tool terminates (or its timeout); a
+             * pending interrupt does not abort it - the result is recorded
+             * either way and the loop stops afterwards. */
             char *result = NULL;
             bool is_error = false;
             int mrc;
@@ -647,15 +712,28 @@ static int conversation_loop(runtime_ctx *ctx, FILE *fp) {
                 free(calls);
                 log_activity("[error] Tool call failed, stopping conversation");
                 emit_error_event(EXIT_MCP_ERR, "Tool call failed");
+                conversation_write_entry(fp, ENTRY_ERROR, EXIT_MCP_ERR, "Tool call failed", 0);
                 return EXIT_MCP_ERR;
             }
 
-            /* Write tool_result entry. */
-            conversation_write_entry(fp, ENTRY_TOOL_RESULT, tc_id, tc_name, result ? result : "",
+            /* Write tool_result entry. A subagent interrupted by SIGINT
+             * reports EXIT_SIGINT with no result: record the interrupt. */
+            const char *result_text = result ? result : "";
+            if (mrc == EXIT_SIGINT) {
+                result_text = "Interrupted by SIGINT";
+            }
+            conversation_write_entry(fp, ENTRY_TOOL_RESULT, tc_id, tc_name, result_text,
                                      (int)is_error, 0, td->mcp_server);
-            emit_tool_result_event(tc_id, tc_name, result ? result : "", (int)is_error, 0,
-                                   td->mcp_server);
+            emit_tool_result_event(tc_id, tc_name, result_text, (int)is_error, 0, td->mcp_server);
             free(result);
+
+            if (mrc == EXIT_SIGINT || platform_sigint_pending()) {
+                free(content);
+                free(reasoning);
+                free(model);
+                free(calls);
+                return interrupted_exit(fp);
+            }
         }
 
         free(content);
@@ -672,6 +750,8 @@ static int conversation_loop(runtime_ctx *ctx, FILE *fp) {
 
     log_activity("[error] Conversation reached maximum turn limit (%d)", max_turns);
     emit_error_event(EXIT_INTERNAL_ERR, "Conversation reached maximum turn limit");
+    conversation_write_entry(fp, ENTRY_ERROR, EXIT_INTERNAL_ERR,
+                             "Conversation reached maximum turn limit", 1);
     return EXIT_SUCCESS;
 }
 
@@ -701,6 +781,12 @@ int agent_run(runtime_ctx *ctx, const char *convo_path, const char *prompt, cons
 
     /* Store convo_path in ctx so conversation_loop can use it for reconstruction. */
     ctx->convo_path = util_strdup(convo_path);
+
+    /* Graceful Ctrl-C: the handler only flags the interrupt; the loop waits
+     * for the in-flight tool call, records the outcome (real result or
+     * synthetic error) and exits 130 on a consistent file. A second Ctrl-C
+     * kills the process immediately. */
+    platform_install_sigint_handler();
 
     /* ---- Startup sequence ---- */
     FILE *fp = NULL;

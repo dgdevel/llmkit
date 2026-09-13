@@ -4,6 +4,7 @@
 #include <string.h>
 #include <time.h>
 #include <stdarg.h>
+#include <signal.h>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -292,7 +293,11 @@ int platform_process_wait(platform_process *proc, int64_t timeout_ms, int *out_c
 #else
     int status;
     if (timeout_ms < 0) {
-        if (waitpid(proc->pid, &status, 0) < 0) return -1;
+        pid_t ret;
+        do {
+            ret = waitpid(proc->pid, &status, 0);
+        } while (ret < 0 && errno == EINTR);
+        if (ret < 0) return -1;
         if (out_code != NULL) *out_code = platform_wait_status_code(status);
         return 0;
     }
@@ -303,7 +308,10 @@ int platform_process_wait(platform_process *proc, int64_t timeout_ms, int *out_c
             if (out_code != NULL) *out_code = platform_wait_status_code(status);
             return 0;
         }
-        if (ret < 0) return -1;
+        if (ret < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
         struct pollfd pfd = {.fd = -1, .events = 0};
         int64_t remaining = timeout_ms - elapsed;
         int delay = remaining > 10 ? 10 : (int)remaining;
@@ -366,10 +374,28 @@ int platform_pipe_read(platform_pipe *p, char *buf, size_t size, int64_t timeout
     }
     return -1;
 #else
+    /* EINTR (e.g. the agent's own SIGINT handler) must not abort an
+     * in-flight read: the caller waits for a tool call to run to
+     * completion, so keep polling until data, timeout or real error. */
+    int64_t deadline = (timeout_ms < 0) ? -1 : platform_now_ms() + timeout_ms;
     struct pollfd pfd = {.fd = p->fd, .events = POLLIN};
-    int ret = poll(&pfd, 1, (int)timeout_ms);
-    if (ret <= 0) return -1;
-    ssize_t n = read(p->fd, buf, size);
+    for (;;) {
+        int to = -1;
+        if (timeout_ms >= 0) {
+            int64_t rem = deadline - platform_now_ms();
+            if (rem < 0) rem = 0;
+            if (rem > 0x7fffffff) rem = 0x7fffffff;
+            to = (int)rem;
+        }
+        int ret = poll(&pfd, 1, to);
+        if (ret < 0 && errno == EINTR) continue;
+        if (ret <= 0) return -1;
+        break;
+    }
+    ssize_t n;
+    do {
+        n = read(p->fd, buf, size);
+    } while (n < 0 && errno == EINTR);
     return (n < 0) ? -1 : (int)n;
 #endif
 }
@@ -380,7 +406,10 @@ int platform_pipe_write(platform_pipe *p, const char *data, size_t len) {
     if (!WriteFile(p->hWrite, data, (DWORD)len, &written, NULL)) return -1;
     return (int)written;
 #else
-    ssize_t n = write(p->fd, data, len);
+    ssize_t n;
+    do {
+        n = write(p->fd, data, len);
+    } while (n < 0 && errno == EINTR);
     return (n < 0) ? -1 : (int)n;
 #endif
 }
@@ -651,4 +680,47 @@ int platform_delete_file(const char *path) {
     if (errno == ENOENT) return 0;
     return -1;
 #endif
+}
+
+int platform_truncate_file(const char *path, int64_t length) {
+    if (path == NULL || length < 0) return -1;
+#ifdef _WIN32
+    FILE *fp = fopen(path, "r+b");
+    if (fp == NULL) return -1;
+    if (_fseeki64(fp, length, SEEK_SET) != 0) {
+        fclose(fp);
+        return -1;
+    }
+    errno_t rc = _chsize_s(fileno(fp), length);
+    fclose(fp);
+    return rc == 0 ? 0 : -1;
+#else
+    return truncate(path, (off_t)length) == 0 ? 0 : -1;
+#endif
+}
+
+/* SIGINT handling for the agent: the handler only flips a flag so the main
+ * loop decides when and how to stop (finishing the in-flight tool call and
+ * keeping the conversation file consistent). A second SIGINT while the flag
+ * is still pending restores the default disposition and re-raises, killing
+ * the process immediately even if a tool call is stuck. */
+static volatile sig_atomic_t s_sigint_pending = 0;
+
+static void platform_sigint_handler(int sig) {
+    (void)sig;
+    if (s_sigint_pending) {
+        signal(SIGINT, SIG_DFL);
+        raise(SIGINT);
+        return;
+    }
+    s_sigint_pending = 1;
+}
+
+int platform_install_sigint_handler(void) {
+    s_sigint_pending = 0;
+    return signal(SIGINT, platform_sigint_handler) == SIG_ERR ? -1 : 0;
+}
+
+int platform_sigint_pending(void) {
+    return s_sigint_pending != 0;
 }

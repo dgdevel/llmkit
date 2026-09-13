@@ -149,19 +149,31 @@ Timeout result:
 
 ### `error` — session error
 
-Runtime errors that occur during the agent run. These entries are **not** part of the LLM message history and are skipped during conversation reconstruction.
+Runtime errors that occur during the agent run. These entries are **not** part of the LLM message history and are skipped during conversation reconstruction. The agent writes one whenever the run terminates on a failure, on the turn limit, or on an interrupt — every terminal path that reports an error to the caller also records it here.
 
 | Field        | Type    | Description                              |
 |--------------|---------|------------------------------------------|
 | `type`       | string  | Always `"error"`                         |
 | `timestamp`  | string  | ISO 8601 UTC timestamp                   |
-| `code`       | number  | Error code                               |
+| `code`       | number  | Error code (same values as the process exit code, see below) |
 | `message`    | string  | Human-readable error description         |
-| `recoverable`| boolean | Whether the session can continue         |
+| `recoverable`| boolean | Whether the session can be resumed       |
 
 ```json
 {"type":"error","timestamp":"2026-07-27T14:30:10Z","code":4,"message":"LLM API call failed","recoverable":false}
 ```
+
+Codes written by the agent:
+
+| `code` | `message`                                   | `recoverable` | Written when                                                  |
+|--------|---------------------------------------------|---------------|---------------------------------------------------------------|
+| 5/6    | `Failed to connect to MCP servers`          | false         | An MCP backend could not be started at startup (exit 5 or 6)   |
+| 5      | `Tool call failed`                          | false         | A tool timed out with `fail` behavior; the run stops           |
+| 4      | `LLM API call failed`                       | false         | The LLM request failed after all `--max-retries` attempts      |
+| 7      | `Conversation reached maximum turn limit`   | true          | The 50-turn safety limit was hit; resuming continues           |
+| 130    | `Interrupted by SIGINT`                     | true          | The run was interrupted (Ctrl-C) and stopped gracefully        |
+
+Scoped variants (carrying the subagent's `depth`/`subagent`/`run_id` fields) are written inside a subagent trace for its own failures, e.g. `Subagent LLM API call failed` (4) or `Subagent tool call failed` (5).
 
 ## Subagent traces (sublevels)
 
@@ -291,6 +303,54 @@ Every entry has a `timestamp` field in ISO 8601 UTC format generated at write ti
   entries that carry a `run_id` field unless they specifically want the
   subagent traces, and can use the `subagent_start`/`subagent_end` brackets
   to delimit them.
+
+## Crash and interruption resilience
+
+Entries are flushed to disk one line at a time as they are written, so an
+interrupted run can only ever tear the **last** line of the file — every
+earlier entry is already complete. Two mechanisms keep a file written by a
+killed or interrupted agent usable:
+
+**Trailing partial line (trimmed at open).** Every entry ends with `\n`, so
+bytes after the last newline can only be a write torn by a crash or a hard
+kill. When the agent opens an existing conversation, such a trailing partial
+line is removed from the file before anything else happens. This also removes
+a cut inside a multi-byte UTF-8 character, which would otherwise make the
+whole file fail the UTF-8 validation. (Line readers should apply the same
+rule: ignore a final line with no terminating `\n`.)
+
+**Dangling `tool_call` (repaired at open).** A run killed between writing a
+`tool_call` and its `tool_result` — typically during a slow MCP tool — would
+otherwise reconstruct into an assistant message with unanswered tool calls,
+a sequence the LLM APIs reject. When the agent opens an existing
+conversation, every `tool_call` that has no matching `tool_result` (matching
+by call id within the same scope, top-level or inside a subagent trace)
+gets a synthetic `tool_result` appended right after the last entry:
+
+```json
+{"type":"tool_result","timestamp":"...","call_id":"call_1","name":"weather.get","result":"Tool call interrupted: the run ended before this tool returned","is_error":true,"is_timeout":false,"mcp_server":"weather-srv","depth":1,"subagent":"calculator","run_id":"9f0c..."}
+```
+
+The synthetic result carries the same scope fields as its `tool_call`
+(omitted for top-level calls), `is_error: true`, and the fixed result text
+`Tool call interrupted: the run ended before this tool returned`. On the
+next run the LLM therefore sees a well-formed tool round with an error
+outcome and can carry on.
+
+**SIGINT (Ctrl-C).** The agent installs a handler and treats the first
+SIGINT as a *graceful stop* request, exiting with code 130 (128+SIGINT):
+
+- during an LLM request, the request is aborted; if a complete reply had
+  already arrived, it is recorded (its tool calls closed with the synthetic
+  interrupted result above);
+- during a tool call, the agent **waits for the tool to terminate**, records
+  its real result, and stops before starting any further tool call;
+- it then appends an `error` entry (`code` 130, `recoverable` true) and
+  shuts down on a file that is a valid sequence at every point.
+
+A second SIGINT while the graceful stop is still pending terminates the
+process immediately (the default disposition); the file is then made usable
+again by the two repair mechanisms above on the next open.
 
 ## Stdout output modes (`--mode` flag)
 

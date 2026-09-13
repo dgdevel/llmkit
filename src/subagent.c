@@ -306,7 +306,7 @@ static int subagent_run_loop(runtime_ctx *child, FILE *fp, const conv_scope *sco
                                &reasoning, &model, &calls, &call_count, &usage);
 
         int retry = 0;
-        while (rc != EXIT_SUCCESS && retry < max_retries) {
+        while (rc != EXIT_SUCCESS && retry < max_retries && !platform_sigint_pending()) {
             retry++;
             int64_t delay_s = util_fibonacci(retry);
             log_activity("[subagent] '%s' LLM call failed, retry %d/%d after %llds",
@@ -336,7 +336,23 @@ static int subagent_run_loop(runtime_ctx *child, FILE *fp, const conv_scope *sco
             free(calls);
             *out_is_error = true;
             *out_final = util_strdup("Subagent LLM API call failed");
+            conversation_write_scoped(fp, scope, ENTRY_ERROR, EXIT_LLM_ERR,
+                                      "Subagent LLM API call failed", 0);
             return EXIT_SUCCESS;
+        }
+
+        /* Graceful interrupt: bail out without executing further turns; the
+         * parent records the interrupted tool_result for this subagent. */
+        if (platform_sigint_pending()) {
+            free(content);
+            free(reasoning);
+            free(model);
+            free(calls);
+            *out_is_error = true;
+            *out_final = util_strdup("Interrupted by SIGINT");
+            conversation_write_scoped(fp, scope, ENTRY_ERROR, EXIT_SIGINT, "Interrupted by SIGINT",
+                                      1);
+            return EXIT_SIGINT;
         }
 
         conversation_write_scoped(fp, scope, ENTRY_ASSISTANT, content ? content : "",
@@ -354,6 +370,20 @@ static int subagent_run_loop(runtime_ctx *child, FILE *fp, const conv_scope *sco
 
         /* Execute tool calls sequentially. */
         for (int i = 0; i < call_count; i++) {
+            /* Graceful interrupt: stop before starting further tools; the
+             * ones already executed have their scoped results recorded. */
+            if (platform_sigint_pending()) {
+                free(content);
+                free(reasoning);
+                free(model);
+                free(calls);
+                *out_is_error = true;
+                *out_final = util_strdup("Interrupted by SIGINT");
+                conversation_write_scoped(fp, scope, ENTRY_ERROR, EXIT_SIGINT,
+                                          "Interrupted by SIGINT", 1);
+                return EXIT_SIGINT;
+            }
+
             const char *tc_name = calls[i].name ? calls[i].name : "";
             const char *tc_args = calls[i].arguments ? calls[i].arguments : "{}";
             const char *tc_id = calls[i].id ? calls[i].id : "";
@@ -410,6 +440,8 @@ static int subagent_run_loop(runtime_ctx *child, FILE *fp, const conv_scope *sco
                     free(calls);
                     *out_is_error = true;
                     *out_final = util_strdup("Subagent tool call failed");
+                    conversation_write_scoped(fp, scope, ENTRY_ERROR, mrc,
+                                              "Subagent tool call failed", 0);
                     return EXIT_MCP_ERR;
                 }
             }
@@ -429,6 +461,8 @@ static int subagent_run_loop(runtime_ctx *child, FILE *fp, const conv_scope *sco
                  SUBAGENT_MAX_TURNS);
     *out_is_error = true;
     *out_final = util_strdup("Subagent reached maximum turn limit");
+    conversation_write_scoped(fp, scope, ENTRY_ERROR, EXIT_INTERNAL_ERR,
+                              "Subagent reached maximum turn limit", 1);
     return EXIT_SUCCESS;
 }
 

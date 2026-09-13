@@ -1,5 +1,6 @@
 #include "conversation.h"
 #include "util.h"
+#include "utf8.h"
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -34,9 +35,19 @@ static FILE *tmp_file(char **out_path) {
     return fdopen(fd, "a");
 }
 
+/* Value of a string field of a parsed entry, or "" when absent. */
+static const char *json_str_field(cJSON *obj, const char *field) {
+    cJSON *j = cJSON_GetObjectItem(obj, field);
+    return (j && cJSON_IsString(j) && j->valuestring) ? j->valuestring : "";
+}
+
 /* ---- declarations ---- */
 static void test_open_new(void);
 static void test_open_utf8_invalid(void);
+static void test_open_trims_partial_line(void);
+static void test_open_repairs_dangling_tool_call(void);
+static void test_open_repairs_dangling_scoped_tool_call(void);
+static void test_open_leaves_complete_file_unchanged(void);
 static void test_write_meta(void);
 static void test_write_user(void);
 static void test_write_assistant(void);
@@ -67,6 +78,10 @@ int main(void) {
 
     test_open_new();
     test_open_utf8_invalid();
+    test_open_trims_partial_line();
+    test_open_repairs_dangling_tool_call();
+    test_open_repairs_dangling_scoped_tool_call();
+    test_open_leaves_complete_file_unchanged();
     test_write_meta();
     test_write_user();
     test_write_assistant();
@@ -122,11 +137,13 @@ void test_open_new(void) {
 }
 
 void test_open_utf8_invalid(void) {
-    TEST("open rejects invalid UTF-8");
+    TEST("open rejects invalid UTF-8 in complete lines");
     char *path = NULL;
     FILE *fp = tmp_file(&path);
     ASSERT(fp != NULL, "tmp file");
-    fwrite("\xff\xfe\x00\x01", 4, 1, fp);
+    /* Newline-terminated garbage: a complete entry line, not a torn write
+     * (a trailing partial line is trimmed instead, see the trim test). */
+    fwrite("\xff\xfe\x00\x01\n", 5, 1, fp);
     if (fp) fclose(fp);
 
     FILE *fp2 = (FILE *)0x1;
@@ -872,6 +889,193 @@ void test_read_last_assistant_skips_scoped(void) {
         ASSERT(strcmp(content, "top final") == 0, "top-level final wins over scoped ones");
     }
     free(content);
+    remove(path);
+    free(path);
+}
+
+/* ------------------------------------------------------------------ */
+/*  Interrupted-run resilience: partial-line trim + dangling repair     */
+/* ------------------------------------------------------------------ */
+
+/* Append raw bytes to the file at path. */
+static void append_raw(const char *path, const char *bytes) {
+    FILE *fp = fopen(path, "a");
+    ASSERT(fp != NULL, "append open");
+    if (fp != NULL) {
+        fputs(bytes, fp);
+        fclose(fp);
+    }
+}
+
+void test_open_trims_partial_line(void) {
+    TEST("open trims a trailing partial line (torn write)");
+    char *path = NULL;
+    FILE *fp = tmp_file(&path);
+    ASSERT(fp != NULL, "tmp file");
+    fclose(fp);
+
+    append_raw(path, "{\"type\":\"user\",\"content\":\"hi\"}\n"
+                     "{\"type\":\"assistant\",\"content\":\"hello\"}\n");
+    /* Torn write: a cut-off entry with no terminating newline, ending inside
+     * a multi-byte UTF-8 character (0xC3 0xA9 = e-acute, second byte lost). */
+    append_raw(path, "{\"type\":\"user\",\"content\":\"h\xC3");
+
+    FILE *fp2 = NULL;
+    int rc = conversation_open(path, &fp2);
+    ASSERT(rc == EXIT_SUCCESS, "open succeeds after trimming");
+    ASSERT(fp2 != NULL, "out_fp set");
+    if (fp2) fclose(fp2);
+
+    char *content = util_read_file(path);
+    ASSERT(content != NULL, "file readable");
+    ASSERT(strchr(content, '\n') != NULL, "has lines");
+    /* The trimmed file ends exactly at the last complete entry. */
+    size_t len = strlen(content);
+    ASSERT(len > 0 && content[len - 1] == '\n', "ends with newline");
+    ASSERT(utf8_validate(content, len), "valid UTF-8 after trim");
+    ASSERT(strstr(content, "partial") == NULL, "torn bytes gone");
+    ASSERT(content[len - 2] == '}', "last complete line intact");
+    free(content);
+
+    remove(path);
+    free(path);
+}
+
+void test_open_repairs_dangling_tool_call(void) {
+    TEST("open appends synthetic error result for dangling tool_call");
+    char *path = NULL;
+    FILE *fp = tmp_file(&path);
+    ASSERT(fp != NULL, "tmp file");
+    fclose(fp);
+
+    append_raw(path, "{\"type\":\"user\",\"content\":\"run it\"}\n"
+                     "{\"type\":\"assistant\",\"content\":\"\",\"model\":\"m\"}\n"
+                     "{\"type\":\"tool_call\",\"id\":\"call_1\",\"name\":\"calc.add\","
+                     "\"arguments\":\"{}\",\"mcp_server\":\"calc\"}\n");
+
+    FILE *fp2 = NULL;
+    int rc = conversation_open(path, &fp2);
+    ASSERT(rc == EXIT_SUCCESS, "open succeeds");
+    if (fp2) fclose(fp2);
+
+    /* Last line on disk is the synthetic tool_result. */
+    char *content = util_read_file(path);
+    ASSERT(content != NULL, "file readable");
+    char *last_nl = strrchr(content, '\n');
+    ASSERT(last_nl != NULL && last_nl != content, "has newline");
+    char *prev_nl = last_nl > content ? NULL : NULL;
+    for (char *p = content; p < last_nl; p++) {
+        if (*p == '\n') prev_nl = p;
+    }
+    char *last_line = prev_nl ? prev_nl + 1 : content;
+    cJSON *j = cJSON_Parse(last_line);
+    ASSERT(j != NULL, "synthetic line is valid JSON");
+    if (j != NULL) {
+        ASSERT(strcmp(json_str_field(j, "type"), "tool_result") == 0, "type=tool_result");
+        ASSERT(strcmp(json_str_field(j, "call_id"), "call_1") == 0, "call_id matches");
+        ASSERT(strcmp(json_str_field(j, "name"), "calc.add") == 0, "name matches");
+        cJSON *err = cJSON_GetObjectItem(j, "is_error");
+        ASSERT(err && cJSON_IsTrue(err), "is_error=true");
+        ASSERT(strcmp(json_str_field(j, "result"), CONV_INTERRUPTED_TOOL_RESULT) == 0,
+               "result text");
+        ASSERT(cJSON_GetObjectItem(j, "run_id") == NULL, "top-level: no run_id");
+        cJSON_Delete(j);
+    }
+    free(content);
+
+    /* Reconstruction yields a valid sequence: assistant + tool_call + tool. */
+    json_message *msgs = NULL;
+    int n = 0;
+    rc = conversation_reconstruct(path, &msgs, &n);
+    ASSERT(rc == EXIT_SUCCESS, "reconstruct success");
+    if (rc == EXIT_SUCCESS) {
+        ASSERT(n == 3, "user + assistant + tool message");
+        if (n == 3) {
+            ASSERT(strcmp(msgs[1].role, "assistant") == 0, "assistant role");
+            ASSERT(msgs[1].tool_call_count == 1, "tool call attached");
+            ASSERT(strcmp(msgs[2].role, "tool") == 0, "synthetic tool message");
+            ASSERT(strcmp(msgs[2].tool_call_id, "call_1") == 0, "tool_call_id");
+            ASSERT(strcmp(msgs[2].content, CONV_INTERRUPTED_TOOL_RESULT) == 0, "tool content");
+        }
+        conversation_free_messages(msgs, n);
+    }
+
+    remove(path);
+    free(path);
+}
+
+void test_open_repairs_dangling_scoped_tool_call(void) {
+    TEST("open repairs dangling scoped (subagent) tool_call with its scope");
+    char *path = NULL;
+    FILE *fp = tmp_file(&path);
+    ASSERT(fp != NULL, "tmp file");
+    fclose(fp);
+
+    append_raw(path, "{\"type\":\"tool_call\",\"id\":\"call_s\",\"name\":\"calc.mul\","
+                     "\"arguments\":\"{}\",\"mcp_server\":\"calc\","
+                     "\"depth\":1,\"subagent\":\"calc-agent\",\"run_id\":\"run-42\"}\n");
+
+    FILE *fp2 = NULL;
+    int rc = conversation_open(path, &fp2);
+    ASSERT(rc == EXIT_SUCCESS, "open succeeds");
+    if (fp2) fclose(fp2);
+
+    char *content = util_read_file(path);
+    ASSERT(content != NULL, "file readable");
+    char *last_nl = strrchr(content, '\n');
+    char *prev_nl = NULL;
+    if (last_nl != NULL) {
+        for (char *p = content; p < last_nl; p++) {
+            if (*p == '\n') prev_nl = p;
+        }
+    }
+    char *last_line = prev_nl ? prev_nl + 1 : content;
+    cJSON *j = cJSON_Parse(last_line);
+    ASSERT(j != NULL, "synthetic line is valid JSON");
+    if (j != NULL) {
+        ASSERT(strcmp(json_str_field(j, "type"), "tool_result") == 0, "type=tool_result");
+        ASSERT(strcmp(json_str_field(j, "call_id"), "call_s") == 0, "call_id matches");
+        ASSERT(strcmp(json_str_field(j, "run_id"), "run-42") == 0, "run_id preserved");
+        ASSERT(strcmp(json_str_field(j, "subagent"), "calc-agent") == 0, "subagent preserved");
+        cJSON *err = cJSON_GetObjectItem(j, "is_error");
+        ASSERT(err && cJSON_IsTrue(err), "is_error=true");
+        cJSON_Delete(j);
+    }
+    free(content);
+
+    remove(path);
+    free(path);
+}
+
+void test_open_leaves_complete_file_unchanged(void) {
+    TEST("open does not modify a well-formed file");
+    char *path = NULL;
+    FILE *fp = tmp_file(&path);
+    ASSERT(fp != NULL, "tmp file");
+    fclose(fp);
+
+    append_raw(path, "{\"type\":\"user\",\"content\":\"q\"}\n"
+                     "{\"type\":\"assistant\",\"content\":\"\",\"model\":\"m\"}\n"
+                     "{\"type\":\"tool_call\",\"id\":\"c1\",\"name\":\"t\","
+                     "\"arguments\":\"{}\",\"mcp_server\":\"s\"}\n"
+                     "{\"type\":\"tool_result\",\"call_id\":\"c1\",\"name\":\"t\","
+                     "\"result\":\"ok\",\"is_error\":false,\"is_timeout\":false,"
+                     "\"mcp_server\":\"s\"}\n");
+
+    char *before = util_read_file(path);
+    ASSERT(before != NULL, "read before");
+
+    FILE *fp2 = NULL;
+    int rc = conversation_open(path, &fp2);
+    ASSERT(rc == EXIT_SUCCESS, "open succeeds");
+    if (fp2) fclose(fp2);
+
+    char *after = util_read_file(path);
+    ASSERT(after != NULL, "read after");
+    ASSERT(strcmp(before, after) == 0, "file untouched");
+
+    free(before);
+    free(after);
     remove(path);
     free(path);
 }

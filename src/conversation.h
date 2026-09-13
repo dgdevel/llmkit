@@ -5,8 +5,24 @@
 #include <stdarg.h>
 
 /*
+ * Text recorded in a synthetic tool_result entry (is_error true) when a
+ * tool_call has no matching tool_result: the agent was interrupted before
+ * the tool returned. Used both by the repair pass at open time and by the
+ * SIGINT shutdown path for LLM tool calls that were never started.
+ */
+#define CONV_INTERRUPTED_TOOL_RESULT \
+    "Tool call interrupted: the run ended before this tool returned"
+
+/*
  * Open (or create) the conversation JSONL file for appending.
- * Validates UTF-8 on any existing content.  Returns EXIT_SUCCESS
+ * Before opening, an existing file is made safe to resume:
+ *   - a trailing partial line (no terminating '\n', i.e. a write torn by a
+ *     crash or kill) is trimmed from the file on disk;
+ *   - tool_call entries without a matching tool_result (top-level or inside
+ *     a subagent trace) get a synthetic tool_result with is_error true and
+ *     CONV_INTERRUPTED_TOOL_RESULT as the result text, so the reconstructed
+ *     history stays a valid request sequence for the LLM APIs.
+ * Also validates UTF-8 on the remaining content.  Returns EXIT_SUCCESS
  * or EXIT_FILE_ERR / EXIT_INTERNAL_ERR.
  */
 int conversation_open(const char *path, FILE **out_fp);

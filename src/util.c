@@ -104,7 +104,8 @@ void util_sha256(const char *data, size_t len, char *hex_out) {
     }
 }
 
-char *util_read_file(const char *path) {
+char *util_read_file_sized(const char *path, size_t *out_len) {
+    if (out_len != NULL) *out_len = 0;
     if (path == NULL) return NULL;
 
     FILE *fp = fopen(path, "rb");
@@ -138,7 +139,12 @@ char *util_read_file(const char *path) {
 
     fclose(fp);
     buf[size] = '\0';
+    if (out_len != NULL) *out_len = (size_t)size;
     return buf;
+}
+
+char *util_read_file(const char *path) {
+    return util_read_file_sized(path, NULL);
 }
 
 char *util_strdup(const char *s) {
