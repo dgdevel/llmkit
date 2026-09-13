@@ -7,6 +7,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <regex.h>
+#include <stdarg.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -52,8 +53,9 @@
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) " \
     "Chrome/124.0.0.0 Safari/537.36"
 
-const char *const TOOLS_BUILTIN_NAMES[] = {"online_search", "online_fetch", "file_scan",
-                                           "exec",          "exec_status",  NULL};
+const char *const TOOLS_BUILTIN_NAMES[] = {
+    "online_search", "online_fetch", "file_scan",   "exec",      "exec_status",
+    "sleep",         "file_read",    "file_create", "file_edit", NULL};
 
 /* ------------------------------------------------------------------ */
 /*  HTTP GET helper                                                    */
@@ -193,6 +195,29 @@ static cJSON *build_tool_text_result(const char *payload, bool is_error) {
         cJSON_AddFalseToObject(result, "isError");
     }
     return result;
+}
+
+/* Fetch an integer argument that may arrive as a JSON number or as a
+ * numeric string (line numbers circulate as text once an LLM copies
+ * them out of a file_read reply). Absent arguments return true with
+ * *out left at its initial value; present-but-non-numeric arguments
+ * return false. */
+static bool tool_int_arg(const cJSON *args, const char *name, long *out) {
+    cJSON *j = args ? cJSON_GetObjectItem(args, name) : NULL;
+    if (j == NULL || cJSON_IsNull(j)) return true;
+    if (cJSON_IsNumber(j)) {
+        *out = (long)j->valuedouble;
+        return true;
+    }
+    if (cJSON_IsString(j) && j->valuestring[0] != '\0') {
+        char *end = NULL;
+        long v = strtol(j->valuestring, &end, 10);
+        if (end != j->valuestring && *end == '\0') {
+            *out = v;
+            return true;
+        }
+    }
+    return false;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1272,8 +1297,996 @@ static int tool_exec_status(const cJSON *id_node, cJSON *args, char **out_resp) 
 }
 
 /* ------------------------------------------------------------------ */
-/*  Registry                                                           */
+/*  sleep                                                              */
 /* ------------------------------------------------------------------ */
+
+#define SLEEP_DESC "Wait for given seconds"
+
+/* Upper bound on a single sleep: the tools server is single-threaded,
+ * so a request blocks every other call while it runs. */
+#define TOOLS_SLEEP_MAX_SECONDS 60
+
+/* Sleep for the given number of seconds (fractions allowed). Returns a
+ * malloc'd "Slept for N seconds." reply, or NULL with *out_err set for
+ * an out-of-range request. Exported for tests. */
+char *tools_sleep(double seconds, char **out_err) {
+    *out_err = NULL;
+    if (seconds < 0.0 || seconds > (double)TOOLS_SLEEP_MAX_SECONDS) {
+        *out_err = util_strdup("sleep: 'seconds' must be between 0 and 60");
+        return NULL;
+    }
+    platform_sleep_ms((int64_t)((seconds * 1000.0) + 0.5));
+
+    char num[32];
+    if ((double)(long long)seconds == seconds) {
+        snprintf(num, sizeof(num), "%lld", (long long)seconds);
+    } else {
+        snprintf(num, sizeof(num), "%g", seconds);
+    }
+    util_growbuf out = {0};
+    util_growbuf_append_str(&out, "Slept for ");
+    util_growbuf_append_str(&out, num);
+    util_growbuf_append_str(&out, strcmp(num, "1") == 0 ? " second." : " seconds.");
+    return util_growbuf_release(&out);
+}
+
+static int tool_sleep(const cJSON *id_node, cJSON *args, char **out_resp) {
+    *out_resp = NULL;
+
+    /* Accept a JSON number or a numeric string, like exec_status's pid. */
+    cJSON *s_j = args ? cJSON_GetObjectItem(args, "seconds") : NULL;
+    double seconds = 0.0;
+    bool present = false;
+    if (s_j != NULL && cJSON_IsNumber(s_j)) {
+        seconds = s_j->valuedouble;
+        present = true;
+    } else if (s_j != NULL && cJSON_IsString(s_j) && s_j->valuestring[0] != '\0') {
+        char *end = NULL;
+        double v = strtod(s_j->valuestring, &end);
+        if (end != s_j->valuestring && *end == '\0') {
+            seconds = v;
+            present = true;
+        }
+    }
+    if (!present) {
+        *out_resp = srv_build_error(id_node, "sleep requires a number 'seconds' argument");
+        return EXIT_SUCCESS;
+    }
+
+    char *err = NULL;
+    char *text = tools_sleep(seconds, &err);
+    if (text == NULL) {
+        *out_resp = srv_build_error(id_node, err ? err : "Out of memory");
+        free(err);
+        return EXIT_SUCCESS;
+    }
+    cJSON *result = build_tool_text_result(text, false);
+    free(text);
+    if (result == NULL) return EXIT_INTERNAL_ERR;
+    *out_resp = srv_build_response(id_node, result, NULL);
+    return EXIT_SUCCESS;
+}
+
+/* ------------------------------------------------------------------ */
+/*  file tools: shared helpers                                         */
+/* ------------------------------------------------------------------ */
+
+#define FILE_READ_DESC "Read lines from a text file"
+
+#define FILE_CREATE_DESC "Create or overwrite a text file"
+
+#define FILE_EDIT_DESC "Replace old_string with new_string"
+
+/* Largest file the file tools will read or write. */
+#define TOOLS_FILE_MAX_BYTES (32 * 1024 * 1024)
+
+/* Bytes sniffed at the start of a file to tell text from binary (a NUL
+ * byte means binary), matching file_scan's rule. */
+#define TOOLS_FILE_SNIFF_BYTES 8192
+
+/* file_read page size: at most 2000 lines and 100000 characters are
+ * returned per call so a huge file cannot flood the LLM context. */
+#define TOOLS_READ_MAX_LINES 2000
+#define TOOLS_READ_MAX_CHARS 100000
+
+/* Longest relative path accepted from the file tools. */
+#define TOOLS_FILE_PATH_MAX 4096
+
+/* Format an error message prefixed with the tool name, in the style of
+ * file_scan's ("file_read: ..."). Returns a malloc'd string, or NULL
+ * only on OOM. */
+static char *tool_prefixed_err(const char *tool_name, const char *fmt, ...) {
+    char body[512];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(body, sizeof(body), fmt, ap);
+    va_end(ap);
+    size_t len = strlen(tool_name) + strlen(body) + 4;
+    char *out = malloc(len);
+    if (out != NULL) snprintf(out, len, "%s: %s", tool_name, body);
+    return out;
+}
+
+/* Validate a file tool's path argument and normalize it to a clean
+ * relative path: backslashes become separators, '.' and empty segments
+ * are dropped, and absolute paths, Windows drive prefixes and any '..'
+ * segment are rejected. Existing components are lstat'ed one by one so
+ * a symbolic link anywhere along the way is refused too: with absolute
+ * paths and '..' banned, no link means the path cannot leave the
+ * working directory. Returns a malloc'd clean path, or NULL with
+ * *out_err set. */
+static char *filetool_clean_path(const char *tool_name, const char *path, char **out_err) {
+    *out_err = NULL;
+
+    if (path[0] == '\0') {
+        *out_err = tool_prefixed_err(tool_name, "a non-empty 'filepath' is required");
+        return NULL;
+    }
+    if (path[0] == '/' || path[0] == '\\') {
+        *out_err = tool_prefixed_err(tool_name, "path must be relative to the working directory");
+        return NULL;
+    }
+    if (path[1] == ':' &&
+        ((path[0] >= 'a' && path[0] <= 'z') || (path[0] >= 'A' && path[0] <= 'Z'))) {
+        *out_err = tool_prefixed_err(tool_name, "path must be relative to the working directory");
+        return NULL;
+    }
+
+    char *copy = util_strdup(path);
+    if (copy == NULL) {
+        *out_err = util_strdup("Out of memory");
+        return NULL;
+    }
+    for (char *c = copy; *c != '\0'; c++) {
+        if (*c == '\\') *c = '/';
+    }
+
+    util_growbuf clean = {0};
+    char acc[TOOLS_FILE_PATH_MAX];
+    size_t acc_len = 0;
+    bool failed = false;
+    char *saveptr = NULL;
+    for (char *seg = strtok_r(copy, "/", &saveptr); seg != NULL && !failed;
+         seg = strtok_r(NULL, "/", &saveptr)) {
+        if (strcmp(seg, "..") == 0) {
+            *out_err = tool_prefixed_err(tool_name, "'..' is not allowed in the path");
+            failed = true;
+            break;
+        }
+        if (strcmp(seg, ".") == 0) continue;
+
+        /* Accumulate the cleaned prefix so every existing component can
+         * be checked for a symbolic link before the file is opened. */
+        size_t seg_len = strlen(seg);
+        if (acc_len + seg_len + 2 > sizeof(acc)) {
+            *out_err = tool_prefixed_err(tool_name, "path is too long");
+            failed = true;
+            break;
+        }
+        if (acc_len > 0) acc[acc_len++] = '/';
+        memcpy(acc + acc_len, seg, seg_len + 1);
+        acc_len += seg_len;
+        struct stat sb;
+        if (lstat(acc, &sb) == 0 && S_ISLNK(sb.st_mode)) {
+            *out_err = tool_prefixed_err(tool_name, "path traverses the symbolic link '%s'", seg);
+            failed = true;
+            break;
+        }
+
+        if (clean.len > 0) util_growbuf_append_str(&clean, "/");
+        util_growbuf_append_str(&clean, seg);
+    }
+    free(copy);
+
+    if (!failed && clean.len == 0) {
+        *out_err = tool_prefixed_err(tool_name, "a non-empty 'filepath' is required");
+        failed = true;
+    }
+    if (failed) {
+        util_growbuf_free(&clean);
+        if (*out_err == NULL) *out_err = util_strdup("Out of memory");
+        return NULL;
+    }
+    char *out = util_growbuf_release(&clean);
+    if (out == NULL) *out_err = util_strdup("Out of memory");
+    return out;
+}
+
+/* Count lines the way the file tools report them: one per '\n' plus a
+ * final line when the content does not end with one (empty content has
+ * 0 lines). */
+static long filetool_count_lines(const char *content, size_t len) {
+    long lines = 0;
+    for (size_t i = 0; i < len; i++) {
+        if (content[i] == '\n') lines++;
+    }
+    if (len > 0 && content[len - 1] != '\n') lines++;
+    return lines;
+}
+
+/* Read the whole regular file at rel (already cleaned by
+ * filetool_clean_path) into a NUL-terminated malloc'd buffer. Returns 0
+ * with the content and length filled on success, 0 with *out_binary set
+ * (and no content) when the file sniffs as binary, and -1 with *out_err
+ * set for a missing file, a non-regular file, an oversized file or an
+ * I/O error. */
+static int filetool_read_whole(const char *tool_name, const char *rel, char **out_content,
+                               size_t *out_len, bool *out_binary, char **out_err) {
+    *out_content = NULL;
+    *out_len = 0;
+    *out_binary = false;
+    *out_err = NULL;
+
+    struct stat sb;
+    if (lstat(rel, &sb) != 0) {
+        *out_err = tool_prefixed_err(tool_name, "cannot open '%s': %s", rel, strerror(errno));
+        return -1;
+    }
+    if (!S_ISREG(sb.st_mode)) {
+        *out_err = tool_prefixed_err(tool_name, "'%s' is not a regular file", rel);
+        return -1;
+    }
+    if ((unsigned long long)sb.st_size > TOOLS_FILE_MAX_BYTES) {
+        *out_err = tool_prefixed_err(tool_name, "'%s' is too large (over 32MiB)", rel);
+        return -1;
+    }
+
+    FILE *fp = fopen(rel, "rb");
+    if (fp == NULL) {
+        *out_err = tool_prefixed_err(tool_name, "cannot open '%s': %s", rel, strerror(errno));
+        return -1;
+    }
+    util_growbuf gb = {0};
+    char chunk[65536];
+    size_t n;
+    while ((n = fread(chunk, 1, sizeof(chunk), fp)) > 0) util_growbuf_append(&gb, chunk, n);
+    bool io_err = ferror(fp) != 0;
+    fclose(fp);
+    if (io_err) {
+        util_growbuf_free(&gb);
+        *out_err = tool_prefixed_err(tool_name, "read error on '%s'", rel);
+        return -1;
+    }
+
+    size_t len = gb.len;
+    char *buf = util_growbuf_release(&gb); /* NUL-terminated; NULL when empty */
+    if (buf == NULL) {
+        buf = util_strdup("");
+        if (buf == NULL) {
+            *out_err = util_strdup("Out of memory");
+            return -1;
+        }
+    }
+
+    size_t sniff = len < (size_t)TOOLS_FILE_SNIFF_BYTES ? len : (size_t)TOOLS_FILE_SNIFF_BYTES;
+    if (memchr(buf, '\0', sniff) != NULL) {
+        free(buf);
+        *out_binary = true;
+        return 0;
+    }
+    *out_content = buf;
+    *out_len = len;
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/*  file_read                                                          */
+/* ------------------------------------------------------------------ */
+
+/* Read a text file relative to the working directory and render the
+ * requested 1-based line range: line_offset <= 0 means line 1,
+ * lines_length <= 0 means TOOLS_READ_MAX_LINES, and at most 2000 lines
+ * and 100000 characters are returned per call. Paths escaping the
+ * working directory and symbolic links are refused (see
+ * filetool_clean_path), as are binary files. Returns a malloc'd report,
+ * or NULL with *out_err set. Exported for tests. */
+char *tools_file_read(const char *filepath, long line_offset, long lines_length, char **out_err) {
+    *out_err = NULL;
+    if (filepath == NULL || filepath[0] == '\0') {
+        *out_err = tool_prefixed_err("file_read", "a non-empty 'filepath' is required");
+        return NULL;
+    }
+    char *rel = filetool_clean_path("file_read", filepath, out_err);
+    if (rel == NULL) return NULL;
+
+    bool binary = false;
+    char *content = NULL;
+    size_t len = 0;
+    int rc = filetool_read_whole("file_read", rel, &content, &len, &binary, out_err);
+    if (rc != 0) {
+        free(rel);
+        if (*out_err == NULL) *out_err = util_strdup("Out of memory");
+        return NULL;
+    }
+    if (binary) {
+        free(rel);
+        return util_strdup("Read refused: binary file");
+    }
+
+    long total = filetool_count_lines(content, len);
+    if (line_offset <= 0) line_offset = 1;
+
+    char *result = NULL;
+    if (total == 0) {
+        /* An empty file: just the header, no content block. */
+        util_growbuf out = {0};
+        util_growbuf_append_str(&out, "File path: ");
+        util_growbuf_append_str(&out, rel);
+        char line[32];
+        snprintf(line, sizeof(line), "\nTotal lines: %ld\n", total);
+        util_growbuf_append_str(&out, line);
+        result = util_growbuf_release(&out);
+    } else if (line_offset > total) {
+        util_growbuf msg = {0};
+        char line[128];
+        snprintf(line, sizeof(line),
+                 "Read refused: line_offset %ld is beyond the end of the file (%ld lines)",
+                 line_offset, total);
+        util_growbuf_append_str(&msg, line);
+        result = util_growbuf_release(&msg);
+    } else {
+        long max_lines = lines_length <= 0 ? TOOLS_READ_MAX_LINES : lines_length;
+        if (max_lines > TOOLS_READ_MAX_LINES) max_lines = TOOLS_READ_MAX_LINES;
+        long to = line_offset + max_lines - 1;
+        if (to > total) to = total;
+
+        /* First pass: collect the content block under the character cap
+         * (the first requested line is always included, so the reported
+         * range always advances). */
+        util_growbuf body = {0};
+        long shown_from = 0;
+        long shown_to = 0;
+        long appended = 0;
+        size_t chars = 0;
+        bool truncated = false;
+        size_t pos = 0;
+        long lineno = 1;
+        while (pos < len && lineno <= to) {
+            char *nl = memchr(content + pos, '\n', len - pos);
+            size_t line_len = nl ? (size_t)(nl - (content + pos)) : len - pos;
+            if (lineno >= line_offset) {
+                size_t need = line_len + 1;
+                if (appended > 0 && chars + need > (size_t)TOOLS_READ_MAX_CHARS) {
+                    truncated = true;
+                    break;
+                }
+                util_growbuf_append(&body, content + pos, line_len);
+                util_growbuf_append_str(&body, "\n");
+                chars += need;
+                appended++;
+                if (appended == 1) shown_from = lineno;
+                shown_to = lineno;
+            }
+            lineno++;
+            pos += line_len + (nl ? 1 : 0);
+        }
+
+        util_growbuf out = {0};
+        char line[160];
+        util_growbuf_append_str(&out, "File path: ");
+        util_growbuf_append_str(&out, rel);
+        snprintf(line, sizeof(line), "\nTotal lines: %ld\n", total);
+        util_growbuf_append_str(&out, line);
+        snprintf(line, sizeof(line), "\n----- lines from %ld to %ld -----\n", shown_from, shown_to);
+        util_growbuf_append_str(&out, line);
+        if (body.buf != NULL) util_growbuf_append(&out, body.buf, body.len);
+        if (truncated) {
+            snprintf(line, sizeof(line),
+                     "[output truncated at %d characters; continue with line_offset %ld]",
+                     TOOLS_READ_MAX_CHARS, shown_to + 1);
+            util_growbuf_append_str(&out, line);
+        }
+        util_growbuf_free(&body);
+        result = util_growbuf_release(&out);
+    }
+    free(rel);
+    free(content);
+    return result;
+}
+
+static int tool_file_read(const cJSON *id_node, cJSON *args, char **out_resp) {
+    *out_resp = NULL;
+
+    cJSON *fp_j = args ? cJSON_GetObjectItem(args, "filepath") : NULL;
+    const char *filepath = (fp_j && cJSON_IsString(fp_j)) ? fp_j->valuestring : "";
+    if (filepath[0] == '\0') {
+        *out_resp = srv_build_error(id_node, "file_read requires a string 'filepath' argument");
+        return EXIT_SUCCESS;
+    }
+    long offset = 0;
+    long length = 0;
+    if (!tool_int_arg(args, "line_offset", &offset) ||
+        !tool_int_arg(args, "lines_length", &length)) {
+        *out_resp = srv_build_error(id_node,
+                                    "file_read: 'line_offset' and 'lines_length' must be integers");
+        return EXIT_SUCCESS;
+    }
+
+    char *err = NULL;
+    char *text = tools_file_read(filepath, offset, length, &err);
+    if (text == NULL) {
+        *out_resp = srv_build_error(id_node, err ? err : "Out of memory");
+        free(err);
+        return EXIT_SUCCESS;
+    }
+    cJSON *result = build_tool_text_result(text, false);
+    free(text);
+    if (result == NULL) return EXIT_INTERNAL_ERR;
+    *out_resp = srv_build_response(id_node, result, NULL);
+    return EXIT_SUCCESS;
+}
+
+/* ------------------------------------------------------------------ */
+/*  file_create                                                        */
+/* ------------------------------------------------------------------ */
+
+/* Create or overwrite a text file with content written verbatim, under
+ * the same path rules as tools_file_read. Returns a malloc'd "File
+ * created/overwritten: ... (N bytes, M lines)" reply, or NULL with
+ * *out_err set. Exported for tests. */
+char *tools_file_create(const char *filepath, const char *content, char **out_err) {
+    *out_err = NULL;
+    if (filepath == NULL || filepath[0] == '\0') {
+        *out_err = tool_prefixed_err("file_create", "a non-empty 'filepath' is required");
+        return NULL;
+    }
+    if (content == NULL) content = "";
+    char *rel = filetool_clean_path("file_create", filepath, out_err);
+    if (rel == NULL) {
+        if (*out_err == NULL) *out_err = util_strdup("Out of memory");
+        return NULL;
+    }
+
+    bool existed = false;
+    if (lstat(rel, &(struct stat){0}) == 0) existed = true;
+    FILE *fp = fopen(rel, "wb");
+    if (fp == NULL) {
+        *out_err = tool_prefixed_err("file_create", "cannot write '%s': %s", rel, strerror(errno));
+        free(rel);
+        return NULL;
+    }
+    size_t len = strlen(content);
+    bool failed = false;
+    if (len > 0 && fwrite(content, 1, len, fp) != len) failed = true;
+    if (fclose(fp) != 0) failed = true;
+    if (failed) {
+        *out_err = tool_prefixed_err("file_create", "write to '%s' failed", rel);
+        free(rel);
+        return NULL;
+    }
+
+    long lines = filetool_count_lines(content, len);
+    util_growbuf out = {0};
+    if (existed) {
+        util_growbuf_append_str(&out, "File overwritten: ");
+    } else {
+        util_growbuf_append_str(&out, "File created: ");
+    }
+    util_growbuf_append_str(&out, rel);
+    char tail[64];
+    snprintf(tail, sizeof(tail), " (%zu bytes, %ld %s)", len, lines, lines == 1 ? "line" : "lines");
+    util_growbuf_append_str(&out, tail);
+    free(rel);
+    return util_growbuf_release(&out);
+}
+
+static int tool_file_create(const cJSON *id_node, cJSON *args, char **out_resp) {
+    *out_resp = NULL;
+
+    cJSON *fp_j = args ? cJSON_GetObjectItem(args, "filepath") : NULL;
+    const char *filepath = (fp_j && cJSON_IsString(fp_j)) ? fp_j->valuestring : "";
+    cJSON *ct_j = args ? cJSON_GetObjectItem(args, "content") : NULL;
+    if (filepath[0] == '\0') {
+        *out_resp = srv_build_error(id_node, "file_create requires a string 'filepath' argument");
+        return EXIT_SUCCESS;
+    }
+    if (ct_j == NULL || !cJSON_IsString(ct_j)) {
+        *out_resp = srv_build_error(id_node, "file_create requires a string 'content' argument");
+        return EXIT_SUCCESS;
+    }
+
+    char *err = NULL;
+    char *text = tools_file_create(filepath, ct_j->valuestring, &err);
+    if (text == NULL) {
+        *out_resp = srv_build_error(id_node, err ? err : "Out of memory");
+        free(err);
+        return EXIT_SUCCESS;
+    }
+    cJSON *result = build_tool_text_result(text, false);
+    free(text);
+    if (result == NULL) return EXIT_INTERNAL_ERR;
+    *out_resp = srv_build_response(id_node, result, NULL);
+    return EXIT_SUCCESS;
+}
+
+/* ------------------------------------------------------------------ */
+/*  file_edit                                                          */
+/* ------------------------------------------------------------------ */
+
+/* How far (in lines) old_string may sit from the linefrom hint. */
+#define TOOLS_EDIT_TOLERANCE 3
+
+/* Tab stop used when measuring and re-anchoring indentation. */
+#define TOOLS_EDIT_TAB_WIDTH 4
+
+/* Whitespace-tolerant projection of a text, used to match old_string
+ * against a file without tripping over indentation: tabs, carriage
+ * returns and whitespace runs collapse to a single space, and each
+ * line's leading and trailing whitespace is dropped. Every byte of the
+ * normalized text remembers the raw offset it came from, so a match
+ * found here can be spliced back at raw precision. */
+typedef struct {
+    char *norm;  /* normalized text, NUL-terminated */
+    size_t *off; /* raw offset of each normalized byte */
+    size_t len;  /* normalized length in bytes */
+} edit_norm;
+
+static void edit_norm_free(edit_norm *en) {
+    free(en->norm);
+    free(en->off);
+    en->norm = NULL;
+    en->off = NULL;
+    en->len = 0;
+}
+
+/* Bytes of one UTF-8 sequence from the lead byte. The file tools never
+ * decode text; they only need raw offsets to line up, so invalid leads
+ * and stray continuation bytes count as single bytes. */
+static size_t edit_utf8_seq_len(unsigned char lead) {
+    if ((lead & 0xE0) == 0xC0) return 2;
+    if ((lead & 0xF0) == 0xE0) return 3;
+    if ((lead & 0xF8) == 0xF0) return 4;
+    return 1;
+}
+
+static bool edit_norm_build(const char *raw, size_t raw_len, edit_norm *out) {
+    out->norm = NULL;
+    out->off = NULL;
+    out->len = 0;
+
+    char *norm = malloc(raw_len + 1);
+    size_t *off = malloc((raw_len > 0 ? raw_len : 1) * sizeof(*off));
+    if (norm == NULL || off == NULL) {
+        free(norm);
+        free(off);
+        return false;
+    }
+
+    size_t n = 0;
+    bool line_has_content = false;
+    bool in_ws_run = false;
+    size_t ws_run_start = 0;
+    for (size_t i = 0; i < raw_len; i++) {
+        char c = raw[i];
+        if (c == '\n') {
+            norm[n] = '\n';
+            off[n] = i;
+            n++;
+            line_has_content = false;
+            in_ws_run = false;
+            continue;
+        }
+        if (c == ' ' || c == '\t' || c == '\r') {
+            if (line_has_content && !in_ws_run) {
+                ws_run_start = i;
+                in_ws_run = true;
+            }
+            continue;
+        }
+        if (in_ws_run) {
+            norm[n] = ' ';
+            off[n] = ws_run_start;
+            n++;
+            in_ws_run = false;
+        }
+        size_t seq = edit_utf8_seq_len((unsigned char)c);
+        if (seq > raw_len - i) seq = raw_len - i;
+        for (size_t k = 0; k < seq; k++) {
+            norm[n] = raw[i + k];
+            off[n] = i + k;
+            n++;
+        }
+        line_has_content = true;
+        i += seq - 1;
+    }
+    norm[n] = '\0';
+    out->norm = norm;
+    out->off = off;
+    out->len = n;
+    return true;
+}
+
+/* Display column reached after expanding s with tabs at
+ * TOOLS_EDIT_TAB_WIDTH stops. */
+static long edit_indent_cols(const char *s, size_t len) {
+    long col = 0;
+    for (size_t i = 0; i < len; i++) {
+        if (s[i] == '\t') {
+            col += TOOLS_EDIT_TAB_WIDTH - (col % TOOLS_EDIT_TAB_WIDTH);
+        } else {
+            col++;
+        }
+    }
+    return col;
+}
+
+/* Length of the leading whitespace (spaces, tabs, CRs) of s's first
+ * line. */
+static size_t edit_leading_ws_len(const char *s, size_t max) {
+    size_t i = 0;
+    while (i < max && (s[i] == ' ' || s[i] == '\t' || s[i] == '\r')) i++;
+    return i;
+}
+
+/* True when only whitespace precedes pos on its line. */
+static bool edit_starts_at_bol(const char *raw, size_t pos) {
+    size_t ls = pos;
+    while (ls > 0 && raw[ls - 1] != '\n') ls--;
+    for (size_t i = ls; i < pos; i++) {
+        if (raw[i] != ' ' && raw[i] != '\t' && raw[i] != '\r') return false;
+    }
+    return true;
+}
+
+/* True when only whitespace follows a match's end on its line. */
+static bool edit_ends_at_eol(const char *raw, size_t raw_len, size_t end) {
+    for (size_t i = end; i < raw_len && raw[i] != '\n'; i++) {
+        if (raw[i] != ' ' && raw[i] != '\t' && raw[i] != '\r') return false;
+    }
+    return true;
+}
+
+/* One raw line of a split string. */
+typedef struct {
+    const char *p;
+    size_t len;
+} edit_span;
+
+/* Split s into lines on '\n', dropping a trailing '\r' per line. "a\n"
+ * splits into "a" and "" so a trailing newline survives a round trip
+ * through the join. Returns a malloc'd array; NULL only on OOM. */
+static edit_span *edit_split_lines(const char *s, size_t slen, int *out_count) {
+    int count = 1;
+    for (size_t i = 0; i < slen; i++) {
+        if (s[i] == '\n') count++;
+    }
+    edit_span *spans = malloc((size_t)count * sizeof(*spans));
+    if (spans == NULL) return NULL;
+
+    int n = 0;
+    size_t start = 0;
+    for (size_t i = 0; i <= slen; i++) {
+        if (i == slen || s[i] == '\n') {
+            size_t len = i - start;
+            if (len > 0 && s[start + len - 1] == '\r') len--;
+            spans[n].p = s + start;
+            spans[n].len = len;
+            n++;
+            start = i + 1;
+        }
+    }
+    *out_count = n;
+    return spans;
+}
+
+/* Replace old_string with new_string in a text file, searching within
+ * TOOLS_EDIT_TOLERANCE lines of the 1-based linefrom hint. Matching is
+ * whitespace-tolerant (see edit_norm_build). The replacement is
+ * re-indented by the difference between the file's and old_string's
+ * first-line indentation, so an old_string written with sloppy
+ * indentation still lands with the file's own indentation; tab-based
+ * indentation is preserved when the replacement needs no shift.
+ * Returns "Edit accepted" on success; refusals come back as text
+ * ("Edit refused: old_string not found" / "Edit refused: old_string
+ * found at line N"). Returns NULL with *out_err set for path guards
+ * and I/O errors. Exported for tests. */
+char *tools_file_edit(const char *filepath, long linefrom, const char *old_string,
+                      const char *new_string, char **out_err) {
+    *out_err = NULL;
+    if (filepath == NULL || filepath[0] == '\0') {
+        *out_err = tool_prefixed_err("file_edit", "a non-empty 'filepath' is required");
+        return NULL;
+    }
+    if (old_string == NULL || old_string[0] == '\0') {
+        *out_err = tool_prefixed_err("file_edit", "a non-empty 'old_string' is required");
+        return NULL;
+    }
+    if (new_string == NULL) new_string = "";
+    if (linefrom < 1) {
+        *out_err = tool_prefixed_err("file_edit", "'linefrom' must be a 1-based line number");
+        return NULL;
+    }
+
+    char *rel = filetool_clean_path("file_edit", filepath, out_err);
+    if (rel == NULL) {
+        if (*out_err == NULL) *out_err = util_strdup("Out of memory");
+        return NULL;
+    }
+
+    bool binary = false;
+    char *content = NULL;
+    size_t content_len = 0;
+    if (filetool_read_whole("file_edit", rel, &content, &content_len, &binary, out_err) != 0) {
+        free(rel);
+        if (*out_err == NULL) *out_err = util_strdup("Out of memory");
+        return NULL;
+    }
+    if (binary) {
+        free(rel);
+        return util_strdup("Edit refused: binary file");
+    }
+
+    edit_norm nc;
+    edit_norm no;
+    if (!edit_norm_build(content, content_len, &nc) ||
+        !edit_norm_build(old_string, strlen(old_string), &no)) {
+        edit_norm_free(&nc);
+        edit_norm_free(&no);
+        free(content);
+        free(rel);
+        *out_err = util_strdup("Out of memory");
+        return NULL;
+    }
+    if (no.len == 0) {
+        edit_norm_free(&nc);
+        edit_norm_free(&no);
+        free(content);
+        free(rel);
+        *out_err = tool_prefixed_err("file_edit", "'old_string' contains no visible text");
+        return NULL;
+    }
+
+    /* One pass over the normalized content: remember the first
+     * occurrence anywhere (for the out-of-range refusal) and the
+     * occurrence closest to linefrom within the tolerance window. */
+    bool in_range = false;
+    long best_dist = 0;
+    long best_line = 0;
+    size_t best_idx = 0;
+    bool any = false;
+    long first_line = 0;
+    const char *hay = nc.norm;
+    const char *q = hay;
+    for (;;) {
+        const char *hit = strstr(q, no.norm);
+        if (hit == NULL) break;
+        size_t idx = (size_t)(hit - hay);
+        long line = 1;
+        for (size_t i = 0; i < idx; i++) {
+            if (hay[i] == '\n') line++;
+        }
+        if (!any) {
+            any = true;
+            first_line = line;
+        }
+        long dist = line > linefrom ? line - linefrom : linefrom - line;
+        if (dist <= TOOLS_EDIT_TOLERANCE &&
+            (!in_range || dist < best_dist || (dist == best_dist && line < best_line))) {
+            in_range = true;
+            best_dist = dist;
+            best_line = line;
+            best_idx = idx;
+        }
+        q = hit + 1;
+    }
+
+    char *result = NULL;
+    if (!in_range) {
+        if (any) {
+            char msg[64];
+            snprintf(msg, sizeof(msg), "Edit refused: old_string found at line %ld", first_line);
+            result = util_strdup(msg);
+        } else {
+            result = util_strdup("Edit refused: old_string not found");
+        }
+        edit_norm_free(&nc);
+        edit_norm_free(&no);
+        free(content);
+        free(rel);
+        return result;
+    }
+
+    /* Raw span of the match and its shape: whether it starts after only
+     * indentation (a whole-line match, whose leading whitespace stays
+     * in the file) and ends before only whitespace. A match whose
+     * old_string ends with a newline consumes the line terminator
+     * itself, which counts as ending the line. */
+    size_t rs = nc.off[best_idx];
+    size_t re = nc.off[best_idx + no.len - 1] + 1;
+    bool bol = edit_starts_at_bol(content, rs);
+    bool match_ends_nl = no.norm[no.len - 1] == '\n';
+    bool eol = edit_ends_at_eol(content, content_len, re);
+    if (match_ends_nl) eol = true;
+
+    /* Re-anchoring delta: the display column where the match starts
+     * minus old_string's own first-line indentation. A model that
+     * quotes the file's indentation gets delta 0 (its new_string is
+     * used as-is); a model that strips indentation gets the replacement
+     * shifted onto the file's indentation. */
+    size_t line_start = rs;
+    while (line_start > 0 && content[line_start - 1] != '\n') line_start--;
+    long ref_cols = edit_indent_cols(content + line_start, rs - line_start);
+    size_t old_ws = edit_leading_ws_len(old_string, strlen(old_string));
+    long delta = ref_cols - edit_indent_cols(old_string, old_ws);
+
+    /* Only whole-line matches are re-indented: a match that starts
+     * mid-line keeps new_string verbatim, and a match that ends
+     * mid-line keeps its last replacement line verbatim so any text
+     * after the match stays attached. */
+    bool crlf = false;
+    for (size_t i = 1; i < content_len; i++) {
+        if (content[i] == '\n' && content[i - 1] == '\r') {
+            crlf = true;
+            break;
+        }
+    }
+
+    int nlines = 0;
+    edit_span *spans = edit_split_lines(new_string, strlen(new_string), &nlines);
+    if (spans == NULL) {
+        edit_norm_free(&nc);
+        edit_norm_free(&no);
+        free(content);
+        free(rel);
+        *out_err = util_strdup("Out of memory");
+        return NULL;
+    }
+
+    const char *newline = "\n";
+    if (crlf) newline = "\r\n";
+
+    util_growbuf repl = {0};
+    for (int i = 0; i < nlines; i++) {
+        const char *lp = spans[i].p;
+        size_t ll = spans[i].len;
+        bool shift;
+        if (!bol) {
+            shift = false;
+        } else if (nlines == 1) {
+            shift = eol;
+        } else if (i == 0) {
+            shift = true;
+        } else if (i == nlines - 1) {
+            shift = eol;
+        } else {
+            shift = true;
+        }
+
+        if (i > 0) util_growbuf_append_str(&repl, newline);
+        if (!shift) {
+            util_growbuf_append(&repl, lp, ll);
+            continue;
+        }
+
+        /* The first replacement line is spliced after the file line's
+         * own indentation, so that much of its target indent is already
+         * in place; later lines start fresh after a newline. */
+        size_t ws = edit_leading_ws_len(lp, ll);
+        long target = edit_indent_cols(lp, ws) + delta;
+        if (target < 0) target = 0;
+        long emit_cols = i == 0 ? target - ref_cols : target;
+        if (emit_cols < 0) emit_cols = 0;
+        for (long c = 0; c < emit_cols; c++) util_growbuf_append_str(&repl, " ");
+        util_growbuf_append(&repl, lp + ws, ll - ws);
+    }
+
+    /* Whole-line matches splice at line boundaries, so no edit leaves a
+     * half-consumed line behind: a deletion takes the line's indentation
+     * and terminator with it, a replacement ending with a newline takes
+     * over the line's own terminator, and a replacement replacing a
+     * newline-terminated old_string without one of its own restores the
+     * terminator. */
+    bool repl_ends_nl = false;
+    if (nlines >= 2 && spans[nlines - 1].len == 0) repl_ends_nl = true;
+    if (bol && (eol || match_ends_nl)) {
+        if (repl.len == 0) {
+            rs = line_start;
+            if (!match_ends_nl) {
+                while (re < content_len &&
+                       (content[re] == ' ' || content[re] == '\t' || content[re] == '\r')) {
+                    re++;
+                }
+                if (re < content_len && content[re] == '\n') re++;
+            }
+        } else if (match_ends_nl && !repl_ends_nl) {
+            util_growbuf_append_str(&repl, newline);
+        } else if (!match_ends_nl && repl_ends_nl) {
+            while (re < content_len &&
+                   (content[re] == ' ' || content[re] == '\t' || content[re] == '\r')) {
+                re++;
+            }
+            if (re < content_len && content[re] == '\n') re++;
+        }
+    }
+
+    size_t repl_len = repl.len;
+    size_t new_len = rs + repl_len + (content_len - re);
+    char *updated = malloc(new_len + 1);
+    if (updated == NULL) {
+        free(spans);
+        util_growbuf_free(&repl);
+        edit_norm_free(&nc);
+        edit_norm_free(&no);
+        free(content);
+        free(rel);
+        *out_err = util_strdup("Out of memory");
+        return NULL;
+    }
+    memcpy(updated, content, rs);
+    if (repl_len > 0) memcpy(updated + rs, repl.buf, repl_len);
+    memcpy(updated + rs + repl_len, content + re, content_len - re);
+    updated[new_len] = '\0';
+
+    bool failed = false;
+    FILE *fp = fopen(rel, "wb");
+    if (fp == NULL) {
+        *out_err = tool_prefixed_err("file_edit", "cannot write '%s': %s", rel, strerror(errno));
+        failed = true;
+    } else {
+        if (new_len > 0 && fwrite(updated, 1, new_len, fp) != new_len) failed = true;
+        if (fclose(fp) != 0) failed = true;
+        if (failed && *out_err == NULL) {
+            *out_err = tool_prefixed_err("file_edit", "write to '%s' failed", rel);
+        }
+    }
+
+    free(updated);
+    free(spans);
+    util_growbuf_free(&repl);
+    edit_norm_free(&nc);
+    edit_norm_free(&no);
+    free(content);
+    free(rel);
+
+    if (failed) {
+        free(result);
+        return NULL;
+    }
+    result = util_strdup("Edit accepted");
+    return result;
+}
+
+static int tool_file_edit(const cJSON *id_node, cJSON *args, char **out_resp) {
+    *out_resp = NULL;
+
+    cJSON *fp_j = args ? cJSON_GetObjectItem(args, "filepath") : NULL;
+    const char *filepath = (fp_j && cJSON_IsString(fp_j)) ? fp_j->valuestring : "";
+    cJSON *old_j = args ? cJSON_GetObjectItem(args, "old_string") : NULL;
+    const char *old_string = (old_j && cJSON_IsString(old_j)) ? old_j->valuestring : "";
+    cJSON *new_j = args ? cJSON_GetObjectItem(args, "new_string") : NULL;
+    const char *new_string = (new_j && cJSON_IsString(new_j)) ? new_j->valuestring : "";
+    if (filepath[0] == '\0') {
+        *out_resp = srv_build_error(id_node, "file_edit requires a string 'filepath' argument");
+        return EXIT_SUCCESS;
+    }
+    if (old_j == NULL || !cJSON_IsString(old_j)) {
+        *out_resp = srv_build_error(id_node, "file_edit requires a string 'old_string' argument");
+        return EXIT_SUCCESS;
+    }
+    if (new_j == NULL || !cJSON_IsString(new_j)) {
+        *out_resp = srv_build_error(id_node, "file_edit requires a string 'new_string' argument");
+        return EXIT_SUCCESS;
+    }
+    long linefrom = 0;
+    if (!tool_int_arg(args, "linefrom", &linefrom) || linefrom < 1) {
+        *out_resp =
+            srv_build_error(id_node, "file_edit requires a positive integer 'linefrom' argument");
+        return EXIT_SUCCESS;
+    }
+
+    char *err = NULL;
+    char *text = tools_file_edit(filepath, linefrom, old_string, new_string, &err);
+    if (text == NULL) {
+        *out_resp = srv_build_error(id_node, err ? err : "Out of memory");
+        free(err);
+        return EXIT_SUCCESS;
+    }
+    cJSON *result = build_tool_text_result(text, false);
+    free(text);
+    if (result == NULL) return EXIT_INTERNAL_ERR;
+    *out_resp = srv_build_response(id_node, result, NULL);
+    return EXIT_SUCCESS;
+}
 
 typedef struct {
     const char *name;
@@ -1335,12 +2348,55 @@ static char *exec_status_schema(void) {
     return build_tool_schema(props, 3, required, 1);
 }
 
+static char *sleep_schema(void) {
+    const char *props[] = {
+        "seconds",
+        "number",
+        "",
+    };
+    const char *required[] = {"seconds"};
+    return build_tool_schema(props, 3, required, 1);
+}
+
+static char *file_read_schema(void) {
+    const char *props[] = {
+        "filepath",     "string",  "",
+        "line_offset",  "integer", "1-based first line to read",
+        "lines_length", "integer", "number of lines to read",
+    };
+    const char *required[] = {"filepath"};
+    return build_tool_schema(props, 9, required, 1);
+}
+
+static char *file_create_schema(void) {
+    const char *props[] = {
+        "filepath", "string", "", "content", "string", "full content written to the file",
+    };
+    const char *required[] = {"filepath", "content"};
+    return build_tool_schema(props, 6, required, 2);
+}
+
+static char *file_edit_schema(void) {
+    const char *props[] = {
+        "filepath",   "string",  "",
+        "linefrom",   "integer", "1-based line where old_string is expected",
+        "old_string", "string",  "text to replace",
+        "new_string", "string",  "replacement text",
+    };
+    const char *required[] = {"filepath", "linefrom", "old_string", "new_string"};
+    return build_tool_schema(props, 12, required, 4);
+}
+
 static const builtin_tool TOOLS[] = {
     {"online_search", SEARCH_DESC, search_schema, tool_online_search},
     {"online_fetch", FETCH_DESC, fetch_schema, tool_online_fetch},
     {"file_scan", SCAN_DESC, file_scan_schema, tool_file_scan},
     {"exec", EXEC_DESC, exec_schema, tool_exec},
     {"exec_status", EXEC_STATUS_DESC, exec_status_schema, tool_exec_status},
+    {"sleep", SLEEP_DESC, sleep_schema, tool_sleep},
+    {"file_read", FILE_READ_DESC, file_read_schema, tool_file_read},
+    {"file_create", FILE_CREATE_DESC, file_create_schema, tool_file_create},
+    {"file_edit", FILE_EDIT_DESC, file_edit_schema, tool_file_edit},
     {NULL, NULL, NULL, NULL},
 };
 

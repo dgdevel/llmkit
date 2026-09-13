@@ -7,7 +7,7 @@ LLMKIT is a lightweight C CLI tool with three modes of operation:
 - **`llmkit agent`** — Runs an LLM conversation loop with MCP tool support. Reads a YAML config, loads conversation history from JSONL, calls the LLM API, executes MCP tool calls, and writes results back to the JSONL file.
 - **`llmkit proxy`** — Runs an MCP proxy server that fronts one or more backend MCP servers, providing namespace isolation, rename/redefine, and whitelist/blacklist filtering over a single MCP endpoint (stdio or HTTP).
 - **`llmkit gateway`** — Runs an MCP gateway server that fronts one or more backend MCP servers but exposes only two tools: `discover(query)` uses the LLM to select the backend tools matching a natural-language query and returns their full specs (keyword fallback when the LLM is unreachable); `invoke(name, arguments)` forwards the call to the backend tool. Serves stdio or HTTP.
-- **`llmkit mcp`** — Runs an MCP server exposing llmkit's built-in tools (`online_search`, `online_fetch`, `file_scan`) selected with a comma-separated command-line list, no config file required. Serves stdio or HTTP like proxy/gateway.
+- **`llmkit mcp`** — Runs an MCP server exposing llmkit's built-in tools (`online_search`, `online_fetch`, `file_scan`, `exec`, `exec_status`, `sleep`, `file_read`, `file_create`, `file_edit`) selected with a comma-separated command-line list, no config file required. Serves stdio or HTTP like proxy/gateway.
 - **`llmkit response`** — Reads a conversation JSONL file and prints the last assistant response content to stdout. Used to extract the final LLM answer from a completed conversation.
 
 The binary is statically linked, has zero runtime language dependencies, and targets Linux, macOS, and Windows (via MinGW-w64 cross-compilation).
@@ -26,7 +26,8 @@ src/
 ├── gateway.c           — MCP gateway server (discover/invoke only)
 ├── gateway.h
 ├── tools.c             — Built-in tools MCP server (online_search,
-├── tools.h               online_fetch, file_scan)
+├── tools.h               online_fetch, file_scan, exec, exec_status,
+│                          sleep, file_read, file_create, file_edit)
 ├── htmlmd.c            — HTML-to-markdown converter with simplified
 ├── htmlmd.h              readability pass
 ├── srv.c               — Shared MCP server plumbing (response builders,
@@ -255,8 +256,10 @@ Code shared verbatim by `proxy` and `gateway` so both serve MCP identically:
 
 `llmkit mcp <tools> [-l host:port]` serves MCP over stdio/HTTP (via `srv_serve`,
 no config file needed) exposing only built-in tools implemented inside llmkit.
-`<tools>` is a comma-separated subset of `online_search,online_fetch,file_scan`;
-unknown or duplicate names exit with code 2.
+`<tools>` is a comma-separated subset of
+`online_search,online_fetch,file_scan,exec,exec_status,sleep,file_read,file_create,file_edit`;
+unknown or duplicate names exit with code 2 (enabling `exec` auto-enables
+`exec_status`).
 
 | Function | Purpose |
 |----------|---------|
@@ -266,6 +269,8 @@ unknown or duplicate names exit with code 2.
 | `static int http_get(...)` | libcurl GET: follows redirects, browser User-Agent, transparent gzip, 30 s timeout, 32 MiB download cap; copies Content-Type before handle cleanup. |
 | `static int tool_online_search(...) / tool_online_fetch(...) / tool_file_scan(...)` | tools/call implementations returning MCP text content; missing arguments are JSON-RPC errors, runtime failures are `isError:true` content. |
 | `char *tools_file_scan(const char *glob_pattern, const char *lines_regex, char **out_err)` | file_scan core (exported for tests): parses the glob into `/`-separated segments, walks the working directory pruning by segment, renders/sorts/dedupes records and applies the 20-record cap. |
+| `static char *filetool_clean_path(tool_name, path, out_err)` | Shared file-tool path guard: backslashes normalize to separators, `.`/empty segments drop, absolute paths, Windows drive prefixes and any `..` segment are rejected, and every existing component is `lstat`ed so a symbolic link anywhere along the way is refused — with `..` and absolute paths banned, no link means the path cannot leave the working directory. |
+| `static int filetool_read_whole(...)` | Shared whole-file reader: regular files only, 32 MiB cap, NUL sniff in the first 8 KiB flags binary. |
 | `char *htmlmd_convert(const char *html)` | Full HTML → markdown pipeline (see below). |
 | `htmlmd_match *htmlmd_find_by_class(...)` | Finds elements by class token with their text content and one attribute (used by the DDG parser). |
 
@@ -302,6 +307,54 @@ optional `Matching lines:`; records are sorted by path and separated by
 blank lines. More than 20 matches truncate the list with a
 `<N> more files matching` note; zero matches return
 `No files matching: <glob>`.
+
+**`sleep(seconds)`:** waits via `platform_sleep_ms` (fractions allowed),
+then replies `Slept for <seconds> seconds.` Values outside 0..60 are
+JSON-RPC errors (the server is single-threaded, so a sleep blocks every
+other call).
+
+**`file_read(filepath, line_offset, lines_length)`:** resolves `filepath`
+through `filetool_clean_path`, refuses binary files with the text
+`Read refused: binary file`, and renders `File path: <path>`,
+`Total lines: <N>`, a blank line, `----- lines from <X> to <Y> -----` and
+the content (one line per line, 1-based inclusive range; an empty file
+returns only the header). `line_offset` defaults to 1, `lines_length` to
+2000 (also the max); at most 100000 characters are returned per call —
+the first requested line is always included, and the truncation note
+`[output truncated at 100000 characters; continue with line_offset <N>]`
+names the next page. An offset past EOF returns
+`Read refused: line_offset <N> is beyond the end of the file (<M> lines)`.
+Integer arguments may arrive as JSON numbers or numeric strings.
+
+**`file_create(filepath, content)`:** resolves the path through
+`filetool_clean_path` (an existing symlink is refused, so an overwrite
+cannot be redirected outside the working directory) and writes `content`
+verbatim with `fopen(..., "wb")`. The reply is
+`File created: <path> (N bytes, M lines)` or `File overwritten: ...`
+when the file already existed.
+
+**`file_edit(filepath, linefrom, old_string, new_string)`:** reads the
+file (binary files return the text `Edit refused: binary file`) and
+builds a whitespace-tolerant projection of both the content and
+`old_string`: tabs, CRs and whitespace runs collapse to a single space,
+each line's leading/trailing whitespace is dropped, and every normalized
+byte remembers its raw offset. `old_string` is searched in the
+projection; occurrences starting within 3 lines of `linefrom` are
+eligible, the closest wins. None in range →
+`Edit refused: old_string found at line <N>` (first occurrence anywhere);
+not present at all → `Edit refused: old_string not found`; found → the
+raw span is spliced out and `new_string` spliced in, replying
+`Edit accepted`. Indentation fixing: the re-anchoring delta is the
+match's display column (tabs at 4) minus `old_string`'s first-line
+indentation, applied to every replacement line — a model quoting the
+file's indentation gets delta 0 (its text passes through, tabs kept),
+a model stripping indentation gets the replacement shifted onto the
+file's indentation. Matches that start mid-line keep `new_string`
+verbatim; whole-line matches splice at line boundaries (a deletion takes
+the indentation and terminator with it, a replacement ending with a
+newline takes over the terminator, and one replacing a
+newline-terminated `old_string` without a trailing newline restores the
+terminator). Only a successful search rewrites the file.
 
 **`htmlmd_convert` pipeline:** (1) parse into a minimal DOM — forgiving
 parser with implicit closes (`li`, `p`, `tr`, `td`), quoted/unquoted

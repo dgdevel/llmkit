@@ -25,6 +25,16 @@ HTTP server, validating:
   - exec_status answers for background commands: running pids report
     their uptime, killed pids report 128+signal with the output section,
     unknown pids get a plain answer
+  - sleep waits at least the requested seconds, replies "Slept for ...",
+    rejects values past the 60 second cap and non-numeric arguments
+  - file_create creates/overwrites files and reports byte and line
+    counts; file_read renders the "File path / Total lines / ----- lines
+    from X to Y -----" report, accepts numeric-string offsets, refuses
+    offsets past EOF and binary files; file_edit applies whitespace-
+    tolerant replacements ("Edit accepted") and refuses out-of-range or
+    missing old_strings with the exact refusal strings
+  - file tool paths escaping the working directory ('..', absolute) are
+    JSON-RPC errors
   - unknown tools and unknown methods are JSON-RPC errors
   - notifications get no reply; ping answers {}
   - HTTP listen mode serves the same protocol
@@ -482,6 +492,168 @@ def test_exec():
     shutil.rmtree(root, ignore_errors=True)
 
 
+def test_file_tools():
+    print("file_read / file_create / file_edit (stdio):")
+    root = tempfile.mkdtemp(prefix="llmkit_files_")
+
+    def call(tool, args, rid=1):
+        return run_tools([tool], [
+            {"jsonrpc": "2.0", "id": rid, "method": "tools/call",
+             "params": {"name": tool, "arguments": args}},
+        ], cwd=root)
+
+    try:
+        rc, responses = run_tools(["file_read,file_create,file_edit,sleep"], [
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+        ])
+        listing = resp_for(responses, 1)
+        names = [t["name"] for t in listing.get("result", {}).get("tools", [])]
+        check("file tools listed",
+              names == ["sleep", "file_read", "file_create", "file_edit"], f"{names}")
+        schemas = {t["name"]: t.get("inputSchema", {}) for t in
+                   listing.get("result", {}).get("tools", [])}
+        check("file_read requires filepath",
+              schemas.get("file_read", {}).get("required") == ["filepath"], f"{schemas}")
+        check("file_create requires filepath and content",
+              schemas.get("file_create", {}).get("required") == ["filepath", "content"],
+              f"{schemas}")
+        check("file_edit requires all four arguments",
+              schemas.get("file_edit", {}).get("required") ==
+              ["filepath", "linefrom", "old_string", "new_string"], f"{schemas}")
+        check("file_read exposes optional range args",
+              "line_offset" in schemas.get("file_read", {}).get("properties", {}) and
+              "lines_length" in schemas.get("file_read", {}).get("properties", {}), f"{schemas}")
+
+        # file_create + file_read round trip.
+        rc, responses = call("file_create",
+                             {"filepath": "hello.txt", "content": "one\ntwo\nthree\n"})
+        text = text_of(resp_for(responses, 1))
+        check("create reply counts bytes and lines",
+              text == "File created: hello.txt (14 bytes, 3 lines)", repr(text))
+
+        rc, responses = call("file_create",
+                             {"filepath": "hello.txt", "content": "one\ntwo\nthree\n"})
+        text = text_of(resp_for(responses, 1))
+        check("overwrite reply", text.startswith("File overwritten: hello.txt"), repr(text))
+
+        rc, responses = call("file_read", {"filepath": "hello.txt"})
+        text = text_of(resp_for(responses, 1))
+        check("read report format",
+              text == "File path: hello.txt\nTotal lines: 3\n\n"
+                      "----- lines from 1 to 3 -----\none\ntwo\nthree\n", repr(text))
+
+        rc, responses = call("file_read",
+                             {"filepath": "hello.txt", "line_offset": 2, "lines_length": 1})
+        text = text_of(resp_for(responses, 1))
+        check("read range is 1-based inclusive",
+              "----- lines from 2 to 2 -----\ntwo\n" in text, repr(text))
+        check("total lines covers the whole file", "Total lines: 3" in text, repr(text))
+
+        rc, responses = call("file_read", {"filepath": "hello.txt", "line_offset": "2"})
+        text = text_of(resp_for(responses, 1))
+        check("numeric string offset accepted", "lines from 2 to 3" in text, repr(text))
+
+        rc, responses = call("file_read", {"filepath": "hello.txt", "line_offset": 99})
+        text = text_of(resp_for(responses, 1))
+        check("offset past EOF refused",
+              "Read refused: line_offset 99 is beyond the end of the file (3 lines)" in text,
+              repr(text))
+
+        with open(os.path.join(root, "bin.dat"), "wb") as f:
+            f.write(b"AB\x00CD\n")
+        rc, responses = call("file_read", {"filepath": "bin.dat"})
+        check("binary read refused", text_of(resp_for(responses, 1)) == "Read refused: binary file",
+              repr(text_of(resp_for(responses, 1))))
+
+        for bad in ["../escape.txt", "/etc/passwd"]:
+            rc, responses = call("file_read", {"filepath": bad})
+            check(f"read rejects {bad}", "error" in resp_for(responses, 1),
+                  f"{resp_for(responses, 1)}")
+        rc, responses = call("file_create", {"filepath": "../escape.txt", "content": "x"})
+        check("create rejects '..'", "error" in resp_for(responses, 1), f"{resp_for(responses, 1)}")
+
+        # file_edit: whitespace-tolerant match and re-indentation.
+        code = "int main(void) {\n    int x = 1;\n    int y = 2;\n    return x + y;\n}\n"
+        rc, responses = call("file_create", {"filepath": "code.c", "content": code})
+        rc, responses = call("file_edit", {"filepath": "code.c", "linefrom": 2,
+                                           "old_string": "int x = 1;", "new_string": "int x = 42;"})
+        text = text_of(resp_for(responses, 1))
+        check("edit accepted", text == "Edit accepted", repr(text))
+
+        rc, responses = call("file_read",
+                             {"filepath": "code.c", "line_offset": 2, "lines_length": 1})
+        text = text_of(resp_for(responses, 1))
+        check("edit re-indented to the file", "    int x = 42;" in text, repr(text))
+
+        rc, responses = call("file_edit", {"filepath": "code.c", "linefrom": 20,
+                                           "old_string": "return x + y;", "new_string": "return 0;"})
+        text = text_of(resp_for(responses, 1))
+        check("out-of-range edit refused with the real line",
+              text == "Edit refused: old_string found at line 4", repr(text))
+
+        rc, responses = call("file_edit", {"filepath": "code.c", "linefrom": 1,
+                                           "old_string": "definitely not here",
+                                           "new_string": "x"})
+        text = text_of(resp_for(responses, 1))
+        check("missing old_string refused", text == "Edit refused: old_string not found",
+              repr(text))
+
+        rc, responses = call("file_edit", {"filepath": "nope.c", "linefrom": 1,
+                                           "old_string": "a", "new_string": "b"})
+        check("edit of a missing file is an error", "error" in resp_for(responses, 1),
+              f"{resp_for(responses, 1)}")
+
+        rc, responses = call("file_edit", {"filepath": "code.c",
+                                           "old_string": "a", "new_string": "b"})
+        check("edit without linefrom is an error", "error" in resp_for(responses, 1),
+              f"{resp_for(responses, 1)}")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_sleep():
+    print("sleep:")
+    import time
+
+    def call(seconds, rid=1):
+        return run_tools(["sleep"], [
+            {"jsonrpc": "2.0", "id": rid, "method": "tools/call",
+             "params": {"name": "sleep", "arguments": {"seconds": seconds}}},
+        ])
+
+    start = time.monotonic()
+    rc, responses = call(1)
+    elapsed = time.monotonic() - start
+    resp = resp_for(responses, 1)
+    check("sleep answered", resp is not None and resp.get("result", {}).get("isError") is False,
+          f"{resp}")
+    check("sleep 1 waited at least a second", elapsed >= 1.0, f"elapsed={elapsed:.2f}s")
+    check("sleep reply", text_of(resp) == "Slept for 1 second.", repr(text_of(resp)))
+
+    rc, responses = call(0)
+    check("sleep 0 replies at once", text_of(resp_for(responses, 1)) == "Slept for 0 seconds.",
+          repr(text_of(resp_for(responses, 1))))
+
+    rc, responses = call("0.2")
+    check("numeric string seconds accepted",
+          resp_for(responses, 1).get("result", {}).get("isError") is False, f"{resp_for(responses, 1)}")
+
+    rc, responses = call(61)
+    check("sleep past the cap is an error", "error" in resp_for(responses, 1),
+          f"{resp_for(responses, 1)}")
+
+    rc, responses = call("abc")
+    check("non-numeric seconds is an error", "error" in resp_for(responses, 1),
+          f"{resp_for(responses, 1)}")
+
+    rc, responses = run_tools(["sleep"], [
+        {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+         "params": {"name": "sleep", "arguments": {}}},
+    ])
+    check("missing seconds is an error", "error" in resp_for(responses, 1),
+          f"{resp_for(responses, 1)}")
+
+
 def test_exec_background():
     print("exec background lifecycle (HTTP):")
     import http.client
@@ -614,6 +786,8 @@ def main():
         test_online_search_errors()
         test_file_scan()
         test_exec()
+        test_file_tools()
+        test_sleep()
         test_exec_background()
         test_http_mode(base)
     finally:

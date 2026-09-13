@@ -43,9 +43,10 @@ $ llmkit agent -c config.yml -p "How much is 3 + 3?"
   `invoke` (forwards a call to a backend tool by namespaced name). Serves
   stdio or HTTP like the proxy.
 - **`llmkit mcp`** -- Runs an MCP server exposing llmkit's built-in tools
-  (currently `online_search`, `online_fetch` and `file_scan`), selected
-  with a comma-separated list on the command line. No config file or
-  backend servers are needed. Serves stdio or HTTP like proxy/gateway.
+  (`online_search`, `online_fetch`, `file_scan`, `exec`, `exec_status`,
+  `sleep`, `file_read`, `file_create`, `file_edit`), selected with a
+  comma-separated list on the command line. No config file or backend
+  servers are needed. Serves stdio or HTTP like proxy/gateway.
 - **`llmkit response`** -- Reads a conversation JSONL file and prints the
   last LLM assistant response to stdout. Useful for extracting the final
   answer from a completed conversation.
@@ -143,6 +144,35 @@ or duplicate names exit with code 2). Available tools:
   as 128+signal), the reply is the same report as `exec`: exit code,
   total duration and the output tail. A pid this server never started
   gets a plain `No exec process with pid <pid>.` answer.
+- **`sleep`** -- Waits `seconds` (0 to 60, fractions allowed) before
+  replying `Slept for <seconds> seconds.`; useful for pacing retries or
+  waiting out a background command before an `exec_status` poll.
+- **`file_read`** -- Reads lines from a text file resolved relative to
+  the working directory and returns:
+  `File path: <path>`, `Total lines: <N>`, a blank line,
+  `----- lines from <X> to <Y> -----` and the content. `line_offset`
+  (1-based, default 1) and `lines_length` (default 2000, max 2000)
+  select the page; at most 100000 characters are returned per call, and
+  the truncation note names the `line_offset` to continue from. Binary
+  files are refused (`Read refused: binary file`), as are absolute
+  paths, `..` segments and symbolic links anywhere in the path, so a
+  read can never leave the working directory.
+- **`file_create`** -- Creates or overwrites a file (same path rules as
+  `file_read`) with `content` written verbatim, replying
+  `File created: <path> (N bytes, M lines)` or `File overwritten: ...`.
+- **`file_edit`** -- Replaces `old_string` with `new_string` in a text
+  file (same path rules), searching within 3 lines of the `linefrom`
+  hint; the file is only rewritten on success (`Edit accepted`). If
+  `old_string` exists elsewhere the reply is
+  `Edit refused: old_string found at line <N>`, otherwise
+  `Edit refused: old_string not found`. Matching is whitespace
+  tolerant: per-line leading/trailing whitespace and internal
+  whitespace runs are ignored, and the replacement is re-indented from
+  the file's own indentation (tab indentation is preserved when no
+  shift is needed), so indentation sloppiness in the model's strings
+  does not corrupt the file. Deleting is `new_string: ""`; a fragment
+  of a line may be replaced while the rest of the line is kept. Binary
+  files are refused.
 
 Example stdio session:
 
