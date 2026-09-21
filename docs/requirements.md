@@ -2,7 +2,8 @@
 
 A single executable built for linux and cross-compiled for windows.
 Multiple commands, all related to llm interaction from shell / other programs.
-Support for any openai-compatible and anthropic-compatible llm endpoints.
+Support for any openai-compatible (chat completions and responses apis) and
+anthropic-compatible llm endpoints.
 Written in C. Third-party libraries are chosen in the design phase.
 
 This document specifies behavior only. Design decisions — libraries, the full
@@ -184,7 +185,7 @@ endpoint. On windows the same handling is wired to the console ctrl handler
 
 ## 3. record to api mapping
 
-Conceptual layer, identical for both protocols:
+Conceptual layer, identical across protocols:
 
 - `system` maps to the system role
 - `user` maps to the user role
@@ -192,14 +193,14 @@ Conceptual layer, identical for both protocols:
 
 Wire layer, per `endpoint_protocol`:
 
-| record | openai | anthropic |
-|---|---|---|
-| `system` | message with role `system` inside `messages` | top level `system` parameter, never inside `messages` |
-| `user` | message role `user` | message role `user`, text content block |
-| `response` | assistant message `content` | assistant message `{type:"text"}` content block |
-| `thinking` | not resent: reasoning lives server side; emitted as record only when the endpoint returns a summary | `{type:"thinking"}` content block inside the assistant message, resent verbatim with `signature` when that turn ended in tool requests |
-| `tool_request` | entry of the `tool_calls` array on the assistant message, `id` becomes `tool_call_id` | `{type:"tool_use", id, name, input}` content block inside the assistant message |
-| `tool_response` | own message role `tool`, carries `tool_call_id` | message role `user` holding `{type:"tool_result", tool_use_id}` content blocks |
+| record | openai | openai_responses | anthropic |
+|---|---|---|---|
+| `system` | message with role `system` inside `messages` | top level `instructions` parameter, never inside `input` | top level `system` parameter, never inside `messages` |
+| `user` | message role `user` | input item with role `user`, string content | message role `user`, text content block |
+| `response` | assistant message `content` | input item `{type:"message", role:"assistant"}` with `output_text` content | assistant message `{type:"text"}` content block |
+| `thinking` | not resent: reasoning lives server side; emitted as record only when the endpoint returns a summary | `{type:"reasoning"}` item resent verbatim, its id and encrypted content carried by `signature`, when that turn ended in tool requests | `{type:"thinking"}` content block inside the assistant message, resent verbatim with `signature` when that turn ended in tool requests |
+| `tool_request` | entry of the `tool_calls` array on the assistant message, `id` becomes `tool_call_id` | `{type:"function_call", call_id, name, arguments}` output item of the assistant turn | `{type:"tool_use", id, name, input}` content block inside the assistant message |
+| `tool_response` | own message role `tool`, carries `tool_call_id` | `{type:"function_call_output", call_id, output}` input item | message role `user` holding `{type:"tool_result", tool_use_id}` content blocks |
 
 `llm`, `tools`, `options`, `flush`, `start`, `header` and `error` records are
 never sent to the endpoint.
@@ -208,8 +209,8 @@ Grouping rule: one turn is `thinking`?, `response`?, then either a final
 `response` or one or more `tool_request` records. Partial records of one turn
 concatenate into the full text before mapping. All records of one turn form a
 single assistant message: its text records become the text content, N
-`tool_request` records become N `tool_calls` entries (openai) or N `tool_use`
-blocks (anthropic). The matching `tool_response` records follow in the same
+`tool_request` records become N `tool_calls` entries (openai), N
+`function_call` items (openai_responses) or N `tool_use` blocks (anthropic). The matching `tool_response` records follow in the same
 order, paired by `id`.
 
 Replay constraints:
@@ -227,7 +228,7 @@ Replay constraints:
   omits that turn's `tool_request` records and their `tool_response` records
   from the request; the transcript is unchanged.
 - Consecutive same role records are sent as consecutive same role messages:
-  neither protocol requires merging them, so the runner does not merge
+  no protocol requires merging them, so the runner does not merge
   *(proposed)*.
 
 ## 4. inference options
@@ -235,19 +236,19 @@ Replay constraints:
 Normalized option set inside `inference_options`, mapped per
 `endpoint_protocol`:
 
-| option | openai | anthropic |
-|---|---|---|
-| `temperature` | `temperature` | `temperature` |
-| `top_p` | `top_p` | `top_p` |
-| `max_tokens` | `max_tokens` (deprecated upstream, kept for compatibility with openai-compatible servers) | `max_tokens`, required: absent under anthropic is `invalid_record`, fatal |
-| `stop` | `stop`, at most 4 strings | `stop_sequences` |
-| `top_k` | not sent | `top_k` |
-| `thinking_budget` | not sent | `thinking: {type:"enabled", budget_tokens}`; its presence enables thinking |
-| `reasoning_effort` | `reasoning_effort` | not sent |
-| `presence_penalty` | `presence_penalty` | not sent |
-| `frequency_penalty` | `frequency_penalty` | not sent |
-| `seed` | `seed` | not sent |
-| `stream` | `stream` | `stream` |
+| option | openai | openai_responses | anthropic |
+|---|---|---|---|
+| `temperature` | `temperature` | `temperature` | `temperature` |
+| `top_p` | `top_p` | `top_p` | `top_p` |
+| `max_tokens` | `max_tokens` (deprecated upstream, kept for compatibility with openai-compatible servers) | `max_output_tokens` | `max_tokens`, required: absent under anthropic is `invalid_record`, fatal |
+| `stop` | `stop`, at most 4 strings | not sent | `stop_sequences` |
+| `top_k` | not sent | not sent | `top_k` |
+| `thinking_budget` | not sent | not sent | `thinking: {type:"enabled", budget_tokens}`; its presence enables thinking |
+| `reasoning_effort` | `reasoning_effort` | `reasoning: {effort}` | not sent |
+| `presence_penalty` | `presence_penalty` | not sent | not sent |
+| `frequency_penalty` | `frequency_penalty` | not sent | not sent |
+| `seed` | `seed` | not sent | not sent |
+| `stream` | `stream` | `stream` | `stream` |
 
 Rules *(proposed)*:
 
@@ -328,8 +329,8 @@ input price; the runner must never be the cause of an avoidable miss.
 - Cache scope is per endpoint: an `llm` change resets the expectation, the
   transcript then rebuilds cache on the new endpoint.
 - anthropic `cache_control` breakpoints and openai automatic caching
-  thresholds are design phase; this section demands only that the runner
-  itself never causes a miss.
+  thresholds (both openai protocols) are design phase; this section demands
+  only that the runner itself never causes a miss.
 
 ## 7. content model
 
@@ -374,10 +375,10 @@ A record holding the configuration of the llm endpoint.
 
 | field | required | description |
 |---|---|---|
-| `endpoint_protocol` | yes | `openai` (chat completions api; the responses api is out of scope for this version) or `anthropic` |
-| `api_base` | yes | http or https url of the base address, path prefix included (e.g. `.../v1`); the runner appends only the final segment: `/chat/completions` for openai, `/messages` for anthropic; used verbatim, no normalization: a trailing slash is the caller's, the segment is appended as-is |
+| `endpoint_protocol` | yes | `openai` (chat completions api), `openai_responses` (responses api) or `anthropic` |
+| `api_base` | yes | http or https url of the base address, path prefix included (e.g. `.../v1`); the runner appends only the final segment: `/chat/completions` for openai, `/responses` for openai_responses, `/messages` for anthropic; used verbatim, no normalization: a trailing slash is the caller's, the segment is appended as-is |
 | `model` | no | name of the model requested to the endpoint; when absent the field is simply not sent, llama.cpp style endpoints do not require it, endpoints that do answer with `api_error` |
-| `api_key` | no | token for authentication, passed verbatim, no environment variable expansion; the caller already owns the secret and feeds it through stdin; sent as `Authorization: Bearer <api_key>` on both protocols, a `headers` entry setting `Authorization` overrides it. The real anthropic api wants `x-api-key` and requires `anthropic-version`: callers target it through `headers`, e.g. `{"x-api-key":"...","anthropic-version":"2023-06-01"}` |
+| `api_key` | no | token for authentication, passed verbatim, no environment variable expansion; the caller already owns the secret and feeds it through stdin; sent as `Authorization: Bearer <api_key>` on all protocols, a `headers` entry setting `Authorization` overrides it. The real anthropic api wants `x-api-key` and requires `anthropic-version`: callers target it through `headers`, e.g. `{"x-api-key":"...","anthropic-version":"2023-06-01"}` |
 | `inference_options` | no | sampling and inference parameters, normalized set, see [inference options](#4-inference-options) |
 | `headers` | no | object of header name to value, sent with every request to the endpoint |
 
@@ -501,7 +502,7 @@ A block holding the thinking trace emitted during inference.
 |---|---|
 | `text` | the reasoning trace; during streaming each record carries only the text received since the previous `thinking` record of the same turn |
 | `partial` | boolean flag set on every streamed record except the last one of the turn; it stays set on the last emitted record when the turn is stopped externally (SIGINT), see [external stop](#26-external-stop) |
-| `signature` | opaque token returned by the endpoint when it requires signed thinking blocks; replayed verbatim on continuation, empty when the endpoint does not use one; present on the final record of the turn only |
+| `signature` | opaque token returned by the endpoint when it requires signed thinking blocks (the anthropic `signature`; the openai_responses reasoning item id and encrypted content); replayed verbatim on continuation, empty when the endpoint does not use one; present on the final record of the turn only |
 
 ### tool_request
 
@@ -543,15 +544,15 @@ hold the turn's text and carry no `usage` and no `finish_reason`.
 | `usage` | optional object with token counts (`input_tokens`, `output_tokens`) when the endpoint reports them; on the final record of the turn only |
 | `finish_reason` | optional, why the turn ended, from the normalized set below; on the final record only |
 
-Normalized `finish_reason`, identical for both protocols so a transcript
+Normalized `finish_reason`, identical across protocols so a transcript
 replays across them:
 
-| normalized | openai | anthropic |
-|---|---|---|
-| `stop` | `stop` | `end_turn`, `stop_sequence` |
-| `length` | `length` | `max_tokens` |
-| `content_filter` | `content_filter` | `refusal` |
-| `tool_use` | `tool_calls`, `function_call` | `tool_use` |
+| normalized | openai | openai_responses | anthropic |
+|---|---|---|---|
+| `stop` | `stop` | status `completed`, no function calls | `end_turn`, `stop_sequence` |
+| `length` | `length` | status `incomplete`, `incomplete_details` `max_output_tokens` | `max_tokens` |
+| `content_filter` | `content_filter` | status `incomplete`, `incomplete_details` `content_filter` | `refusal` |
+| `tool_use` | `tool_calls`, `function_call` | status `completed` with `function_call` items in the output | `tool_use` |
 
 Values outside the table pass through verbatim, nothing is dropped.
 
