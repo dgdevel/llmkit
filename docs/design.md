@@ -16,8 +16,8 @@ details in §5 and §6. Where this document picks a ceiling, it is marked
 6. [mcp client](#6-mcp-client)
 7. [serialization and prefix cache](#7-serialization-and-prefix-cache)
 8. [external stop](#8-external-stop)
-9. [windows specifics](#9-windows-specifics)
-10. [agent-as-tool](#10-agent-as-tool)
+9. [agent-as-tool](#9-agent-as-tool)
+10. [mcp-proxy](#10-mcp-proxy)
 11. [exit codes](#11-exit-codes)
 12. [build and packaging](#12-build-and-packaging)
 13. [testing](#13-testing)
@@ -26,10 +26,10 @@ details in §5 and §6. Where this document picks a ceiling, it is marked
 
 | need | choice | why |
 |---|---|---|
-| language | C11 | per requirements; no compiler exceptions, both targets |
-| json | cJSON, system installed (`-lcjson`, any 1.x; `libcjson-dev` / `mingw-w64-x86_64-cjson` in the cross sysroot) | object fields are a linked list in insertion order: serialization is deterministic by construction, which §7 depends on; two-file library, nothing to vendor |
-| http/tls | libcurl (easy api), version floor 7.80 | tls, chunked transfer, sse body reading, connect and low-speed timeouts, one code path for both platforms; alternatives (json-c, jansson, a hand-rolled http client) add a build system, lose ordering, or re-implement tls |
-| concurrency | pthreads on linux, win32 primitives on windows, behind `platform.c` | no dependency, no event loop to debug |
+| language | C11 | per requirements; no compiler exceptions |
+| json | cJSON, system installed (`-lcjson`, any 1.x; `libcjson-dev`) | object fields are a linked list in insertion order: serialization is deterministic by construction, which §7 depends on; two-file library, nothing to vendor |
+| http/tls | libcurl (easy api), version floor 7.80 | tls, chunked transfer, sse body reading, connect and low-speed timeouts; alternatives (json-c, jansson, a hand-rolled http client) add a build system, lose ordering, or re-implement tls |
+| concurrency | pthreads, behind `platform.c` | no dependency, no event loop to debug |
 
 No other third-party code. mcp, sse parsing, jsonl, utf-8 validation are in-tree.
 
@@ -77,12 +77,17 @@ Byte level, in order, per chunk read from stdin:
 | `start`, `error` | inert, skip |
 | `agent-as-tool`, anything else | `invalid_record`, fatal |
 
+A failing `read` on stdin (an error, not EOF) is the error catalog's stdin
+failure: a fatal `io_error` record, emitted at detection like every error
+record; from then on no input exists — EOF semantics for everything else,
+so the drop rule has nothing left to drop.
+
 Record state machine (main thread view; `records_since_flush` counts
 non-control records since the last consumed `flush`):
 
 | state | event | action |
 |---|---|---|
-| `reading` | stdin closes or `flush` with `records_since_flush > 0` | validate `llm` present + ≥1 `user`; connect servers; → `running` (first turn); `flush` consumed, `start` marker emitted |
+| `reading` | stdin closes or `flush` with `records_since_flush > 0` | validate `llm` present + ≥1 `user`; connect servers; → `running` (first turn); `flush` path: consumed, `start` marker emitted — stdin close path: no marker, markers pair with consumed `flush` records only |
 | `reading` | `flush` with `records_since_flush == 0` | non-fatal `invalid_record`, no-op — unless it is the very first `flush`, which always attempts the start |
 | `running` (turn in flight) | record or `flush` arrives | buffered as candidate steering; applied at the turn boundary |
 | turn boundary | buffered records **and** ≥1 `flush` | steering: records append as next user turns (config records apply here too); `flush` consumed, `start` marker emitted |
@@ -119,7 +124,9 @@ Main thread, per turn:
 
 `usage` and `finish_reason` attach to the final record of the turn
 (`response`, or the last `tool_request` on tool turns). `signature` attaches
-to the thinking block's final record at that block's stop.
+to the thinking block's final record at that block's stop. `partial` is
+block-scoped the same way: false only on the final record of each streamed
+block.
 
 ## 5. endpoint clients
 
@@ -127,6 +134,18 @@ One shared sse line parser (event/data accumulation, blank-line dispatch,
 `ping` ignored) used by all three wire clients and by mcp http. One curl easy
 handle per endpoint, reused across turns; connection reuse is irrelevant to
 server side prefix caches, fresh or reused both work.
+
+Non-streaming (`stream` false): the complete body maps to the same final
+records a streamed turn would emit — no partials, one record per content
+block. openai: `choices[0].message` (`content` → `response`,
+`reasoning_content`/`reasoning` → `thinking`, `tool_calls[]` →
+`tool_request`s), plus `finish_reason` and `usage`. openai_responses:
+`output` items (`message` → `response` text, `reasoning` → `thinking` +
+`signature`, `function_call` → `tool_request`), with
+`status`/`incomplete_details` → normalized `finish_reason`, and `usage`.
+anthropic: `content` blocks (`text`/`thinking`/`tool_use`), `stop_reason`,
+`usage`. Stream parity — both modes produce identical final records — is
+asserted by the selfcheck (§13).
 
 Timeouts:
 
@@ -137,7 +156,9 @@ Timeouts:
 
 Auth: `Authorization: Bearer <api_key>` when `api_key` set; `headers` entries
 merge over it. Real anthropic is reached through `headers` per the
-requirements recipe.
+requirements recipe. Both curl timeout options take whole seconds:
+fractional `llm_connect_timeout`/`llm_read_timeout` values are floored;
+`stream_interval` and `tool_call_timeout` keep fractional precision.
 
 ### openai wire (chat completions)
 
@@ -148,7 +169,9 @@ requirements recipe.
   `stream_options: {"include_usage": true}` when streaming (constant, not
   volatile; needed for `usage`).
 - `system` record → first message, role `system`. Consecutive same-role
-  messages are never merged. Tool turns: assistant message carries `content`
+  messages are never merged. Multi-block `system`/`user` content joins with
+  `\n` into one string (anthropic sends the blocks natively; requirements
+  §7). Tool turns: assistant message carries `content`
   (the turn's concatenated text) and `tool_calls` (N entries); each
   `tool_response` becomes a `tool` role message. `thinking` records are never
   resent.
@@ -188,7 +211,7 @@ requirements recipe.
 | `response.output_text.delta` | `response` partials |
 | `response.reasoning_summary_text.delta` | `thinking` partials |
 | `response.function_call_arguments.delta` | argument fragments concatenate per `output_index` |
-| `response.output_item.done` (`reasoning`) | id + `encrypted_content` held for the thinking block's final record (`signature`) |
+| `response.output_item.done` (`reasoning`) | the complete serialized item is held for the thinking block's final record (`signature`) |
 | `response.output_item.done` (`function_call`) | complete `tool_request`, emitted at turn end |
 | `response.completed` / `response.incomplete` | `usage` (`input_tokens`/`output_tokens`); normalized `finish_reason` from status + `incomplete_details` |
 | `response.failed`, `error` | `api_error` with the body's message |
@@ -222,6 +245,7 @@ requirements recipe.
 | `content_block_stop` | flush that block: thinking final record gets `partial:false` + `signature`; complete `tool_request` records are emitted at `message_stop` |
 | `message_delta` | `stop_reason` → normalized `finish_reason`; `usage.output_tokens` |
 | `ping`, `message_stop` | ignored / end of turn |
+| `error` | fatal `api_error` with the event's message |
 
 - Non-2xx handling identical to openai.
 
@@ -229,17 +253,32 @@ requirements recipe.
 
 - Framing: json-rpc 2.0. stdio transport = newline-delimited json on the
   child's stdin/stdout; the child's stderr is passed through to the runner's
-  stderr untouched (it is the log channel). http/sse transport = streamable
-  http: POST json, accept `text/event-stream` or `application/json` responses,
-  `Mcp-Session-Id` echoed when the server issues one; `sse` type speaks the
-  legacy http+sse transport.
-- `protocol` field maps to the `protocolVersion` sent in `initialize`; both
-  revisions of the requirements are supported, differences (v2 structured
-  results, keepalive) handled inside this module.
-- Handshake at connect: `initialize` → `initialized` → `tools/list`. The
-  listing is a snapshot: tool order exposed to the model is the `tools`
-  record's server order, then each server's own listing order. It changes
-  only when a `tools` record changes it (§7).
+  stderr untouched (it is the log channel). http transport = streamable
+  http: POST json, accept `text/event-stream` or `application/json`
+  responses. `sse` type speaks the legacy http+sse transport: one long-lived
+  GET opens the event stream, the server's first `endpoint` event names the
+  uri every request POSTs to (its query carries the session id when there is
+  one); replies come back in the POST response body, server pushes arrive as
+  events on the GET stream.
+- `protocol` picks the revision line — v1 and v2 are different protocols,
+  not versions of one. Any published v1 revision from `2024-11-05` to
+  `2025-11-25` (default) or v2 `2026-07-28`.
+- **v1 (stateful)**: connect runs `initialize` (carrying `protocolVersion`)
+  → `notifications/initialized` → `tools/list`. The `initialize` result
+  names the revision to use: another supported v1 revision is adopted;
+  anything else is a connect failure, the `required` rule applies. A
+  `Mcp-Session-Id` response header is echoed on every later http request.
+- **v2 (stateless)**: the `initialize` handshake and `Mcp-Session-Id` are
+  gone. Every request carries `_meta` with
+  `io.modelcontextprotocol/protocolVersion`, `clientCapabilities` and a
+  static `clientInfo` (`llmkit` plus build version — a constant, nothing
+  volatile enters any request). `server/discover` is optional; the runner
+  goes straight to `tools/list`. An `UnsupportedProtocolVersionError` reply
+  is a connect failure.
+- Either way the connect ends with `tools/list`. The listing is a snapshot:
+  tool order exposed to the model is the `tools` record's server order, then
+  each server's own listing order. It changes only when a `tools` record
+  changes it (§7).
 - `tools/call` `{name, arguments}`; the `name` sent to the server is the part
   after the server prefix. Result: text content blocks concatenate with `\n`
   into `tool_response.text`; `isError: true` → `is_error: true` plus
@@ -251,8 +290,8 @@ requirements recipe.
 - `required: true` connect failure → fatal `connect_failed`; otherwise
   non-fatal and the conversation proceeds without those tools. A stdio child
   that dies mid-conversation fails its next call as `tool_failed`.
-- Spawn: linux `/bin/sh -c <command_line>`; windows `cmd /d /s /c
-  <command_line>` — the caller owns quoting per the requirements. `ponytail:`
+- Spawn: `/bin/sh -c <command_line>` — the caller owns quoting per the
+  requirements. `ponytail:`
   no shell-less spawn mode; add one if a server needs argv-precise control.
 
 ## 7. serialization and prefix cache
@@ -264,14 +303,17 @@ identical to the request of turn N-1 — is enforced structurally:
   reordered, mutated or re-parsed; cJSON serializes a given tree to the same
   bytes every time (insertion-ordered fields, fixed number format). So
   re-serializing the same records can't drift.
-- Per conversation, an append-only byte buffer holds the serialized `messages`
-  array (openai) or `messages` (anthropic). A new turn appends its message
-  bytes. The request body is envelope + buffer; only envelope fields
+- Per conversation, an append-only byte buffer holds the serialized message
+  array — `messages` for openai and anthropic, `input` for openai_responses.
+  A new turn appends its message bytes. The request body is envelope + buffer; only envelope fields
   (`max_tokens`, sampling, `stream`, ...) are rebuilt per request, so
   sampling-only changes never touch the prefix bytes.
 - Tool `arguments` and thinking text round-trip through the same rule: same
   tree in, same bytes out. (A number lexeme like `1e3` may print as `1000`
-  — consistently, every turn, which is all the invariant needs.)
+  — consistently, every turn, which is all the invariant needs. Integers
+  beyond 2^53 in tool arguments round-trip through doubles: precision can
+  be lost, deterministically; `ponytail:` store raw argument bytes only if
+  a real tool ever needs exact big integers.)
 - Invalidation: a `system`, `tools`, or `llm` change, or transcript growth by
   a new turn, are the only prefix writers; each rebuilds from its point
   onward. Under openai a `system` change rewrites `messages[0]` — a miss from
@@ -288,9 +330,10 @@ would make the runner the cause of a full miss.
 
 Marker budget, in order:
 
-1. last tool definition — one marker covers the whole `system` + `tools`
-   prefix, since system precedes tools in the body; a separate system marker
-   would waste a slot.
+1. the end of the static prefix — the last tool definition when tools
+   exist, else the last block of the `system` param (anthropic accepts a
+   block array there) — one marker covers `system` + `tools`, since system
+   precedes tools in the body; a separate system marker would waste a slot.
 2. + 3. + 4. the last content block of the last message of each completed
    turn, placed as the turn completes. A breakpoint caches everything before
    it, so slots spent as late as possible cover the most prefix; the cost of
@@ -315,11 +358,9 @@ openai_responses the `system` record maps to the envelope-side
 
 ## 8. external stop
 
-- linux: `sigaction` on SIGINT sets an atomic flag. The curl write callback
+- `sigaction` on SIGINT sets an atomic flag. The curl write callback
   and the engine's wait points check it; the callback aborts the transfer by
-  returning a short count (connection closed). Windows:
-  `SetConsoleCtrlHandler` for `CTRL_C_EVENT` sets the same flag from the
-  console thread.
+  returning a short count (connection closed).
 - Orderly stop, main thread: flush the open block's buffered text as the last
   partial (`partial: true` stays), let a running tool finish and emit its
   `tool_response`, answer suspended `tool_request`s with `is_error`, drop
@@ -327,25 +368,13 @@ openai_responses the `system` record maps to the envelope-side
   first), emit fatal `interrupted`, kill stdio children, exit.
 - The stdin reader stops enqueueing the moment the flag is set: records
   received after the stop are not read.
-- Second SIGINT: the handler ` _exit()`s / `ExitProcess` with the
+- Second SIGINT: the handler `_exit()`s with the
   `interrupted` exit code immediately, no further records.
-- Before the conversation starts: same flag path, drop rule + `interrupted`,
-  nonzero exit.
+- Before the conversation starts: same flag path, drop rule only — the
+  non-fatal `io_error` records — nonzero exit; no `interrupted` record,
+  there is no conversation to interrupt (requirements §2.6).
 
-## 9. windows specifics
-
-- stdout and stdin are set to binary mode (`_setmode(..., _O_BINARY)`);
-  records are `\n`-terminated, never `\r\n`. UTF-8 is bytes end to end; no
-  console code page APIs are touched because both channels are pipes in every
-  supported launch shape.
-- Process spawn and the ctrl handler go through `platform.c` (CreateProcess,
-  `cmd /d /s /c`). winsock is initialized once at startup.
-- Cross-compile with `x86_64-w64-mingw32-gcc`, statically linked curl built
-  on the schannel backend (no openssl). `ponytail:` if the toolchain fights
-  static curl, shipping `libcurl.dll` next to the exe is the accepted
-  fallback; single-file exe is the goal, not a hill to die on.
-
-## 10. agent-as-tool
+## 9. agent-as-tool
 
 Same core, second entry point. `llmkit agent-as-tool <seed.jsonl>`:
 
@@ -355,6 +384,10 @@ Same core, second entry point. `llmkit agent-as-tool <seed.jsonl>`:
   requirements' boundary rule. After bootstrap stdout is the mcp channel.
 - The mcp server loop exposes exactly `invoke(input: string)`; descriptions
   come from the `agent-as-tool` record.
+- Engine output goes to an in-memory sink, never to stdout — after
+  bootstrap stdout carries only mcp traffic. Concurrent `tools/call`
+  requests are serialized, one conversation at a time; replies are written
+  in request order.
 - Each `invoke` builds a record list — seed records + `user` carrying
   `input` — and runs the engine over it unchanged (mapping, options, error
   rules). Reply: concatenated final `response` text. A fatal `error` becomes
@@ -368,6 +401,32 @@ Same core, second entry point. `llmkit agent-as-tool <seed.jsonl>`:
   invoke.
 - Nested agents are ordinary child processes; spawn cycles are not detected
   (per the requirements).
+
+## 10. mcp-proxy
+
+Same core, third entry point. `llmkit mcp-proxy <config.jsonl>`:
+
+- Startup: parse the config with the runner's pipeline (§3 dispatch
+  restricted to `header`, `tools`, `expose`, `hide`; anything else is
+  `invalid_record`, fatal), then connect the upstream servers and run
+  `tools/list` on each (§6 rules), and resolve every `expose`/`hide` against
+  the listings. Fatal config or startup errors are out of channel: stderr,
+  exit 1, no mcp traffic.
+- The exposed list is built once at startup and frozen. Renames rewrite the
+  upstream listing in place — a renamed argument keeps its position in the
+  schema — so the serialized listing is deterministic across restarts, which
+  a parent runner's cache rule (§7 of the requirements) leans on. Order:
+  `expose` record order in whitelist mode, else server order then listing
+  order. `ponytail:` the listing is a startup snapshot,
+  `notifications/tools/list_changed` from an upstream is ignored; relay it
+  only if an upstream needs it.
+- Serving: the stdio json-rpc server loop of §9, tools capability only.
+  `tools/call` maps the exposed name back to server + upstream tool name and
+  applies the inverse argument renaming before forwarding through the §6
+  client; the result is relayed verbatim. Calls are serialized, one at a
+  time, replies in request order; a failed upstream call is a json-rpc error
+  response and the proxy stays up.
+- Threads: main plus one reader per stdio upstream, same queues as §2.
 
 ## 11. exit codes
 
@@ -392,14 +451,13 @@ Plain Makefile, no build system:
 
 - `make` → `llmkit` (cc, linux)
 - `make check` → builds and runs `test/selfcheck` (§13)
-- `make CROSS=x86_64-w64-mingw32-` → `llmkit.exe`
 
 Sources: `src/main.c` (subcommands), `src/agent.c` (agent-as-tool),
+`src/proxy.c` (mcp-proxy config, rewrite and resolution),
 `src/engine.c` (state machine + turn loop), `src/jsonl.c` (input pipeline,
 validation), `src/wire_openai.c`, `src/wire_anthropic.c`, `src/sse.c`,
 `src/mcp.c`, `src/buf.c` (byte buffers, the §7 append-only buffer),
-`src/platform.c` (threads, spawn, signals, binary mode). Link flags:
-`-lcjson -lcurl` on both targets; the cross sysroot provides both.
+`src/platform.c` (threads, spawn, signals). Link flags: `-lcjson -lcurl`.
 
 ## 13. testing
 
@@ -410,11 +468,16 @@ validation), `src/wire_openai.c`, `src/wire_anthropic.c`, `src/sse.c`,
   byte-compared against turn N-1's request — the cache rule tested directly.
 - **sse parser**: fixed vectors for openai chunks (both apis), anthropic
   events, mcp responses, split at awkward byte boundaries.
+- **stream parity**: the same scripted endpoint response replayed with
+  `stream` on and off produces byte-identical final records, partials
+  aside.
 - **validation**: BOM, raw CR dropping, invalid UTF-8, missing `llm`/`user`,
   duplicate server name, bare `flush`, missing anthropic `max_tokens`,
   `thinking_budget >= max_tokens`.
 - **state machine**: flush consumption, steering application, drop rule,
   applied against an in-process fake endpoint function.
+- **mcp proxy**: expose/hide resolution and validation, schema rewrite
+  determinism, inverse argument mapping on call forwarding.
 
 `ponytail:` no network integration tests in-tree; a `test/live.sh` hitting a
 real endpoint is added when the first endpoint bug shows up.

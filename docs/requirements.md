@@ -1,6 +1,6 @@
 # llmkit
 
-A single executable built for linux and cross-compiled for windows.
+A single executable built for linux.
 Multiple commands, all related to llm interaction from shell / other programs.
 Support for any openai-compatible (chat completions and responses apis) and
 anthropic-compatible llm endpoints.
@@ -22,8 +22,9 @@ applies. Rules marked *(proposed)* are working desiderata, not yet frozen.
 6. [prefix cache stability](#6-prefix-cache-stability)
 7. [content model](#7-content-model)
 8. [jsonl record types](#8-jsonl-record-types)
-   - header · llm · tools · options · agent-as-tool · flush · start · system · user · thinking · tool_request · tool_response · response · error
+   - header · llm · tools · options · agent-as-tool · expose · hide · flush · start · system · user · thinking · tool_request · tool_response · response · error
 9. [llmkit agent-as-tool](#9-llmkit-agent-as-tool)
+10. [llmkit mcp-proxy](#10-llmkit-mcp-proxy)
 
 ## 1. cli conventions
 
@@ -53,7 +54,7 @@ See [jsonl record types](#8-jsonl-record-types) for the input specs.
 - The conversation starts once stdin is closed OR once a `flush` record is
   received.
 - The `flush` record is used by applications integrated to the kit that need
-  to keep stdin open for steering, and works identically on linux and windows.
+  to keep stdin open for steering.
 - Steering applies at the first turn boundary after the `flush` record; see
   [steering](#24-steering).
 
@@ -149,8 +150,7 @@ One conversation per process; the transcript lives as long as the process.
 
 SIGINT is handled as an orderly external stop of the conversation: the runner
 never dies mid-record and never discards text already received from the
-endpoint. On windows the same handling is wired to the console ctrl handler
-(`CTRL_C_EVENT`), so the behavior is identical on both platforms.
+endpoint.
 
 - While a turn is streaming, the endpoint request is aborted and the
   connection closed. Text already received but not yet emitted (still
@@ -198,7 +198,7 @@ Wire layer, per `endpoint_protocol`:
 | `system` | message with role `system` inside `messages` | top level `instructions` parameter, never inside `input` | top level `system` parameter, never inside `messages` |
 | `user` | message role `user` | input item with role `user`, string content | message role `user`, text content block |
 | `response` | assistant message `content` | input item `{type:"message", role:"assistant"}` with `output_text` content | assistant message `{type:"text"}` content block |
-| `thinking` | not resent: reasoning lives server side; emitted as record only when the endpoint returns a summary | `{type:"reasoning"}` item resent verbatim, its id and encrypted content carried by `signature`, when that turn ended in tool requests | `{type:"thinking"}` content block inside the assistant message, resent verbatim with `signature` when that turn ended in tool requests |
+| `thinking` | not resent: reasoning lives server side; emitted as record only when the endpoint returns a summary | `{type:"reasoning"}` item resent verbatim — `signature` carries the complete serialized item — when that turn ended in tool requests | `{type:"thinking"}` content block inside the assistant message, resent verbatim with `signature` when that turn ended in tool requests |
 | `tool_request` | entry of the `tool_calls` array on the assistant message, `id` becomes `tool_call_id` | `{type:"function_call", call_id, name, arguments}` output item of the assistant turn | `{type:"tool_use", id, name, input}` content block inside the assistant message |
 | `tool_response` | own message role `tool`, carries `tool_call_id` | `{type:"function_call_output", call_id, output}` input item | message role `user` holding `{type:"tool_result", tool_use_id}` content blocks |
 
@@ -206,8 +206,8 @@ Wire layer, per `endpoint_protocol`:
 never sent to the endpoint.
 
 Grouping rule: one turn is `thinking`?, `response`?, then either a final
-`response` or one or more `tool_request` records. Partial records of one turn
-concatenate into the full text before mapping. All records of one turn form a
+`response` or one or more `tool_request` records. Partial records of one block
+concatenate into the block's full text before mapping. All records of one turn form a
 single assistant message: its text records become the text content, N
 `tool_request` records become N `tool_calls` entries (openai), N
 `function_call` items (openai_responses) or N `tool_use` blocks (anthropic). The matching `tool_response` records follow in the same
@@ -253,7 +253,8 @@ Normalized option set inside `inference_options`, mapped per
 Rules *(proposed)*:
 
 - `stream` defaults to true; when false the endpoint is called without
-  streaming and the turn emits final records only, no partials.
+  streaming and the turn emits final records only, no partials — the same
+  final records a streamed turn of the same response would emit.
 - Unknown option names produce an `error` record with code `invalid_record`,
   fatal. Catches typos.
 - Options that exist in the set but not for the current `endpoint_protocol`
@@ -339,7 +340,7 @@ input price; the runner must never be the cause of an avoidable miss.
   answered as a failed tool (`tool_failed`, non-fatal).
 - UTF-8 everywhere, enforced: a record containing invalid UTF-8 produces an
   `error` record with code `invalid_record`, fatal.
-- Newlines are `\n` only, identical on linux and windows: carriage returns
+- Newlines are `\n` only: carriage returns
   received on stdin are silently dropped, records on stdout are terminated
   with `\n` and never `\r\n`.
 - No bom: a leading bom is not stripped, it makes the first line malformed
@@ -347,6 +348,10 @@ input price; the runner must never be the cause of an avoidable miss.
 - Caller authored records (`system`, `user`) carry a `content` field: a list
   of content blocks. Block shape: `{type:"text", text:"..."}`. Only `text`
   blocks exist in this version.
+- Multiple text blocks of one caller authored record: anthropic sends them
+  as N native text blocks; openai and openai_responses concatenate them with
+  `\n` into a single string content, the same join `tool_response` uses.
+  Block boundaries do not round-trip on those two protocols.
 - Runner emitted records (`thinking`, `response`, `tool_response`) keep a
   flat `text` string *(proposed: simpler output; moving them to content
   blocks later is additive and breaks nothing)*.
@@ -393,14 +398,13 @@ Common fields:
 |---|---|---|
 | `type` | yes | `stdio`, `http` or `sse` |
 | `name` | yes | unique name of the mcp server, uniqueness enforced (`invalid_record`, fatal); used as prefix for the tool names exposed to the model (`name.tool_name`) |
-| `protocol` | no | mcp protocol revision: `2025-11-25` (v1) by default, `2026-07-28` (v2) supported |
+| `protocol` | no | mcp protocol revision, `2025-11-25` (v1) by default; any published v1 revision from `2024-11-05` to `2025-11-25` is accepted, and `2026-07-28` (v2) is supported; a server answering with a revision the runner does not support is a `connect_failed`; v2 is stateless, no `initialize` handshake — the per revision flow is pinned in the design |
 | `required` | no | boolean, signals if a failure to connect and offer the tool to the model is a deal breaker and should stop processing the conversation instead |
 
 Fields per `type`:
 
 - `stdio`: `command_line` (required) — full command invocation, including
-  arguments, executed through the system shell; the caller owns quoting,
-  linux and windows shell differences are accepted as-is.
+  arguments, executed through the system shell; the caller owns quoting.
 - `http` / `sse`: `url` (required), with optional `headers` object of header
   name to value.
 
@@ -446,13 +450,42 @@ Example:
 {"type":"agent-as-tool", "tool_description":"A research tool that will go online and provide useful information", "input_description":"keywords to be searched"}
 ```
 
+### expose
+
+Declares one upstream tool exposed by `llmkit mcp-proxy`, with its exposed
+presentation. Valid only in an mcp-proxy config: everywhere else it is an
+unknown `type` (`invalid_record`, fatal).
+
+| field | description |
+|---|---|
+| `tool` | upstream tool selector, `server.tool` naming a server of the config's `tools` record |
+| `name` | name the proxy exposes; default the `tool` selector itself |
+| `description` | tool description the proxy exposes; default the upstream description |
+| `arguments` | object of upstream argument name to `{name, description}`, both fields optional: rename the argument and/or override its description; arguments are top level input schema properties, default identity |
+
+Example:
+
+```
+{"type":"expose", "tool":"github.create_issue", "name":"open_issue", "description":"Open a repository issue", "arguments":{"title":{"name":"heading","description":"the issue title"}}}
+```
+
+### hide
+
+Removes one upstream tool from what `llmkit mcp-proxy` exposes. Valid only
+in an mcp-proxy config: everywhere else it is an unknown `type`
+(`invalid_record`, fatal).
+
+| field | description |
+|---|---|
+| `tool` | upstream tool selector, `server.tool` naming a server of the config's `tools` record |
+
 ### flush
 
 Control record: start or resume the conversation using all records received
 so far. No fields.
 
 - Emitted by integrators that keep stdin open for steering; replaces any
-  signal based trigger so linux and windows behave identically.
+  signal based trigger.
 - A `flush` always attempts to start or resume the conversation. It is
   *consumed* when it actually does so, at the turn boundary where it applies,
   and each consumed `flush` makes the runner emit a `start` marker record on
@@ -472,7 +505,9 @@ so far. No fields.
 ### start
 
 Marker record emitted on stdout each time a `flush` starts or resumes the
-conversation. No fields.
+conversation. No fields. A start via stdin close emits no marker: markers
+pair one to one with consumed `flush` records, which is exactly what the
+continuation replacement rule replaces.
 
 In input a `start` record is inert: recognized, skipped, it never starts
 anything. That is what makes transcripts replayable, see the continuation
@@ -501,8 +536,8 @@ A block holding the thinking trace emitted during inference.
 | field | description |
 |---|---|
 | `text` | the reasoning trace; during streaming each record carries only the text received since the previous `thinking` record of the same turn |
-| `partial` | boolean flag set on every streamed record except the last one of the turn; it stays set on the last emitted record when the turn is stopped externally (SIGINT), see [external stop](#26-external-stop) |
-| `signature` | opaque token returned by the endpoint when it requires signed thinking blocks (the anthropic `signature`; the openai_responses reasoning item id and encrypted content); replayed verbatim on continuation, empty when the endpoint does not use one; present on the final record of the turn only |
+| `partial` | boolean flag set on every streamed record except the last one of its thinking block; it stays set on the last emitted record when the turn is stopped externally (SIGINT), see [external stop](#26-external-stop) |
+| `signature` | opaque token returned by the endpoint when it requires signed thinking blocks (the anthropic `signature`; under openai_responses the complete serialized `{type:"reasoning"}` output item); replayed verbatim on continuation, empty when the endpoint does not use one; present on the final record of its thinking block only |
 
 ### tool_request
 
@@ -540,7 +575,7 @@ hold the turn's text and carry no `usage` and no `finish_reason`.
 | field | description |
 |---|---|
 | `text` | the response text; during streaming each record carries only the text received since the previous `response` record of the same turn |
-| `partial` | boolean flag set on every streamed record except the last one of the turn; it stays set on the last emitted record when the turn is stopped externally (SIGINT), see [external stop](#26-external-stop) |
+| `partial` | boolean flag set on every streamed record except the last one of its text block — including a turn that continues into `tool_request` records, where the last text record is final and still carries no `usage` and no `finish_reason`; it stays set on the last emitted record when the turn is stopped externally (SIGINT), see [external stop](#26-external-stop) |
 | `usage` | optional object with token counts (`input_tokens`, `output_tokens`) when the endpoint reports them; on the final record of the turn only |
 | `finish_reason` | optional, why the turn ended, from the normalized set below; on the final record only |
 
@@ -558,9 +593,9 @@ Values outside the table pass through verbatim, nothing is dropped.
 
 Streaming rule: `thinking` and `response` arrive from the endpoint in chunks.
 The runner merges chunks received within `stream_interval` into one partial
-record. Consecutive partial records plus the final record of one turn
-concatenate to the full text; the transcript invariant stays one logical
-response text per turn when replayed. A turn stopped externally (SIGINT) ends on its
+record. Consecutive partial records plus the final record of one content
+block concatenate to the block's full text; the transcript invariant stays
+one logical text per block when replayed. A turn stopped externally (SIGINT) ends on its
 trailing `partial` records with no final record; replay concatenates them
 like any partials, the invariant applies to complete turns only.
 
@@ -619,8 +654,7 @@ emitting records.
 Second command: a stdio mcp server exposing one agent conversation as a
 single tool. Launched as `llmkit agent-as-tool <seed.jsonl>`, normally
 spawned by a parent runner through a `tools` record `command_line`. Speaks
-the mcp revisions the `tools` record defines: `2025-11-25` (v1) default,
-`2026-07-28` (v2) supported.
+the mcp revisions the `tools` record defines, same accepted set, same rules.
 
 The seed file is jsonl, same record format as the runner stdin, and forms the
 fixed prefix of every conversation:
@@ -666,3 +700,67 @@ argument `input`; their descriptions come from the `agent-as-tool` record.
   among its `tools`, each as its own process. A seed must not list itself,
   directly or indirectly: that is a spawn cycle and the kit does not detect
   it in this version.
+
+## 10. llmkit mcp-proxy
+
+Third command: a stdio mcp server exposing a curated view of one or more
+upstream mcp servers. Launched as `llmkit mcp-proxy <config.jsonl>`, normally
+spawned by a parent runner through a `tools` record `command_line`. Speaks
+the mcp revisions the `tools` record defines, same accepted set, same rules.
+
+The config file is jsonl, same record format as the runner stdin, and forms
+the whole behavior of the proxy:
+
+- Required: exactly one `tools` record — the upstream server list, same
+  fields and connection rules as the runner's; a second `tools` record is
+  `invalid_record`, fatal. Optional: `header` (as the first record), and
+  `expose` / `hide` records.
+- Every other record type is invalid in a config (`invalid_record`, fatal).
+- Fatal config or startup errors are out of channel: reported on stderr, no
+  mcp traffic, the process exits nonzero. After bootstrap stdout is the mcp
+  channel and carries no records.
+
+Startup, in order: validate the config, connect the upstream servers, list
+their tools, resolve the selection. Nothing is served before all of it
+succeeded.
+
+- Connection rules are the runner's: a non required server that fails to
+  connect is skipped and its tools are not exposed; the `expose`/`hide`
+  records naming its tools are dropped with it.
+- An `expose` or `hide` record naming a server absent from the `tools`
+  record, or a tool a connected server does not list, is a fatal startup
+  error. Catches typos.
+- Each upstream tool is named by at most one `expose`/`hide` record, and
+  exposed names are unique (`invalid_record`, fatal).
+
+Tool selection:
+
+- No `expose` and no `hide` record: every tool of every connected server is
+  exposed.
+- One or more `expose` records: exactly their tools are exposed — the
+  whitelist.
+- One or more `hide` records: every tool except theirs — the blacklist.
+- Mixing `expose` and `hide` in one config is `invalid_record`, fatal.
+
+Exposed shape:
+
+- Name: `name` when present, else the `tool` selector.
+- Description: `description` when present, else the upstream description.
+- Input schema: the upstream schema with the `arguments` renames and
+  description overrides applied; properties keep their type, required state
+  and position. The resulting set of argument names must stay unique
+  (`invalid_record`, fatal).
+- Order: whitelist mode follows the `expose` record order; default and
+  blacklist mode follow the `tools` record server order, then each server's
+  own listing order.
+
+Calls:
+
+- `tools/call` on an exposed tool is forwarded to its upstream server: tool
+  name and argument names are mapped back to the upstream ones, the result
+  is relayed verbatim.
+- Calls are serialized, one at a time, replies written in request order.
+- An upstream failure — the call errors, or a stdio server died — is
+  answered as a failed call carrying the message; the proxy stays up.
+- Only tools are proxied: prompts and resources are not forwarded, the
+  proxy advertises the tools capability only.
