@@ -1,0 +1,7 @@
+{"type":"header","version":1}
+{"type":"llm","endpoint_protocol":"anthropic","api_base":"https://api.anthropic.com/v1","model":"claude-sonnet-4-5","headers":{"x-api-key":"sk-ant-api03-REPLACE-WITH-YOUR-KEY","anthropic-version":"2023-06-01"},"inference_options":{"temperature":0.7,"top_p":0.9,"max_tokens":4096,"stop":["\n\nHuman:"],"top_k":40,"thinking_budget":2048,"stream":true}}
+{"type":"tools","tools":[{"type":"stdio","name":"fs","command_line":"npx -y @modelcontextprotocol/server-filesystem /tmp","required":true},{"type":"http","name":"context7","url":"https://mcp.context7.com/mcp","required":false}]}
+{"type":"options","max_tool_rounds":8,"tool_call_timeout":30,"stream_interval":0.25,"llm_connect_timeout":5,"llm_read_timeout":1200}
+{"type":"system","content":[{"type":"text","text":"You are a concise unix expert."},{"type":"text","text":"When tools can answer a question, use them instead of guessing."}]}
+{"type":"user","content":[{"type":"text","text":"List the files in /tmp and summarize what you find."}]}
+{"type":"flush"}

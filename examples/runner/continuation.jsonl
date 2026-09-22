@@ -1,0 +1,10 @@
+{"type":"header","version":1}
+{"type":"llm","endpoint_protocol":"openai","api_base":"http://localhost:11434/v1","model":"llama3.1","inference_options":{"max_tokens":1024}}
+{"type":"user","content":[{"type":"text","text":"What files are in /tmp?"}]}
+{"type":"thinking","text":"The user wants a directory listing; I should call the fs tool.","partial":false,"signature":""}
+{"type":"response","text":"Let me check.","partial":false}
+{"type":"tool_request","tool":"fs.list_directory","arguments":{"path":"/tmp"},"id":"call_01","usage":{"input_tokens":412,"output_tokens":36},"finish_reason":"tool_use"}
+{"type":"tool_response","id":"call_01","text":"notes.txt\nreport.md"}
+{"type":"response","text":"There are two files: ","partial":true}
+{"type":"response","text":"notes.txt and report.md.","partial":false,"usage":{"input_tokens":501,"output_tokens":22},"finish_reason":"stop"}
+{"type":"user","content":[{"type":"text","text":"Open notes.txt and quote its first line."}]}

@@ -1,0 +1,5 @@
+{"type":"header","version":1}
+{"type":"tools","tools":[{"type":"stdio","name":"fs","command_line":"npx -y @modelcontextprotocol/server-filesystem /tmp"}]}
+{"type":"hide","tool":"fs.write_file"}
+{"type":"hide","tool":"fs.edit_file"}
+{"type":"hide","tool":"fs.move_file"}

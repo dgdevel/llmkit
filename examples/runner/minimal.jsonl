@@ -1,0 +1,2 @@
+{"type":"llm","endpoint_protocol":"openai","api_base":"http://localhost:11434/v1","model":"llama3.1"}
+{"type":"user","content":[{"type":"text","text":"In one sentence: what is jsonl?"}]}
