@@ -2,7 +2,7 @@
 
 Implements [docs/requirements.md](requirements.md), transcript format version 1.
 Every deferral named there is answered here: libraries in §1, the exit code table
-in §11, `cache_control` placement and openai caching in §7, wire-level protocol
+in §12, `cache_control` placement and openai caching in §7, wire-level protocol
 details in §5 and §6. Where this document picks a ceiling, it is marked
 `ponytail:` with the upgrade path.
 
@@ -18,9 +18,10 @@ details in §5 and §6. Where this document picks a ceiling, it is marked
 8. [external stop](#8-external-stop)
 9. [agent-as-tool](#9-agent-as-tool)
 10. [mcp-proxy](#10-mcp-proxy)
-11. [exit codes](#11-exit-codes)
-12. [build and packaging](#12-build-and-packaging)
-13. [testing](#13-testing)
+11. [call](#11-call)
+12. [exit codes](#12-exit-codes)
+13. [build and packaging](#13-build-and-packaging)
+14. [testing](#14-testing)
 
 ## 1. technology choices
 
@@ -145,7 +146,7 @@ block. openai: `choices[0].message` (`content` → `response`,
 `status`/`incomplete_details` → normalized `finish_reason`, and `usage`.
 anthropic: `content` blocks (`text`/`thinking`/`tool_use`), `stop_reason`,
 `usage`. Stream parity — both modes produce identical final records — is
-asserted by the selfcheck (§13).
+asserted by the selfcheck (§14).
 
 Timeouts:
 
@@ -428,7 +429,56 @@ Same core, third entry point. `llmkit mcp-proxy <config.jsonl>`:
   response and the proxy stays up.
 - Threads: main plus one reader per stdio upstream, same queues as §2.
 
-## 11. exit codes
+## 11. call
+
+Same core, fourth entry point, first front-end: `llmkit call` compiles argv
+to records and runs one conversation, plain text out (requirements §11). No
+new wire, mcp or loop code; one new `src/call.c`, a dispatch line in
+`src/main.c`.
+
+- **flag parsing** — hand-rolled loop, no getopt: exact string match, the
+  value is the next argv token (a missing value is a usage error), any
+  order, no `--flag=value` form, no short forms, no abbreviation.
+  Repeatable flags append in argv order. The parser decides CLI shape
+  only; value problems stay record validation, per the requirements' two
+  error tiers.
+- **compilation** — the agent seed path verbatim: `signals_init`,
+  `engine_new` with the call sink, `engine_apply_config_record` for the
+  `llm` (carrying `inference_options.max_tokens` when `--max-tokens` is
+  given — the one inference knob, anthropic makes it mandatory),
+  optional `system` and optional `tools` records, `tlist_ingest`
+  for the `user` record, then `engine_start` + `engine_run`, exit code
+  passed through. No stdin reader thread, no queue, no header record: the
+  record channel does not exist.
+- **`--prompt -`** — stdin is read to EOF before anything else runs. Byte
+  hygiene is §3's minus the line splitting: every `0x0d` dropped, strict
+  UTF-8, a leading BOM rejected, NUL rejected — violations take the
+  `invalid_record` tier (stderr line, exit 2): the compiled `user` record
+  would fail the same validation.
+- **sink** — `response` records: one `fwrite` + `fflush` of `text`, the §2
+  rule (deltas are small, interactive use wants them immediate). `error`
+  records, fatal or not: one stderr line each, `llmkit call: <code>:
+  <message>`. Everything else — `thinking` above all — is dropped. The
+  sink tracks the last byte written; on exit 0 one `\n` is added when the
+  answer does not already end with one, an empty answer writes nothing.
+  Out-of-channel errors use the same prefix with no code:
+  `llmkit call: <what>`, exit 1.
+- **`--mcp-proxy` spawn** — the `tools` record `command_line` runs through
+  `/bin/sh -c` (§6), so both paths are POSIX single-quote quoted
+  (`'` becomes `'\''`): `'<exe>' mcp-proxy '<config>'`. `<exe>` is
+  `readlink("/proc/self/exe")` — linux only, read once, only when the
+  flag is present, `argv[0]` as fallback if the readlink fails. Server
+  `name`: the config path's basename with the last extension dropped (any
+  extension, not just `.jsonl`); empty or repeated is a usage error
+  before anything runs. All such servers non required: a connect failure
+  is the runner's non-fatal `connect_failed`, one stderr line, the
+  conversation continues without those tools.
+- **`--header` merge** — compiled into the `headers` object at flag-parse
+  time; a later same-name flag replaces the earlier value in place. The
+  tree is built once, before any turn: §7 determinism is unaffected.
+- Threads: none of its own beyond the engine's stdio server readers.
+
+## 12. exit codes
 
 | code | meaning |
 |---|---|
@@ -445,21 +495,22 @@ Same core, third entry point. `llmkit mcp-proxy <config.jsonl>`:
 When several fatal records could apply, the first one emitted decides.
 Non-fatal error records never influence the exit code.
 
-## 12. build and packaging
+## 13. build and packaging
 
 Plain Makefile, no build system:
 
 - `make` → `llmkit` (cc, linux)
-- `make check` → builds and runs `test/selfcheck` (§13)
+- `make check` → builds and runs `test/selfcheck` (§14)
 
 Sources: `src/main.c` (subcommands), `src/agent.c` (agent-as-tool),
+`src/call.c` (argv→record compiler, plain-text sink for `llmkit call`),
 `src/proxy.c` (mcp-proxy config, rewrite and resolution),
 `src/engine.c` (state machine + turn loop), `src/jsonl.c` (input pipeline,
 validation), `src/wire_openai.c`, `src/wire_anthropic.c`, `src/sse.c`,
 `src/mcp.c`, `src/buf.c` (byte buffers, the §7 append-only buffer),
 `src/platform.c` (threads, spawn, signals). Link flags: `-lcjson -lcurl`.
 
-## 13. testing
+## 14. testing
 
 `make check` builds one `selfcheck` binary, plain asserts, no framework:
 
@@ -478,6 +529,11 @@ validation), `src/wire_openai.c`, `src/wire_anthropic.c`, `src/sse.c`,
   applied against an in-process fake endpoint function.
 - **mcp proxy**: expose/hide resolution and validation, schema rewrite
   determinism, inverse argument mapping on call forwarding.
+- **call**: argv→record compilation vectors through the serialization seam
+  — protocol mapping, absent `system`, `--header` replace, `--mcp-proxy`
+  quoting and name derivation, usage errors exiting 1 — plus one
+  fake-endpoint end-to-end per protocol: text on stdout, `thinking`
+  dropped, trailing newline, exit 0.
 
 `ponytail:` no network integration tests in-tree; a `test/live.sh` hitting a
 real endpoint is added when the first endpoint bug shows up.

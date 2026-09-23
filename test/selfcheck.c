@@ -1,7 +1,7 @@
-/* selfcheck.c — plain asserts, no framework (design §13).
+/* selfcheck.c — plain asserts, no framework (design §14).
    Categories: prefix invariant, sse parser, stream parity, validation,
    state machine (flush/steering/drop rule/max rounds/sigint), mcp client
-   (fake child servers), mcp proxy. */
+   (fake child servers), mcp proxy, call (argv compilation, scripted runs). */
 #include "llmkit.h"
 
 #include <signal.h>
@@ -1699,6 +1699,294 @@ static void test_agent_tool(void) {
     spawn_kill(&sp);
 }
 
+/* ================= llmkit call ================= */
+
+static void test_call(void) {
+    call_cfg_t c;
+    char err[256];
+    buf_t b;
+
+    /* parse: the full vector, exact llm serialization */
+    {
+        char *av[] = {"--anthropic", "http://x/v1", "--key", "k",
+                      "--model", "m", "--max-tokens", "1024",
+                      "--system-prompt", "sys",
+                      "--header", "a=1", "--header", "b=2",
+                      "--prompt", "hi"};
+        check(call_parse((int)(sizeof av / sizeof av[0]), av, &c, err, sizeof err) == 0,
+              "call: full vector parses");
+        check(c.protocol == PROTO_ANTHROPIC, "call: anthropic mapping");
+        check(c.max_tokens == 1024, "call: max-tokens captured");
+        cJSON *llm = call_build_llm(&c);
+        buf_init(&b);
+        buf_append_tree(&b, llm);
+        cJSON_Delete(llm);
+        check_str(b.data,
+                  "{\"type\":\"llm\",\"endpoint_protocol\":\"anthropic\","
+                  "\"api_base\":\"http://x/v1\",\"api_key\":\"k\","
+                  "\"model\":\"m\",\"inference_options\":"
+                  "{\"max_tokens\":1024},\"headers\":{\"a\":\"1\","
+                  "\"b\":\"2\"}}",
+                  "call: llm serialization");
+        buf_free(&b);
+        cJSON *sys = call_build_system(&c);
+        buf_init(&b);
+        buf_append_tree(&b, sys);
+        cJSON_Delete(sys);
+        check_str(b.data,
+                  "{\"type\":\"system\",\"content\":[{\"type\":\"text\","
+                  "\"text\":\"sys\"}]}",
+                  "call: system serialization");
+        buf_free(&b);
+        cJSON *user = call_build_user(c.prompt);
+        buf_init(&b);
+        buf_append_tree(&b, user);
+        cJSON_Delete(user);
+        check_str(b.data,
+                  "{\"type\":\"user\",\"content\":[{\"type\":\"text\","
+                  "\"text\":\"hi\"}]}",
+                  "call: user serialization");
+        buf_free(&b);
+        call_cfg_free(&c);
+    }
+
+    /* minimal vector: absent fields are not sent at all */
+    {
+        char *av[] = {"--openai", "http://x", "--prompt", "p"};
+        check(call_parse((int)(sizeof av / sizeof av[0]), av, &c, err, sizeof err) == 0,
+              "call: minimal vector parses");
+        check(c.protocol == PROTO_OPENAI, "call: openai mapping");
+        check(call_build_system(&c) == NULL,
+              "call: absent system -> no record");
+        check(call_build_tools(&c, "/x") == NULL,
+              "call: no proxies -> no record");
+        cJSON *llm = call_build_llm(&c);
+        buf_init(&b);
+        buf_append_tree(&b, llm);
+        cJSON_Delete(llm);
+        check_str(b.data,
+                  "{\"type\":\"llm\",\"endpoint_protocol\":\"openai\","
+                  "\"api_base\":\"http://x\"}",
+                  "call: minimal llm serialization");
+        buf_free(&b);
+        call_cfg_free(&c);
+    }
+
+    /* responses mapping + header replace */
+    {
+        char *av[] = {"--openai-responses", "http://x", "--header", "a=1",
+                      "--header", "a=2", "--prompt", "p"};
+        check(call_parse((int)(sizeof av / sizeof av[0]), av, &c, err, sizeof err) == 0,
+              "call: responses vector parses");
+        check(c.protocol == PROTO_RESPONSES, "call: responses mapping");
+        check(c.nhdrs == 1 && !strcmp(c.hdr_values[0], "2"),
+              "call: later --header replaces the earlier");
+        call_cfg_free(&c);
+    }
+
+    /* shell quoting */
+    buf_init(&b);
+    call_shell_quote(&b, "/opt/llm kit's/bin");
+    check_str(b.data, "'/opt/llm kit'\\''s/bin'", "call: shell quote");
+    buf_free(&b);
+
+    /* tools build: argv-order names, quoted command_line */
+    {
+        char *av[] = {"--openai", "http://x", "--mcp-proxy", "/tmp/fs.jsonl",
+                      "--mcp-proxy", "dir/sub/other.cfg", "--prompt", "p"};
+        check(call_parse((int)(sizeof av / sizeof av[0]), av, &c, err, sizeof err) == 0,
+              "call: proxy vector parses");
+        cJSON *t = call_build_tools(&c, "/opt/llm kit's/bin");
+        buf_init(&b);
+        buf_append_tree(&b, t);
+        cJSON_Delete(t);
+        check_str(b.data,
+                  "{\"type\":\"tools\",\"tools\":[{\"type\":\"stdio\","
+                  "\"name\":\"fs\",\"command_line\":\"'/opt/llm kit'\\\\''s/"
+                  "bin' mcp-proxy '/tmp/fs.jsonl'\"},{\"type\":\"stdio\","
+                  "\"name\":\"other\",\"command_line\":\"'/opt/llm kit'\\\\''"
+                  "s/bin' mcp-proxy 'dir/sub/other.cfg'\"}]}",
+                  "call: tools serialization");
+        buf_free(&b);
+        call_cfg_free(&c);
+    }
+
+    /* usage errors */
+    {
+        char *e0[] = {NULL};
+        check(call_parse(0, e0, &c, err, sizeof err) == 1,
+              "call: no flags is a usage error");
+        check(err[0] != '\0', "call: usage error fills the message");
+        char *e1[] = {"--openai"};
+        check(call_parse(1, e1, &c, err, sizeof err) == 1,
+              "call: missing api_base");
+        char *e2[] = {"--openai", "http://x"};
+        check(call_parse(2, e2, &c, err, sizeof err) == 1,
+              "call: missing --prompt");
+        char *e3[] = {"--openai", "--anthropic", "http://x", "--prompt", "p"};
+        check(call_parse(5, e3, &c, err, sizeof err) == 1,
+              "call: protocol flag twice");
+        char *e4[] = {"--openai", "http://x", "--prompt"};
+        check(call_parse(3, e4, &c, err, sizeof err) == 1,
+              "call: missing flag value");
+        char *e5[] = {"--openai", "http://x", "--prompt", "p", "extra"};
+        check(call_parse(5, e5, &c, err, sizeof err) == 1,
+              "call: extra positional");
+        char *e6[] = {"--openai", "http://x", "--wat", "--prompt", "p"};
+        check(call_parse(5, e6, &c, err, sizeof err) == 1,
+              "call: unknown flag");
+        char *e7[] = {"--openai", "http://x", "--header", "novalue",
+                      "--prompt", "p"};
+        check(call_parse(6, e7, &c, err, sizeof err) == 1,
+              "call: malformed --header");
+        char *e8[] = {"--openai", "http://x", "--header", "=v",
+                      "--prompt", "p"};
+        check(call_parse(6, e8, &c, err, sizeof err) == 1,
+              "call: empty --header name");
+        char *e9[] = {"--openai", "http://x", "--mcp-proxy", "/a/.jsonl",
+                      "--prompt", "p"};
+        check(call_parse(6, e9, &c, err, sizeof err) == 1,
+              "call: empty proxy server name");
+        char *e10[] = {"--openai", "http://x", "--mcp-proxy", "/a/x.jsonl",
+                       "--mcp-proxy", "/b/x.jsonl", "--prompt", "p"};
+        check(call_parse(8, e10, &c, err, sizeof err) == 1,
+              "call: repeated proxy server name");
+        char *e11[] = {"--openai", "http://x", "--key", "a", "--key", "b",
+                       "--prompt", "p"};
+        check(call_parse(7, e11, &c, err, sizeof err) == 1,
+              "call: --key twice");
+        char *e12[] = {"--openai", "http://x", "--max-tokens", "0",
+                       "--prompt", "p"};
+        check(call_parse(5, e12, &c, err, sizeof err) == 1,
+              "call: --max-tokens wants a positive integer");
+    }
+
+    /* record tier: validation fires before anything runs */
+    {
+        char *av[] = {"--openai", "http://x", "--key", "a\r", "--prompt", "p"};
+        check(call_parse((int)(sizeof av / sizeof av[0]), av, &c, err, sizeof err) == 0,
+              "call: CR-in-key vector parses (CLI shape is fine)");
+        char *ob = NULL, *eb = NULL;
+        size_t on = 0, en = 0;
+        FILE *out = open_memstream(&ob, &on);
+        FILE *er = open_memstream(&eb, &en);
+        check(call_run(&c, out, er, "/x", NULL) == EXIT_INVALID_RECORD,
+              "call: CR in key is invalid_record, exit 2");
+        fclose(out);
+        fclose(er);
+        check(strstr(eb, "llmkit call: invalid_record:") == eb,
+              "call: stderr line format");
+        check(on == 0, "call: nothing on stdout before validation passes");
+        free(ob);
+        free(eb);
+        call_cfg_free(&c);
+    }
+    {
+        char *av[] = {"--openai", "http://x", "--prompt", "\xff"};
+        check(call_parse((int)(sizeof av / sizeof av[0]), av, &c, err, sizeof err) == 0,
+              "call: bad-utf8 vector parses");
+        char *ob = NULL, *eb = NULL;
+        size_t on = 0, en = 0;
+        FILE *out = open_memstream(&ob, &on);
+        FILE *er = open_memstream(&eb, &en);
+        check(call_run(&c, out, er, "/x", NULL) == EXIT_INVALID_RECORD,
+              "call: invalid UTF-8 in a flag is invalid_record");
+        fclose(out);
+        fclose(er);
+        free(ob);
+        free(eb);
+        call_cfg_free(&c);
+    }
+
+    /* end-to-end per protocol: text out, thinking dropped, newline */
+    {
+        int protos[] = {PROTO_OPENAI, PROTO_RESPONSES, PROTO_ANTHROPIC};
+        for (int i = 0; i < 3; i++) {
+            fturn_t turns[] = {
+                { .recs = (const char *[]){
+                      "{\"type\":\"thinking\",\"text\":\"secret\","
+                      "\"partial\":false}",
+                      "{\"type\":\"response\",\"text\":\"Hel\","
+                      "\"partial\":true}",
+                      "{\"type\":\"response\",\"text\":\"lo\","
+                      "\"partial\":false}"},
+                  .nrecs = 3, .kind = TURN_FINAL, .abort_after = -1 },
+            };
+            g_factory_wire = fwire_new(turns, 1);
+            memset(&c, 0, sizeof c);
+            c.protocol = protos[i];
+            c.api_base = strdup("http://x");
+            c.prompt = strdup("q");
+            c.max_tokens = i == 2 ? 512 : -1; /* anthropic requires it */
+            char *ob = NULL, *eb = NULL;
+            size_t on = 0, en = 0;
+            FILE *out = open_memstream(&ob, &on);
+            FILE *er = open_memstream(&eb, &en);
+            int rc = call_run(&c, out, er, "/x", script_factory);
+            fclose(out);
+            fclose(er);
+            check(rc == EXIT_OK, "call: scripted run exits 0");
+            check_str(ob, "Hello\n", "call: thinking dropped, text + newline");
+            check(en == 0, "call: no stderr on a clean run");
+            free(ob);
+            free(eb);
+            call_cfg_free(&c);
+        }
+    }
+
+    /* fatal endpoint error: exit code + one stderr line */
+    {
+        fturn_t turns[] = {
+            { .recs = NULL, .nrecs = 0, .kind = TURN_FATAL,
+              .fatal_json = "{\"type\":\"error\",\"code\":\"api_error\","
+                            "\"message\":\"boom\",\"fatal\":true}",
+              .abort_after = -1 },
+        };
+        g_factory_wire = fwire_new(turns, 1);
+        memset(&c, 0, sizeof c);
+        c.protocol = PROTO_OPENAI;
+        c.api_base = strdup("http://x");
+        c.prompt = strdup("q");
+        char *ob = NULL, *eb = NULL;
+        size_t on = 0, en = 0;
+        FILE *out = open_memstream(&ob, &on);
+        FILE *er = open_memstream(&eb, &en);
+        int rc = call_run(&c, out, er, "/x", script_factory);
+        fclose(out);
+        fclose(er);
+        check(rc == EXIT_API_ERROR, "call: api_error exit code");
+        check(strstr(eb, "llmkit call: api_error: boom") == eb,
+              "call: fatal error stderr line");
+        check(on == 0, "call: no stdout on a fatal run");
+        free(ob);
+        free(eb);
+        call_cfg_free(&c);
+    }
+
+    /* empty answer writes nothing at all */
+    {
+        fturn_t turns[] = {
+            { .recs = (const char *[]){
+                  "{\"type\":\"response\",\"text\":\"\",\"partial\":false}"},
+              .nrecs = 1, .kind = TURN_FINAL, .abort_after = -1 },
+        };
+        g_factory_wire = fwire_new(turns, 1);
+        memset(&c, 0, sizeof c);
+        c.protocol = PROTO_OPENAI;
+        c.api_base = strdup("http://x");
+        c.prompt = strdup("q");
+        char *ob = NULL;
+        size_t on = 0;
+        FILE *out = open_memstream(&ob, &on);
+        int rc = call_run(&c, out, stderr, "/x", script_factory);
+        fclose(out);
+        check(rc == EXIT_OK, "call: empty answer exits 0");
+        check(on == 0, "call: empty answer writes nothing");
+        free(ob);
+        call_cfg_free(&c);
+    }
+}
+
 int main(void) {
     signals_init();
     http_global_init();
@@ -1724,6 +2012,8 @@ int main(void) {
     test_hostile_endpoint();
     fprintf(stderr, "selfcheck: agent-as-tool\n");
     test_agent_tool();
+    fprintf(stderr, "selfcheck: call\n");
+    test_call();
     fprintf(stderr, "%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
 }

@@ -25,6 +25,8 @@ applies. Rules marked *(proposed)* are working desiderata, not yet frozen.
    - header · llm · tools · options · agent-as-tool · expose · hide · flush · start · system · user · thinking · tool_request · tool_response · response · error
 9. [llmkit agent-as-tool](#9-llmkit-agent-as-tool)
 10. [llmkit mcp-proxy](#10-llmkit-mcp-proxy)
+11. [llmkit call](#11-llmkit-call)
+   - [cli surface](#cli-surface) · [--mcp-proxy](#--mcp-proxy) · [output and errors](#output-and-errors)
 
 ## 1. cli conventions
 
@@ -764,3 +766,112 @@ Calls:
   answered as a failed call carrying the message; the proxy stays up.
 - Only tools are proxied: prompts and resources are not forwarded, the
   proxy advertises the tools capability only.
+
+## 11. llmkit call
+
+Fourth command: the plain text front-end. One prompt in, one answer out.
+`llmkit call` compiles its command line to the same record stream the runner
+takes, runs the same conversation engine — loop, mapping, options, error
+rules — and prints the answer as plain text. Built for shell one-liners and
+quick endpoint checks; anything past one prompt is `runner` territory.
+Everything in this section is *(proposed)*.
+
+```
+llmkit call (--anthropic | --openai | --openai-responses) <api_base>
+            [--key <token>] [--model <name>] [--max-tokens <n>]
+            [--system-prompt <text>]
+            [--header <name=value>]... [--mcp-proxy <config>]...
+            --prompt <text|->
+```
+
+Arguments may come in any order; `<api_base>` is the only positional.
+
+### cli surface
+
+| argument | count | description |
+|---|---|---|
+| `--anthropic` / `--openai` / `--openai-responses` | exactly one | protocol selector; maps to `endpoint_protocol` `anthropic`, `openai` (chat completions api) or `openai_responses` (responses api); the flag names follow the record vocabulary |
+| `<api_base>` | exactly one | positional; carried to the `llm` record verbatim, same append rules, no normalization |
+| `--key <token>` | 0–1 | carried to `api_key`; the token stays visible in the process list for the life of the process, no alternative channel is offered in this version |
+| `--model <name>` | 0–1 | carried to `model`; absent means the field is not sent, llama.cpp style endpoints work without it |
+| `--max-tokens <n>` | 0–1 | compiles to `inference_options.max_tokens`; the one inference knob, born of necessity — anthropic rejects a request without `max_tokens` (see [inference options](#4-inference-options)), so the front-end needs the one escape; absent means the field is not sent; a value that is not a positive integer is a usage error |
+| `--system-prompt <text>` | 0–1 | compiles to one `system` record; absent compiles to no `system` record at all — an absent record and an empty text are different on the wire and the absent one is meant |
+| `--header <name>=<value>` | 0–n | compiles to `headers` entries; a later `--header` with the same name replaces the earlier one; a missing `=` or an empty name is a usage error |
+| `--mcp-proxy <config>` | 0–n | one stdio mcp server per flag, see [below](#--mcp-proxy) |
+| `--prompt <text\|->` | exactly one | compiles to the `user` record; the value `-` reads the whole of stdin as the prompt text, UTF-8 enforced — argv length limits make stdin the channel for long prompts |
+
+CLI shape errors — protocol flag missing or repeated, positional argument
+missing or extra, `--prompt` missing, unknown flag, malformed `--header` —
+are usage errors: message on stderr, exit 1, nothing connects or runs.
+
+### compiled record stream
+
+The command line compiles to, in order: one `llm` record — carrying
+`inference_options.max_tokens` when `--max-tokens` is given — the optional
+`system` record, the optional `tools` record, one `user` record. From there
+the conversation is the runner's, unchanged: same loop (tool rounds run to
+completion when `--mcp-proxy` servers are given), same record validation,
+same option defaults — no `options` record is compiled. Record level
+problems a flag value carries (CR or LF in `--key` or a `--header` value, a
+non-http `api_base`) therefore surface as `invalid_record`, exit 2, exactly
+as if the same records had been fed to `llmkit runner`.
+
+Example:
+
+```
+llmkit call --anthropic http://1.2.3.4/v1 --key xxx --model yyy \
+  --max-tokens 1024 \
+  --system-prompt "You are a helpful assistant" --prompt "hello, how are you?"
+```
+
+compiles to the record stream:
+
+```
+{"type":"llm","endpoint_protocol":"anthropic","api_base":"http://1.2.3.4/v1","api_key":"xxx","model":"yyy","inference_options":{"max_tokens":1024}}
+{"type":"system","content":[{"type":"text","text":"You are a helpful assistant"}]}
+{"type":"user","content":[{"type":"text","text":"hello, how are you?"}]}
+```
+
+and prints the answer text on stdout, nothing else.
+
+### --mcp-proxy
+
+Each `--mcp-proxy <config>` compiles to one stdio server entry of a single
+`tools` record:
+
+- `command_line` spawns this same executable — the one already running — as
+  `llmkit mcp-proxy <config>`, the config path passed verbatim as one
+  argument; how the executable resolves its own path, and the quoting that
+  keeps the path one argument, are design decisions.
+- Server `name`: the config path's basename without its last extension —
+  the name is the tool name prefix the model sees (`name.tool_name`), so it
+  is kept meaningful. An empty basename or a repeated name is a usage error:
+  rename the file.
+- Every such server is non required: one that fails to connect follows the
+  runner's rule — non-fatal `connect_failed`, one stderr line, the
+  conversation continues without its tools. No way to make one required is
+  offered.
+
+### output and errors
+
+- stdout carries the answer text only: the `text` of every `response`
+  record in arrival order — partials are deltas and concatenate to the
+  block, so text appears as it streams, merged per the default
+  `stream_interval` — including the text of turns that continue into tool
+  calls. `thinking` records are never printed; `usage`, `finish_reason` and
+  every other record field does not appear either: anything beyond the text
+  is `runner` territory.
+- The last write ensures a trailing newline unless the text already ends
+  with one; an empty answer writes nothing at all.
+- Error records surface as one human readable stderr line each; the exact
+  format is a design decision.
+- SIGINT is the runner's external stop; text already printed stays printed,
+  running tools complete, exit code from the table.
+- Exit codes: the design table, unchanged — 0 only when the conversation
+  ended with a successful final `response`; a stdout write failure (the
+  reader closed the pipe) is the out-of-channel exit 1.
+
+Deliberately not offered: multi-turn conversation, inference-option flags
+beyond `--max-tokens`, `options` knobs, environment-variable or
+config-file indirection for any flag, record/jsonl output. The escape hatch
+is composition — the same call as `llmkit runner` with hand-written records.

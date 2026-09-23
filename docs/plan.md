@@ -6,7 +6,7 @@ serialization first — cheapest to test, everything depends on them — then
 the wire clients, then the engine, then the subprocess and network edge
 features, and the two extra entry points last: they are thin compositions
 of the finished core. Every phase lands with its tests, so `make check`
-grows with the build instead of arriving at the end; design §13's selfcheck
+grows with the build instead of arriving at the end; design §14's selfcheck
 categories map onto the phases one to one.
 
 1. **scaffold** — makefile, subcommand dispatch, help/version, exit code
@@ -49,6 +49,18 @@ categories map onto the phases one to one.
     end, manual smoke pass of the documented flows: piped one-shot input,
     continuation replay, steering from a kept-open stdin.
 
-Out of scope per design §13: network integration tests in-tree; a
+Post-freeze increments, same discipline — each lands with its tests and
+rides on the finished core:
+
+11. **call** — the argv→record front-end of requirements §11 / design §11:
+    flag parser, compiler to records over the agent seed path, plain-text
+    sink with stderr error lines, `--mcp-proxy` self-spawn with shell
+    quoting, `--prompt -` stdin read. Tests: compilation vectors through
+    the serialization seam, usage-error exits, one fake-endpoint
+    end-to-end per protocol (text out, `thinking` dropped, trailing
+    newline, exit 0); `llmkit help` and the README command table updated
+    in the same change.
+
+Out of scope per design §14: network integration tests in-tree; a
 `test/live.sh` against a real endpoint appears when the first endpoint bug
 shows up.

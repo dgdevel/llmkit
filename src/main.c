@@ -1,4 +1,4 @@
-/* main.c — subcommand dispatch, help, version (design §12). */
+/* main.c — subcommand dispatch, help, version (design §13). */
 #include "llmkit.h"
 
 #include <stdio.h>
@@ -14,6 +14,8 @@ static int usage(FILE *out) {
           "                         tool on stdio\n"
           "  mcp-proxy <config>     expose a curated view of upstream mcp\n"
           "                         servers on stdio\n"
+          "  call <flags>           one prompt in, one answer out: plain\n"
+          "                         text on stdout\n"
           "  help                   show this help\n"
           "  version                show the version\n",
           out);
@@ -46,6 +48,7 @@ int main(int argc, char **argv) {
         if (argc != 3) return usage(stderr);
         return cmd_proxy(argv[2]);
     }
+    if (!strcmp(cmd, "call")) return cmd_call(argc, argv);
     if (!strcmp(cmd, "help")) return cmd_help();
     if (!strcmp(cmd, "version")) return cmd_version();
     fprintf(stderr, "llmkit: unknown command '%s'\n", cmd);

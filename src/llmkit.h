@@ -514,10 +514,39 @@ int proxy_resolve_and_build(proxy_state_t *p); /* 0 ok, -1 fatal */
 int proxy_handle(void *ctx, const char *method, cJSON *params, cJSON *id,
                  cJSON **result_out, char **errmsg_out);
 
+/* ================= call.c ================= */
+
+/* parsed `llmkit call` command line; the parser owns CLI shape only
+   (design §11) */
+typedef struct call_cfg {
+    int protocol;                    /* PROTO_* */
+    char *api_base;                  /* owned */
+    char *key, *model, *system, *prompt; /* owned, NULL = absent */
+    long max_tokens;                 /* -1 absent, >0 sent */
+    char **hdr_names, **hdr_values;  /* owned, parallel arrays */
+    size_t nhdrs;
+    char **proxies;                  /* owned config paths, argv order */
+    size_t nproxies;
+} call_cfg_t;
+
+void call_cfg_free(call_cfg_t *c);
+/* 0 ok, 1 usage error (err filled, cfg freed) */
+int call_parse(int argc, char **argv, call_cfg_t *c, char *err, size_t errsz);
+cJSON *call_build_llm(const call_cfg_t *c);
+cJSON *call_build_system(const call_cfg_t *c); /* NULL when absent */
+cJSON *call_build_tools(const call_cfg_t *c, const char *exe_path); /* NULL */
+cJSON *call_build_user(const char *prompt);
+void call_shell_quote(buf_t *b, const char *s); /* POSIX single-quote */
+/* compile + run one conversation; returns the exit code (design §11) */
+int call_run(const call_cfg_t *c, FILE *out, FILE *errf, const char *exe_path,
+             wire_t *(*factory)(engine_t *));
+
 /* ================= commands ================= */
+
 int cmd_runner(void);
 int cmd_agent(const char *seed_path);
 int cmd_proxy(const char *config_path);
+int cmd_call(int argc, char **argv);
 int cmd_help(void);
 int cmd_version(void);
 

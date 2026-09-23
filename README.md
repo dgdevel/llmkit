@@ -1,13 +1,14 @@
 # llmkit
 
 A single static-purpose executable for llm interaction from the shell and
-from other programs. One binary, three commands:
+from other programs. One binary, four commands:
 
 | command | what it does |
 |---|---|
 | `llmkit runner` | runs an llm conversation: jsonl records on stdin, jsonl records on stdout |
 | `llmkit agent-as-tool <seed.jsonl>` | exposes one agent conversation as a single `invoke` tool on a stdio mcp interface |
 | `llmkit mcp-proxy <config.jsonl>` | exposes a curated view (rename, redescribe, hide) of upstream mcp servers on stdio |
+| `llmkit call <flags>` | one prompt in, one answer out: plain text on stdout, the shell one-liner front-end |
 
 Written in C11. Talks to any openai-compatible endpoint (chat completions
 and responses apis) and any anthropic-compatible endpoint. Tools are mcp
@@ -51,6 +52,20 @@ every record type live in [examples/](examples/) — see
 [examples/records.md](examples/records.md) for the minimal and complete
 form of each record.
 
+For one-shot use from the shell there is `llmkit call`: flags in, the
+answer as plain text on stdout, thinking omitted, no records to write —
+
+```sh
+$ llmkit call --openai http://localhost:11434/v1 --model llama3.1 \
+      --system-prompt "You are a helpful assistant" \
+      --prompt "hello, how are you?"
+I'm fine, thank you!
+```
+
+`--prompt -` reads the prompt from stdin, so it pipes and captures:
+`ANSWER=$(llmkit call --openai "$API_BASE" --prompt - < input.txt)`.
+Anything past one prompt is `runner` territory.
+
 ## building
 
 Linux, a C11 compiler, plus:
@@ -69,7 +84,7 @@ No build system beyond the plain Makefile.
 ## behavior notes
 
 - Exit code 0 only when the conversation ended with a successful final
-  `response`; every fatal condition has its own exit code (see design §11).
+  `response`; every fatal condition has its own exit code (see design §12).
 - SIGINT is an orderly stop: buffered text is flushed as a trailing
   partial record, running tools complete, a second SIGINT kills the
   process immediately.

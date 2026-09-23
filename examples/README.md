@@ -24,7 +24,10 @@ examples/
     ├── runner-continue.sh     input + previous output + new user record
     ├── runner-steer.sh        steering: flush while a turn is in flight
     ├── agent-as-tool.sh       raw json-rpc over the stdio mcp interface
-    └── mcp-proxy.sh           raw json-rpc over the stdio mcp interface
+    ├── mcp-proxy.sh           raw json-rpc over the stdio mcp interface
+    ├── call-minimal.sh        llmkit call: one prompt, plain text answer
+    ├── call-prompt-stdin.sh   llmkit call with the prompt piped on stdin
+    └── call-anthropic.sh      llmkit call against the real anthropic api
 ```
 
 ## prerequisites
@@ -38,7 +41,9 @@ endpoint. The shipped files assume a local ollama (`ollama serve`, then
 `ollama pull llama3.1`); edit the `llm` record of any example to point it
 elsewhere — see [records.md](records.md) for the field-by-field catalogue.
 `examples/runner/complete.jsonl` targets the real anthropic api and contains
-a placeholder `x-api-key` you must replace.
+a placeholder `x-api-key` you must replace. The `call-*.sh` scripts assume
+the same endpoints; `call-anthropic.sh` wants `ANTHROPIC_API_KEY` set (or
+edit the placeholder in place).
 
 `mcp-proxy.sh` spawns `npx -y @modelcontextprotocol/server-filesystem /tmp`
 as its upstream server, so it needs node/npx (first run downloads the
@@ -56,6 +61,7 @@ Or by hand:
 
 ```sh
 llmkit runner < examples/runner/minimal.jsonl
+llmkit call --openai http://localhost:11434/v1 --model llama3.1 --prompt "hello"
 ```
 
 Every `.jsonl` file here is one record per line: jsonl is oneline by

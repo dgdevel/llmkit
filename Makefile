@@ -4,7 +4,8 @@ CFLAGS  += -std=c11 -Wall -Wextra -pthread -Isrc
 LDLIBS   = -lcjson -lcurl -pthread
 
 SRC  = src/buf.c src/sse.c src/platform.c src/jsonl.c src/wire_openai.c \
-       src/wire_anthropic.c src/engine.c src/mcp.c src/agent.c src/proxy.c
+       src/wire_anthropic.c src/engine.c src/mcp.c src/agent.c src/proxy.c \
+       src/call.c
 MAIN = src/main.c
 TEST = test/selfcheck.c
 
