@@ -94,7 +94,7 @@ No build system beyond the plain Makefile.
 
 ## license
 
-Copyright (c) 2025 the llmkit authors.
+Copyright (c) 2026 Daniele Guttuso
 
 Distributed under the **European Union Public Licence v1.2 (EUPL-1.2)** —
 `SPDX-License-Identifier: EUPL-1.2`. The full license text is available at
