@@ -188,6 +188,11 @@ int spawn_shell(const char *command_line, spawn_t *out) {
         dup2(out_pipe[1], 1);
         close(in_pipe[0]); close(in_pipe[1]);
         close(out_pipe[0]); close(out_pipe[1]);
+        /* nothing else is inherited: other servers' pipes and any open
+           sockets belong to the parent, not to this server */
+        long maxfd = sysconf(_SC_OPEN_MAX);
+        if (maxfd < 0) maxfd = 16384;
+        for (int fd = 3; fd < maxfd; fd++) close(fd);
         execl("/bin/sh", "sh", "-c", command_line, (char *)NULL);
         _exit(127);
     }
@@ -312,12 +317,29 @@ int http_perform(http_req_t *r) {
     return -1;
 }
 
-void http_hdr_add(struct curl_slist **list, const char *name, const char *value) {
+/* a header name/value pair safe for the request line: CR/LF anywhere
+   would split into extra headers (header injection), ':' or whitespace
+   would break the name/value split */
+static bool hdr_str_ok(const char *s, bool is_name) {
+    if (!s || !*s) return false;
+    for (const char *p = s; *p; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (c == '\r' || c == '\n') return false;
+        if (is_name && (c == ':' || c == ' ' || c == '\t')) return false;
+    }
+    return true;
+}
+
+bool http_hdr_add(struct curl_slist **list, const char *name, const char *value) {
+    if (!hdr_str_ok(name, true) || !hdr_str_ok(value, false)) return false;
     buf_t b;
     buf_init(&b);
     buf_appendf(&b, "%s: %s", name, value);
-    *list = curl_slist_append(*list, b.data);
+    struct curl_slist *nl = curl_slist_append(*list, b.data);
     buf_free(&b);
+    if (!nl) return false;
+    *list = nl;
+    return true;
 }
 
 void http_hdr_add_json(struct curl_slist **list) {
@@ -336,7 +358,13 @@ bool http_hdrs_from_json(struct curl_slist **list, const cJSON *obj,
             snprintf(err, errsz, "header value of '%s' must be a string", it->string);
             return false;
         }
-        http_hdr_add(list, it->string, it->valuestring);
+        if (!http_hdr_add(list, it->string, it->valuestring)) {
+            snprintf(err, errsz,
+                     "header '%s': names and values must not contain "
+                     "CR or LF",
+                     it->string);
+            return false;
+        }
     }
     return true;
 }

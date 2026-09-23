@@ -197,8 +197,19 @@ static void rsp_assistant_items(owire_t *w, group_iter_t *g) {
             if (r->kind != T_THINK) continue;
             if (i < w->llm_mark) continue; /* dropped on llm change */
             if (!r->signature || !r->signature[0]) continue;
+            /* the signature is a serialized reasoning item and must go
+               into the body as raw json, so it is re-parsed and re-printed
+               here: a crafted signature from a replayed transcript must
+               not be able to inject arbitrary json into the request.
+               An honest item round-trips byte-identically. */
+            cJSON *sig = cJSON_Parse(r->signature);
+            if (!cJSON_IsObject(sig)) {
+                cJSON_Delete(sig);
+                continue;
+            }
             append_msg_sep(&w->msgbuf);
-            buf_append_str(&w->msgbuf, r->signature); /* raw serialized item */
+            buf_append_tree(&w->msgbuf, sig);
+            cJSON_Delete(sig);
         }
     }
     if (txt.len) {
@@ -474,18 +485,28 @@ static const char *finish_norm_responses(const char *status,
 
 /* ---------------- tool slots ---------------- */
 
-static tslot_t *slot_at(tslot_t **arr, size_t *n, size_t idx) {
-    if (idx >= *n) {
-        size_t nn = idx + 1;
-        *arr = realloc(*arr, nn * sizeof **arr);
-        for (size_t i = *n; i < nn; i++) {
-            (*arr)[i].id = strdup("");
-            (*arr)[i].name = strdup("");
-            buf_init(&(*arr)[i].args);
+/* endpoint-controlled slot index (tool_calls[].index / output_index):
+   bounded and allocation-checked. Out-of-range, non-finite or
+   unallocatable indices yield NULL and the chunk is dropped — a hostile
+   endpoint must not be able to size an allocation. */
+enum { MAX_TOOL_SLOTS = 1024 };
+
+static tslot_t *slot_at(tslot_t **arr, size_t *n, double idx) {
+    if (!(idx >= 0) || idx > (double)MAX_TOOL_SLOTS) return NULL;
+    size_t i = (size_t)idx;
+    if (i >= *n) {
+        size_t nn = i + 1;
+        tslot_t *grown = realloc(*arr, nn * sizeof **arr);
+        if (!grown) return NULL;
+        *arr = grown;
+        for (size_t k = *n; k < nn; k++) {
+            (*arr)[k].id = strdup("");
+            (*arr)[k].name = strdup("");
+            buf_init(&(*arr)[k].args);
         }
         *n = nn;
     }
-    return &(*arr)[idx];
+    return &(*arr)[i];
 }
 
 static void slots_reset(tslot_t **arr, size_t *n) {
@@ -523,9 +544,9 @@ static void chat_chunk(owire_t *w, const cJSON *ch) {
                     cJSON_GetObjectItemCaseSensitive(delta, "tool_calls");
                 if (cJSON_IsArray(tcs))
                     for (const cJSON *tc = tcs->child; tc; tc = tc->next) {
-                        double di = rec_num(tc, "index", 0);
                         tslot_t *s = slot_at(&w->slots, &w->nslots,
-                                             (size_t)(di < 0 ? 0 : di));
+                                             rec_num(tc, "index", 0));
+                        if (!s) continue;
                         const char *id = rec_str(tc, "id");
                         if (id) {
                             free(s->id);
@@ -640,9 +661,10 @@ static void rsp_item_done(owire_t *w, engine_t *e, const cJSON *item) {
         return;
     }
     if (ty && !strcmp(ty, "function_call")) {
-        double di = rec_num(item, "output_index", (double)w->nrslots);
-        if (di < 0) di = 0;
-        tslot_t *s = slot_at(&w->rslots, &w->nrslots, (size_t)di);
+        tslot_t *s = slot_at(&w->rslots, &w->nrslots,
+                             rec_num(item, "output_index",
+                                     (double)w->nrslots));
+        if (!s) return;
         const char *id = rec_str(item, "call_id");
         if (!id) id = rec_str(item, "id");
         if (id) {
@@ -675,11 +697,12 @@ static void rsp_event(owire_t *w, engine_t *e, const char *ev, const char *data,
         const cJSON *item = cJSON_GetObjectItemCaseSensitive(d, "item");
         if (item) rsp_item_done(w, e, item);
     } else if (!strcmp(ev, "response.function_call_arguments.delta")) {
-        double di = rec_num(d, "output_index", 0);
-        if (di < 0) di = 0;
-        tslot_t *s = slot_at(&w->rslots, &w->nrslots, (size_t)di);
-        const char *s2 = rec_str(d, "delta");
-        if (s2) buf_append_str(&s->args, s2);
+        tslot_t *s = slot_at(&w->rslots, &w->nrslots,
+                             rec_num(d, "output_index", 0));
+        if (s) {
+            const char *s2 = rec_str(d, "delta");
+            if (s2) buf_append_str(&s->args, s2);
+        }
     } else if (!strcmp(ev, "response.output_text.done")) {
         blk_stop(&w->be);
     } else if (!strcmp(ev, "response.completed") ||
@@ -796,9 +819,9 @@ static int chat_body_map(owire_t *w, engine_t *e, const cJSON *body,
         const cJSON *tcs = cJSON_GetObjectItemCaseSensitive(msg, "tool_calls");
         if (cJSON_IsArray(tcs))
             for (const cJSON *tc = tcs->child; tc; tc = tc->next) {
-                double di = rec_num(tc, "index", (double)w->nslots);
-                if (di < 0) di = 0;
-                tslot_t *s = slot_at(&w->slots, &w->nslots, (size_t)di);
+                tslot_t *s = slot_at(&w->slots, &w->nslots,
+                                     rec_num(tc, "index", (double)w->nslots));
+                if (!s) continue;
                 const char *id = rec_str(tc, "id");
                 if (id) {
                     free(s->id);
@@ -940,8 +963,10 @@ static int owire_turn(wire_t *base, engine_t *e, turn_out_t *out) {
     if (key && key[0] && !auth_override) {
         buf_t auth;
         buf_init(&auth);
-        buf_appendf(&auth, "Authorization: Bearer %s", key);
-        hdrs = curl_slist_append(hdrs, auth.data);
+        buf_appendf(&auth, "Bearer %s", key);
+        /* guards CR/LF: validate_llm rejects them up front; this drops
+           the header rather than letting a crafted key inject one */
+        http_hdr_add(&hdrs, "Authorization", auth.data);
         buf_free(&auth);
     }
     char errh[256] = "";

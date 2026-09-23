@@ -130,7 +130,7 @@ typedef struct http_req {
 
 /* 0 = 2xx, 1 = non-2xx (body captured), -1 = transport error */
 int http_perform(http_req_t *r);
-void http_hdr_add(struct curl_slist **list, const char *name, const char *value);
+bool http_hdr_add(struct curl_slist **list, const char *name, const char *value);
 void http_hdr_add_json(struct curl_slist **list);
 /* build a header list from a cJSON object of name->value strings; false on bad type */
 bool http_hdrs_from_json(struct curl_slist **list, const cJSON *obj,

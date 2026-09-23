@@ -383,9 +383,9 @@ A record holding the configuration of the llm endpoint.
 | `endpoint_protocol` | yes | `openai` (chat completions api), `openai_responses` (responses api) or `anthropic` |
 | `api_base` | yes | http or https url of the base address, path prefix included (e.g. `.../v1`); the runner appends only the final segment: `/chat/completions` for openai, `/responses` for openai_responses, `/messages` for anthropic; used verbatim, no normalization: a trailing slash is the caller's, the segment is appended as-is |
 | `model` | no | name of the model requested to the endpoint; when absent the field is simply not sent, llama.cpp style endpoints do not require it, endpoints that do answer with `api_error` |
-| `api_key` | no | token for authentication, passed verbatim, no environment variable expansion; the caller already owns the secret and feeds it through stdin; sent as `Authorization: Bearer <api_key>` on all protocols, a `headers` entry setting `Authorization` overrides it. The real anthropic api wants `x-api-key` and requires `anthropic-version`: callers target it through `headers`, e.g. `{"x-api-key":"...","anthropic-version":"2023-06-01"}` |
+| `api_key` | no | token for authentication, passed verbatim, no environment variable expansion; must not contain CR or LF (rejected as `invalid_record`: no header injection through it); the caller already owns the secret and feeds it through stdin; sent as `Authorization: Bearer <api_key>` on all protocols, a `headers` entry setting `Authorization` overrides it. The real anthropic api wants `x-api-key` and requires `anthropic-version`: callers target it through `headers`, e.g. `{"x-api-key":"...","anthropic-version":"2023-06-01"}` |
 | `inference_options` | no | sampling and inference parameters, normalized set, see [inference options](#4-inference-options) |
-| `headers` | no | object of header name to value, sent with every request to the endpoint |
+| `headers` | no | object of header name to value, sent with every request to the endpoint; CR or LF in a name or value is rejected (`invalid_record`) |
 
 ### tools
 
@@ -406,7 +406,7 @@ Fields per `type`:
 - `stdio`: `command_line` (required) — full command invocation, including
   arguments, executed through the system shell; the caller owns quoting.
 - `http` / `sse`: `url` (required), with optional `headers` object of header
-  name to value.
+  name to value (CR or LF in a name or value is rejected).
 
 Connection rules:
 

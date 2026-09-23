@@ -174,6 +174,10 @@ static int stdio_rpc(mcp_server_t *s, cJSON *req, cJSON **reply,
         return 1;
     }
     char *line = cJSON_PrintUnformatted(req);
+    if (!line) {
+        snprintf(err, errsz, "out of memory");
+        return 1;
+    }
     size_t len = strlen(line);
     if (write_all(s->sp.to_fd, line, len) || write_all(s->sp.to_fd, "\n", 1)) {
         cJSON_free(line);
@@ -221,9 +225,11 @@ static void stdio_notify(mcp_server_t *s, const char *method) {
     cJSON_AddStringToObject(n, "jsonrpc", "2.0");
     cJSON_AddStringToObject(n, "method", method);
     char *line = cJSON_PrintUnformatted(n);
-    write_all(s->sp.to_fd, line, strlen(line));
-    write_all(s->sp.to_fd, "\n", 1);
-    cJSON_free(line);
+    if (line) {
+        write_all(s->sp.to_fd, line, strlen(line));
+        write_all(s->sp.to_fd, "\n", 1);
+        cJSON_free(line);
+    }
     cJSON_Delete(n);
 }
 
@@ -301,6 +307,10 @@ static void sse_pick_cb(void *ctx, const char *ev, const char *data,
 static int http_rpc(mcp_server_t *s, cJSON *req, cJSON **reply, double timeout,
                     char *err, size_t errsz) {
     char *body = cJSON_PrintUnformatted(req);
+    if (!body) {
+        snprintf(err, errsz, "out of memory");
+        return 1;
+    }
     struct curl_slist *hdrs = NULL;
     http_hdr_add_json(&hdrs);
     hdrs = curl_slist_append(hdrs, "Accept: application/json, text/event-stream");
@@ -618,7 +628,10 @@ int mcp_call(mcp_mgr_t *m, const char *tool, cJSON *args, buf_t *text_out,
     }
     char srvname[256];
     size_t sl = (size_t)(dot - tool);
-    if (sl >= sizeof srvname) sl = sizeof srvname - 1;
+    if (sl >= sizeof srvname) {
+        snprintf(err, errsz, "tool server name too long in '%.64s...'", tool);
+        return 1;
+    }
     memcpy(srvname, tool, sl);
     srvname[sl] = '\0';
     mcp_server_t *s = mcp_find(m, srvname);
@@ -700,9 +713,11 @@ static void serve_line(serve_ctx_t *c, const char *line) {
         cJSON_AddItemToObject(resp, "id", idc);
         cJSON_AddItemToObject(resp, "result", result ? result : cJSON_CreateObject());
         char *out = cJSON_PrintUnformatted(resp);
-        c->wr(c->io, out, strlen(out));
-        c->wr(c->io, "\n", 1);
-        cJSON_free(out);
+        if (out) {
+            c->wr(c->io, out, strlen(out));
+            c->wr(c->io, "\n", 1);
+            cJSON_free(out);
+        }
         cJSON_Delete(resp);
     } else if (idc && rc == 1) {
         cJSON *resp = cJSON_CreateObject();
@@ -714,9 +729,11 @@ static void serve_line(serve_ctx_t *c, const char *line) {
                                 errmsg ? errmsg : "internal error");
         cJSON_AddItemToObject(resp, "error", errobj);
         char *out = cJSON_PrintUnformatted(resp);
-        c->wr(c->io, out, strlen(out));
-        c->wr(c->io, "\n", 1);
-        cJSON_free(out);
+        if (out) {
+            c->wr(c->io, out, strlen(out));
+            c->wr(c->io, "\n", 1);
+            cJSON_free(out);
+        }
         cJSON_Delete(resp);
     } else {
         cJSON_Delete(idc);

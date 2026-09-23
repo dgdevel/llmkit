@@ -79,6 +79,22 @@ static char *vmsg(const char *fmt, ...) {
     return m;
 }
 
+/* header objects travel verbatim into http request lines: CR/LF in a
+   name or value would inject additional headers */
+static char *validate_headers(const cJSON *h) {
+    for (const cJSON *it = h->child; it; it = it->next) {
+        if (!it->string) continue;
+        if (strchr(it->string, '\r') || strchr(it->string, '\n'))
+            return vmsg("header name must not contain CR or LF");
+        if (!cJSON_IsString(it))
+            return vmsg("header '%s' must have a string value", it->string);
+        if (strchr(it->valuestring, '\r') || strchr(it->valuestring, '\n'))
+            return vmsg("header '%s' value must not contain CR or LF",
+                        it->string);
+    }
+    return NULL;
+}
+
 char *validate_llm(const cJSON *t) {
     const cJSON *p = cJSON_GetObjectItemCaseSensitive(t, "endpoint_protocol");
     if (!cJSON_IsString(p) || !p->valuestring)
@@ -88,8 +104,16 @@ char *validate_llm(const cJSON *t) {
     const cJSON *b = cJSON_GetObjectItemCaseSensitive(t, "api_base");
     if (!cJSON_IsString(b) || !b->valuestring || !b->valuestring[0])
         return vmsg("llm record missing api_base");
+    const cJSON *k = cJSON_GetObjectItemCaseSensitive(t, "api_key");
+    if (cJSON_IsString(k) && k->valuestring &&
+        (strchr(k->valuestring, '\r') || strchr(k->valuestring, '\n')))
+        return vmsg("api_key must not contain CR or LF");
     const cJSON *h = cJSON_GetObjectItemCaseSensitive(t, "headers");
     if (h && !cJSON_IsObject(h)) return vmsg("llm headers must be an object");
+    if (h) {
+        char *m = validate_headers(h);
+        if (m) return m;
+    }
     const cJSON *io = cJSON_GetObjectItemCaseSensitive(t, "inference_options");
     if (io) {
         char *m = validate_inference(io);
@@ -195,6 +219,10 @@ char *validate_tools(const cJSON *t) {
         if (rq && !cJSON_IsBool(rq)) return vmsg("required must be a boolean");
         const cJSON *h = cJSON_GetObjectItemCaseSensitive(s, "headers");
         if (h && !cJSON_IsObject(h)) return vmsg("server headers must be an object");
+        if (h) {
+            char *m = validate_headers(h);
+            if (m) return m;
+        }
     }
     /* duplicate server names are fatal */
     for (const cJSON *a = list->child; a; a = a->next) {

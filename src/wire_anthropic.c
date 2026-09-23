@@ -679,8 +679,10 @@ static int awire_turn(wire_t *base, engine_t *e, turn_out_t *out) {
     if (key && key[0] && !auth_override) {
         buf_t auth;
         buf_init(&auth);
-        buf_appendf(&auth, "Authorization: Bearer %s", key);
-        hdrs = curl_slist_append(hdrs, auth.data);
+        buf_appendf(&auth, "Bearer %s", key);
+        /* guards CR/LF: validate_llm rejects them up front; this drops
+           the header rather than letting a crafted key inject one */
+        http_hdr_add(&hdrs, "Authorization", auth.data);
         buf_free(&auth);
     }
     char errh[256] = "";

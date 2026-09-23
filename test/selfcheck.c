@@ -407,6 +407,27 @@ static void test_prefix_invariant(void) {
           "responses: system change keeps input prefix");
     check(strstr(w->last_body.data, "\"instructions\":\"s2\"") != NULL,
           "responses: system change reaches the instructions envelope");
+
+    /* crafted signature: the raw-serialized reasoning item must be
+       re-parsed, so a replayed transcript cannot inject json into the
+       request body (the injected field is dropped, body stays valid) */
+    tr_add(e, "{\"type\":\"thinking\",\"text\":\"evil\",\"partial\":false,"
+        "\"signature\":\"{\\\"type\\\":\\\"reasoning\\\"},\\\"INJECTED\\\":"
+        "true,\\\"x\\\":{\\\"y\\\":1\"}");
+    tr_add(e, "{\"type\":\"tool_request\",\"tool\":\"fs.list\",\"arguments\":"
+        "{\"x\":\"b\"},\"id\":\"c2\"}");
+    tr_add(e, "{\"type\":\"tool_response\",\"id\":\"c2\",\"text\":\"ok\"}");
+    tr_add(e, "{\"type\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"q3\"}]}");
+    w->build(w, e);
+    {
+        cJSON *whole = cJSON_Parse(w->last_body.data);
+        check(whole != NULL,
+              "responses: body stays valid json with a crafted signature");
+        cJSON_Delete(whole);
+    }
+    check(strstr(w->last_body.data, "INJECTED") == NULL,
+          "responses: crafted signature cannot inject raw json");
+
     w->destroy(w);
     buf_free(&r1); buf_free(&r2); buf_free(&r3);
     engine_free(e);
@@ -724,6 +745,44 @@ static void test_validation(void) {
           "anthropic rejects a non-user first message");
     aw->destroy(aw);
     engine_free(e);
+    cap_reset(&cap);
+
+    /* CR/LF in api_key or header values is header injection: fatal */
+    e = engine_new(cap_fn, &cap);
+    rc = feed_line(e, "{\"type\":\"llm\",\"endpoint_protocol\":\"openai\","
+                 "\"api_base\":\"http://x\",\"api_key\":\"k\\r\\nX-Evil: 1\"}");
+    check(rc == 2, "api_key with CRLF is fatal");
+    cap_reset(&cap);
+    rc = feed_line(e, "{\"type\":\"llm\",\"endpoint_protocol\":\"openai\","
+                 "\"api_base\":\"http://x\",\"headers\":{\"X-A\":\"v\\nw\"}}");
+    check(rc == 2, "header value with LF is fatal");
+    cap_reset(&cap);
+    rc = feed_line(e, "{\"type\":\"tools\",\"tools\":[{\"type\":\"http\","
+                 "\"name\":\"h\",\"url\":\"http://x\",\"headers\":"
+                 "{\"X-B\":\"a\\rb\"}}]}");
+    check(rc == 2, "server header value with CR is fatal");
+    cap_reset(&cap);
+    engine_free(e);
+
+    /* an over-long tool server prefix is rejected, not truncated */
+    {
+        mcp_mgr_t *mm = mcp_mgr_new();
+        buf_t ltool;
+        buf_init(&ltool);
+        for (int i = 0; i < 300; i++) buf_append_byte(&ltool, 'a');
+        buf_append_str(&ltool, ".t");
+        char lerr[256] = "";
+        buf_t lout;
+        buf_init(&lout);
+        bool liserr = false;
+        int lrc = mcp_call(mm, ltool.data, NULL, &lout, &liserr, lerr,
+                           sizeof lerr, -1);
+        check(lrc == 1 && strstr(lerr, "too long") != NULL,
+              "mcp_call rejects an over-long server prefix");
+        buf_free(&ltool);
+        buf_free(&lout);
+        mcp_mgr_free(mm);
+    }
     cap_destroy(&cap);
 }
 
@@ -1332,6 +1391,7 @@ static const char *FAKE_ENDPOINT_PY =
     "import sys, json\n"
     "from http.server import BaseHTTPRequestHandler, HTTPServer\n"
     "LOG = open(sys.argv[1], 'a') if sys.argv[1] != '-' else None\n"
+    "EVIL = len(sys.argv) > 2 and sys.argv[2] == 'evil'\n"
     "STATE = {'n': 0}\n"
     "def sse(self, chunks):\n"
     "    self.send_response(200)\n"
@@ -1355,6 +1415,13 @@ static const char *FAKE_ENDPOINT_PY =
     "        req = json.loads(body or b'{}')\n"
     "        stream = req.get('stream', False)\n"
     "        STATE['n'] += 1\n"
+    "        if EVIL:\n"
+    "            sse(self, [\n"
+    "              {'choices':[{'delta':{'tool_calls':[{'index':1000000000,"
+    "'id':'cx','function':{'name':'fs.echo','arguments':'{}'}}]}}]},\n"
+    "              {'choices':[{'delta':{},'finish_reason':'stop'}]},\n"
+    "            ])\n"
+    "            return\n"
     "        if STATE['n'] % 2 == 1:\n"
     "            if stream:\n"
     "                sse(self, [\n"
@@ -1404,13 +1471,14 @@ static int read_line_fd(int fd, char *buf, size_t sz) {
     return (int)n;
 }
 
-/* spawn the scripted endpoint; false on failure */
-static bool endpoint_spawn(spawn_t *sp, const char *log_path, char *url_out,
-                           size_t urlsz) {
+/* spawn the scripted endpoint; false on failure. mode "evil" makes every
+   response carry a hostile oversized tool_calls index */
+static bool endpoint_spawn_mode(spawn_t *sp, const char *log_path,
+                                const char *mode, char *url_out, size_t urlsz) {
     write_file("/tmp/llmkit-test-endpoint.py", FAKE_ENDPOINT_PY);
     char cmd[512];
-    snprintf(cmd, sizeof cmd, "python3 /tmp/llmkit-test-endpoint.py %s",
-             log_path);
+    snprintf(cmd, sizeof cmd, "python3 /tmp/llmkit-test-endpoint.py %s %s",
+             log_path, mode ? mode : "");
     if (spawn_shell(cmd, sp)) return false;
     char port[64] = "";
     read_line_fd(sp->from_fd, port, sizeof port);
@@ -1421,6 +1489,11 @@ static bool endpoint_spawn(spawn_t *sp, const char *log_path, char *url_out,
     }
     snprintf(url_out, urlsz, "http://127.0.0.1:%d", p);
     return true;
+}
+
+static bool endpoint_spawn(spawn_t *sp, const char *log_path, char *url_out,
+                           size_t urlsz) {
+    return endpoint_spawn_mode(sp, log_path, NULL, url_out, urlsz);
 }
 
 /* the same scripted response with stream on and off: identical final
@@ -1480,6 +1553,36 @@ static void test_stream_parity(void) {
         cap_destroy(&caps[i]);
         free((void *)runs[i]);
     }
+    spawn_kill(&sp);
+}
+
+/* a hostile endpoint must not be able to size (or overflow) an allocation
+   through tool_calls[].index — the slot table is bounded and checked */
+static void test_hostile_endpoint(void) {
+    spawn_t sp;
+    char url[128];
+    if (!endpoint_spawn_mode(&sp, "-", "evil", url, sizeof url)) {
+        check(false, "hostile endpoint spawned");
+        return;
+    }
+    check(true, "hostile endpoint spawned");
+
+    cap_t cap = { 0 };
+    engine_t *e = engine_new(cap_fn, &cap);
+    char llm[512];
+    snprintf(llm, sizeof llm,
+             "{\"type\":\"llm\",\"endpoint_protocol\":\"openai\","
+             "\"api_base\":\"%s\",\"model\":\"m\"}",
+             url);
+    e->llm = cJSON_Parse(llm);
+    e->protocol = PROTO_OPENAI;
+    tr_add(e, "{\"type\":\"user\",\"content\":[{\"type\":\"text\","
+              "\"text\":\"hello\"}]}");
+    check(engine_start(e) == 0, "hostile: start ok");
+    int rc = engine_run(e); /* stream defaults on */
+    check(rc == EXIT_OK, "hostile: oversized tool index is dropped, run ok");
+    engine_free(e);
+    cap_destroy(&cap);
     spawn_kill(&sp);
 }
 
@@ -1617,6 +1720,8 @@ int main(void) {
     test_mcp_proxy();
     fprintf(stderr, "selfcheck: stream parity\n");
     test_stream_parity();
+    fprintf(stderr, "selfcheck: hostile endpoint\n");
+    test_hostile_endpoint();
     fprintf(stderr, "selfcheck: agent-as-tool\n");
     test_agent_tool();
     fprintf(stderr, "%d checks, %d failures\n", checks, failures);
