@@ -812,9 +812,13 @@ The command line compiles to, in order: one `llm` record — carrying
 the conversation is the runner's, unchanged: same loop (tool rounds run to
 completion when `--mcp-proxy` servers are given), same record validation,
 same option defaults — no `options` record is compiled. Record level
-problems a flag value carries (CR or LF in `--key` or a `--header` value, a
-non-http `api_base`) therefore surface as `invalid_record`, exit 2, exactly
-as if the same records had been fed to `llmkit runner`.
+problems a flag value carries (CR or LF in `--key` or a `--header` value,
+invalid UTF-8 in any flag value) therefore surface as `invalid_record`,
+exit 2, exactly as if the same records had been fed to `llmkit runner`.
+An `api_base` that is neither http nor https is not caught at this tier:
+validation only requires a non-empty string, so a bad scheme surfaces
+later as the transport's own failure (`connect_failed` or `http_error`),
+like any unreachable url.
 
 Example:
 

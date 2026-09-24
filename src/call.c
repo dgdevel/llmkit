@@ -42,29 +42,42 @@ static int usage_err(char *err, size_t errsz, const char *fmt, ...) {
 static int cfg_hdr_add(call_cfg_t *c, const char *name, const char *value) {
     for (size_t i = 0; i < c->nhdrs; i++) {
         if (!strcmp(c->hdr_names[i], name)) { /* later replaces earlier */
+            char *nv = strdup(value);
+            if (!nv) return -1;
             free(c->hdr_values[i]);
-            c->hdr_values[i] = strdup(value);
+            c->hdr_values[i] = nv;
             return 0;
         }
     }
     char **n = realloc(c->hdr_names, (c->nhdrs + 1) * sizeof *n);
     char **v = realloc(c->hdr_values, (c->nhdrs + 1) * sizeof *v);
-    if (!n || !v) { free(n ? n : c->hdr_names); free(v ? v : c->hdr_values);
-                    c->hdr_names = n ? n : NULL; c->hdr_values = v ? v : NULL;
-                    return -1; }
-    c->hdr_names = n;
-    c->hdr_values = v;
-    c->hdr_names[c->nhdrs] = strdup(name);
-    c->hdr_values[c->nhdrs] = strdup(value);
+    /* a failed realloc leaves the old block valid: keep whichever grew,
+       both arrays stay owned and consistent, the caller frees them */
+    if (n) c->hdr_names = n;
+    if (v) c->hdr_values = v;
+    char *nn = !n ? NULL : strdup(name);
+    char *nv = !v ? NULL : strdup(value);
+    if (!nn || !nv) {
+        free(nn);
+        free(nv);
+        return -1;
+    }
+    c->hdr_names[c->nhdrs] = nn;
+    c->hdr_values[c->nhdrs] = nv;
     c->nhdrs++;
     return 0;
 }
 
 static int cfg_proxy_add(call_cfg_t *c, const char *path) {
+    char *d = strdup(path);
+    if (!d) return -1;
     char **p = realloc(c->proxies, (c->nproxies + 1) * sizeof *p);
-    if (!p) return -1;
+    if (!p) {
+        free(d);
+        return -1;
+    }
     c->proxies = p;
-    c->proxies[c->nproxies++] = strdup(path);
+    c->proxies[c->nproxies++] = d;
     return 0;
 }
 
@@ -157,6 +170,10 @@ int call_parse(int argc, char **argv, call_cfg_t *c, char *err, size_t errsz) {
                     goto fail;
                 }
                 char *name = strndup(v, (size_t)(eq - v));
+                if (!name) {
+                    usage_err(err, errsz, "out of memory");
+                    goto fail;
+                }
                 int rc = cfg_hdr_add(c, name, eq + 1);
                 free(name);
                 if (rc) {
@@ -366,6 +383,7 @@ int call_run(const call_cfg_t *c, FILE *out, FILE *errf, const char *exe_path,
     if (m) {
         sink_error(&s, EC_INVALID_RECORD, m);
         free(m);
+        cJSON_Delete(llm);
         rc = EXIT_INVALID_RECORD;
         goto done;
     }
