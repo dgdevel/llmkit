@@ -1,5 +1,5 @@
-/* mcp.c — mcp client (stdio, streamable http, legacy sse; v1 and v2 flows,
-   design §6) and the shared json-rpc stdio server loop (design §9, §10). */
+/* mcp.c - mcp client (stdio, streamable http, legacy sse; v1 and v2 flows,
+   design sec.6) and the shared json-rpc stdio server loop (design sec.9, sec.10). */
 #include "llmkit.h"
 
 #include <curl/curl.h>
@@ -248,7 +248,7 @@ static void sse_get_event(void *ctx, const char *event, const char *data,
         c->s->url = strndup(data, n);
         c->s->sse_ready = true;
     }
-    /* server pushes arrive here and are ignored (design §6) */
+    /* server pushes arrive here and are ignored (design sec.6) */
 }
 
 static void sse_get_data(void *ctx, const char *bytes, size_t n) {
@@ -643,7 +643,7 @@ int mcp_call(mcp_mgr_t *m, const char *tool, cJSON *args, buf_t *text_out,
     int rc = mcp_call_raw(m, s, dot + 1, args, &result, err, errsz, timeout);
     if (rc) return rc;
 
-    /* map the result to text (requirements §6) */
+    /* map the result to text (requirements sec.6) */
     const cJSON *content = cJSON_GetObjectItemCaseSensitive(result, "content");
     bool any_text = false, any_non_text = false;
     if (cJSON_IsArray(content))

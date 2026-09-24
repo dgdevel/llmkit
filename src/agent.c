@@ -1,4 +1,4 @@
-/* agent.c — llmkit agent-as-tool (design §9). */
+/* agent.c - llmkit agent-as-tool (design sec.9). */
 #include "llmkit.h"
 
 #include <stdlib.h>

@@ -1,4 +1,4 @@
-/* wire_openai.c — chat completions + responses wires (design §5, §7).
+/* wire_openai.c - chat completions + responses wires (design sec.5, sec.7).
    Serialization: per-conversation append-only message array buffer; only
    envelope fields are rebuilt per request, so sampling-only changes never
    touch the prefix bytes. */
@@ -186,7 +186,7 @@ static void rsp_assistant_items(owire_t *w, group_iter_t *g) {
         buf_append_str(&txt, r->text);
     }
     /* reasoning items are resent verbatim, but only for tool turns whose
-       thinking came from the current llm (requirements §3, §5) */
+       thinking came from the current llm (requirements sec.3, sec.5) */
     bool any = txt.len || has_treq;
     for (size_t i = g->begin; i < g->end && !any; i++)
         if (g->l->v[i]->kind == T_THINK) any = true;
@@ -367,7 +367,7 @@ static bool build_body(owire_t *w, engine_t *e) {
     buf_append_byte(b, ']');
     if (w->proto == PROTO_OPENAI) {
         append_tools(b, e, true);
-        /* sampling fields in requirements §4 order */
+        /* sampling fields in requirements sec.4 order */
         append_opt_num(b, e, "temperature", "temperature");
         append_opt_num(b, e, "top_p", "top_p");
         append_opt_num(b, e, "max_tokens", "max_tokens");
@@ -487,7 +487,7 @@ static const char *finish_norm_responses(const char *status,
 
 /* endpoint-controlled slot index (tool_calls[].index / output_index):
    bounded and allocation-checked. Out-of-range, non-finite or
-   unallocatable indices yield NULL and the chunk is dropped — a hostile
+   unallocatable indices yield NULL and the chunk is dropped - a hostile
    endpoint must not be able to size an allocation. */
 enum { MAX_TOOL_SLOTS = 1024 };
 

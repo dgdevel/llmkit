@@ -1,4 +1,4 @@
-/* llmkit.h — shared declarations. See docs/design.md. */
+/* llmkit.h - shared declarations. See docs/design.md. */
 #ifndef LLMKIT_H
 #define LLMKIT_H
 
@@ -21,7 +21,7 @@
 struct engine;
 typedef struct engine engine_t;
 
-/* ---- exit codes (design §11) ---- */
+/* ---- exit codes (design sec.11) ---- */
 #define EXIT_OK                 0
 #define EXIT_OUT_OF_CHANNEL     1
 #define EXIT_INVALID_RECORD     2
@@ -194,7 +194,7 @@ void jsonl_pusher_free(jsonl_pusher_t *p);
 int jsonl_feed(jsonl_pusher_t *p, const char *bytes, size_t n);
 /* process held fragment at EOF (if non-empty); returns as jsonl_feed */
 int jsonl_eof(jsonl_pusher_t *p);
-/* parse one line; NULL on malformed json (or embedded NUL — pre-checked) */
+/* parse one line; NULL on malformed json (or embedded NUL - pre-checked) */
 cJSON *jsonl_parse_line(const char *line);
 
 /* output record builders (field order fixed, deterministic) */
@@ -255,7 +255,7 @@ typedef struct group_iter {
 
 /* streaming block emitter: interval-grouped partial records; the block-final
    record of the last block of a final turn is held for the engine's boundary
-   decision (drop-rule ordering, design §4) */
+   decision (drop-rule ordering, design sec.4) */
 typedef struct blkemit blkemit_t;
 struct blkemit {
     engine_t *e;
@@ -299,7 +299,7 @@ enum { TURN_FINAL = 1, TURN_TOOLS, TURN_FATAL, TURN_ABORTED };
 
 typedef struct wire {
     int (*turn)(struct wire *w, struct engine *e, turn_out_t *out);
-    /* serialization only: fills last_body, no network (tests, §13) */
+    /* serialization only: fills last_body, no network (tests, sec.13) */
     int (*build)(struct wire *w, struct engine *e); /* 0 ok, 2 invalid_record */
     void (*destroy)(struct wire *w);
     buf_t last_body; /* request body of the most recent build */
@@ -317,7 +317,7 @@ struct engine {
     size_t llm_mark; /* transcript length when current llm took effect */
     int protocol;
     /* bumped on every llm/system snapshot change: prefix rebuild trigger.
-       Pointer identity is unsafe here — a replaced tree can be allocated
+       Pointer identity is unsafe here - a replaced tree can be allocated
        at the address of the freed one (allocator reuse), which would hide
        the change and keep stale request bytes. */
     unsigned long cfg_epoch;
@@ -517,7 +517,7 @@ int proxy_handle(void *ctx, const char *method, cJSON *params, cJSON *id,
 /* ================= call.c ================= */
 
 /* parsed `llmkit call` command line; the parser owns CLI shape only
-   (design §11) */
+   (design sec.11) */
 typedef struct call_cfg {
     int protocol;                    /* PROTO_* */
     char *api_base;                  /* owned */
@@ -537,7 +537,7 @@ cJSON *call_build_system(const call_cfg_t *c); /* NULL when absent */
 cJSON *call_build_tools(const call_cfg_t *c, const char *exe_path); /* NULL */
 cJSON *call_build_user(const char *prompt);
 void call_shell_quote(buf_t *b, const char *s); /* POSIX single-quote */
-/* compile + run one conversation; returns the exit code (design §11) */
+/* compile + run one conversation; returns the exit code (design sec.11) */
 int call_run(const call_cfg_t *c, FILE *out, FILE *errf, const char *exe_path,
              wire_t *(*factory)(engine_t *));
 

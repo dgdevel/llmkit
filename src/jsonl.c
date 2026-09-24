@@ -1,4 +1,4 @@
-/* jsonl.c — input pipeline, validation, record builders, transcript (design §3). */
+/* jsonl.c - input pipeline, validation, record builders, transcript (design sec.3). */
 #include "llmkit.h"
 
 #include <stdlib.h>
@@ -249,11 +249,11 @@ void jsonl_pusher_free(jsonl_pusher_t *p) { buf_free(&p->hold); }
 
 cJSON *jsonl_parse_line(const char *line) {
     /* a leading BOM is not stripped (requirements: it makes the line
-       malformed json) — cJSON would skip it, so reject it here */
+       malformed json) - cJSON would skip it, so reject it here */
     static const unsigned char bom[3] = { 0xef, 0xbb, 0xbf };
     if (!strncmp(line, (const char *)bom, 3)) return NULL;
     /* require_null_terminated: trailing garbage on the line is malformed.
-       The length must include the terminating NUL — cJSON rejects a buffer
+       The length must include the terminating NUL - cJSON rejects a buffer
        that ends exactly at the value with no byte left to test for '\0'. */
     cJSON *t = cJSON_ParseWithLengthOpts(line, strlen(line) + 1, NULL, 1);
     if (!t) return NULL;

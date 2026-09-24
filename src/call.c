@@ -1,6 +1,6 @@
-/* call.c — llmkit call: argv→record compiler + plain-text sink (design §11).
+/* call.c - llmkit call: argv->record compiler + plain-text sink (design sec.11).
    One prompt in, one answer out; the conversation itself is the runner's
-   engine, unchanged. The parser owns CLI shape only — value problems stay
+   engine, unchanged. The parser owns CLI shape only - value problems stay
    record validation, the requirements' two error tiers. */
 #include "llmkit.h"
 
@@ -82,7 +82,7 @@ static int cfg_proxy_add(call_cfg_t *c, const char *path) {
 }
 
 /* server name: basename minus last extension, any extension; NULL when the
-   result would be empty (design §11) */
+   result would be empty (design sec.11) */
 static char *proxy_name(const char *path) {
     const char *base = strrchr(path, '/');
     base = base ? base + 1 : path;
@@ -320,7 +320,7 @@ typedef struct call_sink {
     FILE *out, *err;
     bool wrote;    /* any text byte written */
     bool last_nl;  /* last written byte was \n */
-    bool io_fail;  /* stdout write failed (design §12: exit 1) */
+    bool io_fail;  /* stdout write failed (design sec.12: exit 1) */
 } call_sink_t;
 
 static void call_sink_fn(void *ctx, cJSON *rec) {
@@ -469,7 +469,7 @@ static int read_stdin_prompt(char **out, char *err, size_t errsz) {
                 snprintf(err, errsz, "NUL byte in prompt");
                 return 2;
             }
-            if (tmp[i] == '\r') continue; /* §3 byte hygiene, minus lines */
+            if (tmp[i] == '\r') continue; /* sec.3 byte hygiene, minus lines */
             buf_append_byte(&b, tmp[i]);
         }
     }

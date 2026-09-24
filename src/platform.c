@@ -1,4 +1,4 @@
-/* platform.c — threads, queues, spawn, signals, curl helpers (design §2). */
+/* platform.c - threads, queues, spawn, signals, curl helpers (design sec.2). */
 #include "llmkit.h"
 
 #include <curl/curl.h>
@@ -296,7 +296,7 @@ int http_perform(http_req_t *r) {
 
     if (r->connect_to > 0)
         curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, (long)r->connect_to);
-    if (r->read_to > 0) { /* first byte and inter-chunk alike (design §5) */
+    if (r->read_to > 0) { /* first byte and inter-chunk alike (design sec.5) */
         curl_easy_setopt(c, CURLOPT_LOW_SPEED_LIMIT, 1L);
         curl_easy_setopt(c, CURLOPT_LOW_SPEED_TIME, (long)r->read_to);
     }

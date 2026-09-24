@@ -1,4 +1,4 @@
-/* proxy.c — llmkit mcp-proxy (design §10): config pipeline, expose/hide
+/* proxy.c - llmkit mcp-proxy (design sec.10): config pipeline, expose/hide
    resolution, schema rewrite, stdio server loop. */
 #include "llmkit.h"
 

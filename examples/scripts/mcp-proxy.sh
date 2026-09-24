@@ -6,13 +6,13 @@
 # With no expose/hide records every upstream tool is exposed under its
 # server-qualified name. Spawning the upstream server needs node/npx
 # (first run downloads the package). Try examples/mcp-proxy/expose.jsonl
-# or hide.jsonl to see whitelist / blacklist modes — call names and
+# or hide.jsonl to see whitelist / blacklist modes - call names and
 # arguments are the renamed ones there, e.g.:
 #   params:{"name":"list_dir","arguments":{"folder":"/tmp"}}
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 LLMKIT="${LLMKIT:-$ROOT/llmkit}"
-[ -x "$LLMKIT" ] || { echo "$LLMKIT not found — build it first: make" >&2; exit 1; }
+[ -x "$LLMKIT" ] || { echo "$LLMKIT not found - build it first: make" >&2; exit 1; }
 CONFIG="${CONFIG:-$ROOT/examples/mcp-proxy/minimal.jsonl}"
 
 {

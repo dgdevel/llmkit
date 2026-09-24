@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # The real anthropic api recipe: --key sends Authorization: Bearer, which
-# anthropic does not take — the headers record carries x-api-key and
+# anthropic does not take - the headers record carries x-api-key and
 # anthropic-version instead (see docs/requirements.md, the llm record).
 # --max-tokens is mandatory under anthropic.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 LLMKIT="${LLMKIT:-$ROOT/llmkit}"
-[ -x "$LLMKIT" ] || { echo "$LLMKIT not found — build it first: make" >&2; exit 1; }
+[ -x "$LLMKIT" ] || { echo "$LLMKIT not found - build it first: make" >&2; exit 1; }
 
 ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-replace-me}"
 

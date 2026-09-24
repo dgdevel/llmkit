@@ -1,4 +1,4 @@
-/* wire_anthropic.c — anthropic messages wire (design §5, §7).
+/* wire_anthropic.c - anthropic messages wire (design sec.5, sec.7).
    Includes the append-only cache_control marker overlay: 4 slots max, the
    first at the end of the static prefix (last tool definition, else the last
    system block), the rest on the last content block of the last message of
@@ -129,7 +129,7 @@ static bool ant_assistant_msg(awire_t *w, engine_t *e, group_iter_t *g,
             any_block = true;
             buf_append_str(&b, "{\"type\":\"text\",\"text\":");
             buf_append_jstr(&b, r->text);
-            /* marker on the LAST content block only — never more than one
+            /* marker on the LAST content block only - never more than one
                per group, the breakpoint budget is 4 in total */
             if (want_marker && !has_treq && i + 1 == g->end) {
                 buf_append_str(&b, CACHE_MARK);
@@ -184,10 +184,10 @@ static void ant_serialize_new(awire_t *w, engine_t *e) {
     int kg;
     while ((kg = group_next(&gi)) != G_DONE) {
         if (gi.start < w->done_upto) continue;
-        /* Markers go on the last message of each completed turn (design §7):
+        /* Markers go on the last message of each completed turn (design sec.7):
            an assistant group is turn-final iff a user group follows it. The
            group that ends the transcript is the current, incomplete turn and
-           is serialized without a marker — appending one later would rewrite
+           is serialized without a marker - appending one later would rewrite
            already-sent prefix bytes. */
         bool want_marker = false;
         if (kg == G_ASSIST && w->markers_used < 4) {
@@ -330,8 +330,8 @@ static bool ant_build_body(awire_t *w, engine_t *e, cJSON **err) {
         buf_append_byte(b, ']');
     }
 
-    /* sampling fields in requirements §4 order; max_tokens is pulled to the
-       end per design §5 */
+    /* sampling fields in requirements sec.4 order; max_tokens is pulled to the
+       end per design sec.5 */
     const cJSON *f;
     if ((f = io_get_ant(e, "temperature")) && cJSON_IsNumber(f)) {
         buf_append_str(b, ",\"temperature\":");

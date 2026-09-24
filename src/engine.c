@@ -1,5 +1,5 @@
-/* engine.c — streaming block emitter, conversation engine, runner command
-   (design §2, §3, §4, §8). */
+/* engine.c - streaming block emitter, conversation engine, runner command
+   (design sec.2, sec.3, sec.4, sec.8). */
 #include "llmkit.h"
 
 #include <errno.h>
@@ -51,8 +51,8 @@ static const char *blk_type_name(int kind) {
 
 /* close the open block; the final record is held (the previous held final
    is emitted first, preserving order). A thinking block
-   always carries its signature field here — empty when the endpoint does
-   not use one (requirements §8) — so streamed and non-streamed turns
+   always carries its signature field here - empty when the endpoint does
+   not use one (requirements sec.8) - so streamed and non-streamed turns
    produce identical final records. */
 void blk_stop(blkemit_t *b) {
     if (!b->have_open) return;
@@ -152,7 +152,7 @@ void engine_free(engine_t *e) {
         queue_free(e->inq); /* shared: the stdin reader may still push;
                                leaking at exit beats freeing under it
                                (ponytail: a self-pipe wake needs a real
-                               caller — only the runner shares, and it is
+                               caller - only the runner shares, and it is
                                about to _exit) */
     free(e);
 }
@@ -810,7 +810,7 @@ int cmd_runner(void) {
     while (!started) {
         /* interruptible wait: a SIGINT before the start must reach the
            pre-start stop path, and the condvar wait does not wake on a
-           signal — poll with a short timeout and watch the flag */
+           signal - poll with a short timeout and watch the flag */
         qmsg_t *m = NULL;
         while (!m && !g_stop_flag && !queue_closed(e->inq))
             m = queue_pop_timeout(e->inq, 0.2);

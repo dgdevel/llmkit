@@ -4,7 +4,7 @@ spdx-id: EUPL-1.2
 
 description: The European Union Public Licence (EUPL) is a copyleft free/open source software license created on the initiative of and approved by the European Commission in <a href="https://joinup.ec.europa.eu/collection/eupl/eupl-text-eupl-12">23 official languages</a> of the European Union.
 
-how: Indicate “Licensed under the EUPL” following the copyright notice of your source code, for example in a README file or directly in a source code file as a comment.
+how: Indicate "Licensed under the EUPL" following the copyright notice of your source code, for example in a README file or directly in a source code file as a comment.
 
 using:
   HeroRotation: https://github.com/herotc/hero-rotation/blob/shadowlands/LICENSE
@@ -33,9 +33,9 @@ limitations:
 ---
 
                       EUROPEAN UNION PUBLIC LICENCE v. 1.2
-                      EUPL © the European Union 2007, 2016
+                      EUPL (c) the European Union 2007, 2016
 
-This European Union Public Licence (the ‘EUPL’) applies to the Work (as
+This European Union Public Licence (the 'EUPL') applies to the Work (as
 defined below) which is provided under the terms of this Licence. Any use of
 the Work, other than as authorised under this Licence is prohibited (to the
 extent such use is covered by a right of the copyright holder of the Work).
@@ -52,37 +52,37 @@ or has expressed by any other means his willingness to license under the EUPL.
 
 In this Licence, the following terms have the following meaning:
 
-- ‘The Licence’: this Licence.
+- 'The Licence': this Licence.
 
-- ‘The Original Work’: the work or software distributed or communicated by the
+- 'The Original Work': the work or software distributed or communicated by the
   Licensor under this Licence, available as Source Code and also as Executable
   Code as the case may be.
 
-- ‘Derivative Works’: the works or software that could be created by the
+- 'Derivative Works': the works or software that could be created by the
   Licensee, based upon the Original Work or modifications thereof. This
   Licence does not define the extent of modification or dependence on the
   Original Work required in order to classify a work as a Derivative Work;
   this extent is determined by copyright law applicable in the country
   mentioned in Article 15.
 
-- ‘The Work’: the Original Work or its Derivative Works.
+- 'The Work': the Original Work or its Derivative Works.
 
-- ‘The Source Code’: the human-readable form of the Work which is the most
+- 'The Source Code': the human-readable form of the Work which is the most
   convenient for people to study and modify.
 
-- ‘The Executable Code’: any code which has generally been compiled and which
+- 'The Executable Code': any code which has generally been compiled and which
   is meant to be interpreted by a computer as a program.
 
-- ‘The Licensor’: the natural or legal person that distributes or communicates
+- 'The Licensor': the natural or legal person that distributes or communicates
   the Work under the Licence.
 
-- ‘Contributor(s)’: any natural or legal person who modifies the Work under
+- 'Contributor(s)': any natural or legal person who modifies the Work under
   the Licence, or otherwise contributes to the creation of a Derivative Work.
 
-- ‘The Licensee’ or ‘You’: any natural or legal person who makes any usage of
+- 'The Licensee' or 'You': any natural or legal person who makes any usage of
   the Work under the terms of the Licence.
 
-- ‘Distribution’ or ‘Communication’: any act of selling, giving, lending,
+- 'Distribution' or 'Communication': any act of selling, giving, lending,
   renting, distributing, communicating, transmitting, or otherwise making
   available, online or offline, copies of the Work or providing access to its
   essential functionalities at the disposal of any other natural or legal
@@ -148,7 +148,7 @@ Copyleft clause: If the Licensee distributes or communicates copies of the
 Original Works or Derivative Works, this Distribution or Communication will be
 done under the terms of this Licence or of a later version of this Licence
 unless the Original Work is expressly distributed only under this version of
-the Licence — for example by communicating ‘EUPL v. 1.2 only’. The Licensee
+the Licence - for example by communicating 'EUPL v. 1.2 only'. The Licensee
 (becoming Licensor) cannot offer or impose any additional terms or conditions
 on the Work or Derivative Work that alter or restrict the terms of the
 Licence.
@@ -157,7 +157,7 @@ Compatibility clause: If the Licensee Distributes or Communicates Derivative
 Works or copies thereof based upon both the Work and another work licensed
 under a Compatible Licence, this Distribution or Communication can be done
 under the terms of this Compatible Licence. For the sake of this clause,
-‘Compatible Licence’ refers to the licences listed in the appendix attached to
+'Compatible Licence' refers to the licences listed in the appendix attached to
 this Licence. Should the Licensee's obligations under the Compatible Licence
 conflict with his/her obligations under this Licence, the obligations of the
 Compatible Licence shall prevail.
@@ -190,9 +190,9 @@ terms of this Licence.
 
 The Work is a work in progress, which is continuously improved by numerous
 Contributors. It is not a finished work and may therefore contain defects or
-‘bugs’ inherent to this type of development.
+'bugs' inherent to this type of development.
 
-For the above reason, the Work is provided under the Licence on an ‘as is’
+For the above reason, the Work is provided under the Licence on an 'as is'
 basis and without warranties of any kind concerning the Work, including
 without limitation merchantability, fitness for a particular purpose, absence
 of defects or errors, accuracy, non-infringement of intellectual property
@@ -225,8 +225,8 @@ liability.
 
 10. Acceptance of the Licence
 
-The provisions of this Licence can be accepted by clicking on an icon ‘I
-agree’ placed under the bottom of a window displaying the text of this Licence
+The provisions of this Licence can be accepted by clicking on an icon 'I
+agree' placed under the bottom of a window displaying the text of this Licence
 or by affirming consent in any other similar way, in accordance with the rules
 of applicable law. Clicking on that icon indicates your clear and irrevocable
 acceptance of this Licence and all of its terms and conditions.
@@ -301,7 +301,7 @@ Without prejudice to specific agreement between parties,
 
 Appendix
 
-‘Compatible Licences’ according to Article 5 EUPL are:
+'Compatible Licences' according to Article 5 EUPL are:
 
 - GNU General Public License (GPL) v. 2, v. 3
 - GNU Affero General Public License (AGPL) v. 3
@@ -313,7 +313,7 @@ Appendix
 - Creative Commons Attribution-ShareAlike v. 3.0 Unported (CC BY-SA 3.0) for
   works other than software
 - European Union Public Licence (EUPL) v. 1.1, v. 1.2
-- Québec Free and Open-Source Licence — Reciprocity (LiLiQ-R) or Strong
+- Quebec Free and Open-Source Licence - Reciprocity (LiLiQ-R) or Strong
   Reciprocity (LiLiQ-R+).
 
 The European Commission may update this Appendix to later versions of the

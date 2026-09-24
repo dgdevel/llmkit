@@ -1,4 +1,4 @@
-/* main.c — subcommand dispatch, help, version (design §13). */
+/* main.c - subcommand dispatch, help, version (design sec.13). */
 #include "llmkit.h"
 
 #include <stdio.h>

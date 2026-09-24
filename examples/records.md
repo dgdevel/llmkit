@@ -1,7 +1,7 @@
 # the jsonl record catalogue
 
-One section per record type. Each example is a single line of valid json —
-jsonl is oneline by definition — with the minimal form (required fields
+One section per record type. Each example is a single line of valid json -
+jsonl is oneline by definition - with the minimal form (required fields
 only) and the complete form (every field the type has). Field order in the
 examples follows the order the runner itself emits; json objects are
 unordered, any order parses.
@@ -41,13 +41,13 @@ minimal = complete, `version` is the only field:
 The llm endpoint configuration. A new `llm` record replaces the previous
 one; `inference_options` are per record, absent means defaults.
 
-minimal — a model-less llama.cpp style endpoint:
+minimal - a model-less llama.cpp style endpoint:
 
 ```
 {"type":"llm","endpoint_protocol":"openai","api_base":"http://localhost:11434/v1"}
 ```
 
-complete — every field, anthropic flavor:
+complete - every field, anthropic flavor:
 
 ```
 {"type":"llm","endpoint_protocol":"anthropic","api_base":"https://api.anthropic.com/v1","model":"claude-sonnet-4-5","api_key":"sk-ant-api03-REPLACE-ME","headers":{"anthropic-version":"2023-06-01"},"inference_options":{"temperature":0.7,"top_p":0.9,"max_tokens":4096,"stop":["\n\nHuman:"],"top_k":40,"thinking_budget":2048,"reasoning_effort":"high","presence_penalty":0.1,"frequency_penalty":0.2,"seed":42,"stream":true}}
@@ -58,7 +58,7 @@ complete — every field, anthropic flavor:
 - `api_base`: base url including the path prefix; the runner appends only
   the final segment (`/chat/completions`, `/responses`, `/messages`).
 - `api_key`: sent as `Authorization: Bearer ...` on all protocols. The real
-  anthropic api wants `x-api-key` instead — target it through `headers`,
+  anthropic api wants `x-api-key` instead - target it through `headers`,
   as in the example above.
 - `headers`: sent verbatim with every request; an `Authorization` entry
   overrides `api_key`.
@@ -74,13 +74,13 @@ The mcp servers whose tools are offered to the model. A new `tools` record
 replaces the entire list. Tool names exposed to the model are prefixed
 `server.tool`.
 
-minimal — one stdio server:
+minimal - one stdio server:
 
 ```
 {"type":"tools","tools":[{"type":"stdio","name":"fs","command_line":"npx -y @modelcontextprotocol/server-filesystem /tmp"}]}
 ```
 
-complete — one server per transport, every field:
+complete - one server per transport, every field:
 
 ```
 {"type":"tools","tools":[{"type":"stdio","name":"fs","command_line":"npx -y @modelcontextprotocol/server-filesystem /tmp","protocol":"2025-11-25","required":true},{"type":"http","name":"context7","url":"https://mcp.context7.com/mcp","protocol":"2025-11-25","required":false,"headers":{"Authorization":"Bearer demo-token"}},{"type":"sse","name":"legacy","url":"https://example.invalid/mcp/sse","protocol":"2024-11-05"}]}
@@ -109,7 +109,7 @@ minimal:
 {"type":"options","max_tool_rounds":8}
 ```
 
-complete — every field, with its default spelled out:
+complete - every field, with its default spelled out:
 
 ```
 {"type":"options","max_tool_rounds":8,"tool_call_timeout":30,"stream_interval":1,"llm_connect_timeout":5,"llm_read_timeout":1200,"retain_context":false}
@@ -138,7 +138,7 @@ minimal:
 {"type":"system","content":[{"type":"text","text":"Answer in rhymes."}]}
 ```
 
-complete — multiple blocks; anthropic sends them as N native blocks,
+complete - multiple blocks; anthropic sends them as N native blocks,
 openai protocols join them with `\n`:
 
 ```
@@ -166,7 +166,7 @@ complete:
 
 A reasoning-trace block, emitted while the model thinks. On stdout it
 arrives as `partial` records, then one final record carrying `signature`
-(when the endpoint signs thinking — anthropic, openai_responses). On input
+(when the endpoint signs thinking - anthropic, openai_responses). On input
 (replay) partials concatenate before the final one.
 
 minimal:
@@ -175,7 +175,7 @@ minimal:
 {"type":"thinking","text":"The user wants a directory listing."}
 ```
 
-complete — a final, signed record as a transcript stores it:
+complete - a final, signed record as a transcript stores it:
 
 ```
 {"type":"thinking","text":"The user wants a directory listing; I should call the fs tool.","partial":false,"signature":"EqoBCkgIBxgCKkKVA7VA7"}
@@ -194,7 +194,7 @@ minimal:
 {"type":"response","text":"Hello! How can I help?"}
 ```
 
-complete — a streamed final pair as a transcript stores it, the second
+complete - a streamed final pair as a transcript stores it, the second
 record carrying the turn totals:
 
 ```
@@ -216,7 +216,7 @@ minimal:
 {"type":"tool_request","tool":"fs.list_directory","arguments":{"path":"/tmp"},"id":"call_01"}
 ```
 
-complete — the last request of its turn also carries the turn totals
+complete - the last request of its turn also carries the turn totals
 (`arguments` is optional, an omitted object means no arguments):
 
 ```
@@ -226,7 +226,7 @@ complete — the last request of its turn also carries the turn totals
 ## tool_response
 
 The runner's answer to a `tool_request`, paired by `id`. Synthesized with
-`is_error` true for failed, timed out or suspended calls — a request is
+`is_error` true for failed, timed out or suspended calls - a request is
 never left unanswered, which is what keeps transcripts replayable.
 
 minimal:
@@ -246,7 +246,7 @@ complete:
 In-channel error report. On input it is inert, so transcripts containing
 errors stay replayable.
 
-minimal — `fatal` defaults to true:
+minimal - `fatal` defaults to true:
 
 ```
 {"type":"error","code":"api_error","message":"401 unauthorized"}
@@ -310,13 +310,13 @@ complete:
 Declares one upstream tool exposed by `llmkit mcp-proxy`, with its exposed
 presentation. Valid only in a proxy config.
 
-minimal — expose under the upstream name, unchanged:
+minimal - expose under the upstream name, unchanged:
 
 ```
 {"type":"expose","tool":"fs.read_text_file"}
 ```
 
-complete — renamed tool and renamed, redescribed argument:
+complete - renamed tool and renamed, redescribed argument:
 
 ```
 {"type":"expose","tool":"fs.list_directory","name":"list_dir","description":"List one directory","arguments":{"path":{"name":"folder","description":"absolute folder path to list"}}}

@@ -11,10 +11,15 @@ TEST = test/selfcheck.c
 
 all: llmkit
 
-llmkit: $(MAIN) $(SRC) src/llmkit.h
+# runs before every compilation (order-only: gates the build without
+# forcing a relink when nothing changed)
+check-ascii:
+	@tools/check-ascii.sh
+
+llmkit: $(MAIN) $(SRC) src/llmkit.h | check-ascii
 	$(CC) $(CFLAGS) -o $@ $(MAIN) $(SRC) $(LDLIBS)
 
-test/selfcheck: $(TEST) $(SRC) src/llmkit.h
+test/selfcheck: $(TEST) $(SRC) src/llmkit.h | check-ascii
 	@mkdir -p test
 	$(CC) $(CFLAGS) -o $@ $(TEST) $(SRC) $(LDLIBS)
 
@@ -24,4 +29,4 @@ check: test/selfcheck
 clean:
 	rm -f llmkit test/selfcheck
 
-.PHONY: all check clean
+.PHONY: all check check-ascii clean

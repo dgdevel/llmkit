@@ -1,4 +1,4 @@
-/* buf.c — byte buffers, deterministic JSON appenders, UTF-8 validation. */
+/* buf.c - byte buffers, deterministic JSON appenders, UTF-8 validation. */
 #include "llmkit.h"
 
 #include <stdarg.h>

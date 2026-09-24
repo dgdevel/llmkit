@@ -1,4 +1,4 @@
-/* sse.c — the one shared SSE line parser (design §5).
+/* sse.c - the one shared SSE line parser (design sec.5).
    event/data accumulation, blank-line dispatch, comments and id/ignored
    fields skipped. Chunk-safe: feed at any byte boundary. */
 #include "llmkit.h"

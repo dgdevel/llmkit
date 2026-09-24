@@ -1,4 +1,4 @@
-/* selfcheck.c — plain asserts, no framework (design §14).
+/* selfcheck.c - plain asserts, no framework (design sec.14).
    Categories: prefix invariant, sse parser, stream parity, validation,
    state machine (flush/steering/drop rule/max rounds/sigint), mcp client
    (fake child servers), mcp proxy, call (argv compilation, scripted runs). */
@@ -224,7 +224,7 @@ static void body_messages(const char *body, buf_t *out) {
 
 
 /* ingest a transcript record: tlist_ingest duplicates, the caller owns the
-   parsed tree — free it here */
+   parsed tree - free it here */
 static void tr_add(engine_t *e, const char *json) {
     cJSON *t = cJSON_Parse(json);
     tlist_ingest(&e->tr, t);
@@ -1497,7 +1497,7 @@ static bool endpoint_spawn(spawn_t *sp, const char *log_path, char *url_out,
 }
 
 /* the same scripted response with stream on and off: identical final
-   records (design §5, §13) */
+   records (design sec.5, sec.13) */
 static void test_stream_parity(void) {
     spawn_t sp;
     char url[128];
@@ -1557,7 +1557,7 @@ static void test_stream_parity(void) {
 }
 
 /* a hostile endpoint must not be able to size (or overflow) an allocation
-   through tool_calls[].index — the slot table is bounded and checked */
+   through tool_calls[].index - the slot table is bounded and checked */
 static void test_hostile_endpoint(void) {
     spawn_t sp;
     char url[128];
