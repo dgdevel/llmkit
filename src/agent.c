@@ -238,10 +238,15 @@ static void invoke_run(agent_state_t *a, const char *input,
     tlist_ingest(&e->tr, urec);
     cJSON_Delete(urec);
 
+    free(e->terminal_id); /* per invoke: no stale id from a previous run */
+    e->terminal_id = NULL;
+
     int rc = engine_run(e);
 
-    /* find the fatal error or the final response in the sink */
+    /* find the fatal error, the final response or the terminal answer */
     const char *fatal_code = NULL, *fatal_msg = NULL;
+    const char *tresp_text = NULL;
+    bool tresp_is_error = false;
     buf_t final;
     buf_init(&final);
     for (cap_rec_t *c = sink.head; c; c = c->next) {
@@ -257,11 +262,29 @@ static void invoke_run(agent_state_t *a, const char *input,
                    !rec_bool(c->tree, "partial", true)) {
             buf_clear(&final);
             buf_append_str(&final, rec_str(c->tree, "text"));
+        } else if (k == R_TOOL_RESPONSE && e->terminal_id) {
+            /* ids are unique per request: the record carrying the
+               terminal id is the terminal tool's own answer - later
+               synthesized suspensions carry other ids */
+            const char *id = rec_str(c->tree, "id");
+            if (id && !strcmp(id, e->terminal_id)) {
+                tresp_text = rec_str(c->tree, "text");
+                tresp_is_error = rec_bool(c->tree, "is_error", false);
+            }
         }
     }
 
     memset(out, 0, sizeof *out);
-    if (rc == EXIT_OK && !fatal_code) {
+    bool term_answer = rc == EXIT_TERMINAL_TOOL && tresp_text != NULL;
+    if (term_answer && tresp_is_error) {
+        /* failed terminal tool: failed call carrying the message */
+        out->ok = false;
+        out->err_code = strdup(EC_TOOL_FAILED);
+        out->err_msg = strdup(tresp_text ? tresp_text : "tool failed");
+    } else if (term_answer) {
+        out->ok = true;
+        out->text = strdup(tresp_text ? tresp_text : "");
+    } else if (rc == EXIT_OK && !fatal_code) {
         out->ok = true;
         out->text = final.data ? strdup(final.data) : strdup("");
     } else {

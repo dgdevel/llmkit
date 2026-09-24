@@ -25,6 +25,8 @@ void call_cfg_free(call_cfg_t *c) {
     free(c->hdr_values);
     for (size_t i = 0; i < c->nproxies; i++) free(c->proxies[i]);
     free(c->proxies);
+    for (size_t i = 0; i < c->nterminals; i++) free(c->terminals[i]);
+    free(c->terminals);
     memset(c, 0, sizeof *c);
 }
 
@@ -114,7 +116,8 @@ int call_parse(int argc, char **argv, call_cfg_t *c, char *err, size_t errsz) {
         } else if (!strcmp(a, "--key") || !strcmp(a, "--model") ||
                    !strcmp(a, "--max-tokens") ||
                    !strcmp(a, "--system-prompt") || !strcmp(a, "--prompt") ||
-                   !strcmp(a, "--header") || !strcmp(a, "--mcp-proxy")) {
+                   !strcmp(a, "--header") || !strcmp(a, "--mcp-proxy") ||
+                   !strcmp(a, "--terminal-tool")) {
             if (i + 1 >= argc) {
                 usage_err(err, errsz, "missing value for %s", a);
                 goto fail;
@@ -180,6 +183,18 @@ int call_parse(int argc, char **argv, call_cfg_t *c, char *err, size_t errsz) {
                     usage_err(err, errsz, "out of memory");
                     goto fail;
                 }
+            } else if (!strcmp(a, "--terminal-tool")) {
+                char *d = strdup(v);
+                char **p =
+                    d ? realloc(c->terminals,
+                                (c->nterminals + 1) * sizeof *p) : NULL;
+                if (!d || !p) {
+                    free(d);
+                    usage_err(err, errsz, "out of memory");
+                    goto fail;
+                }
+                c->terminals = p;
+                c->terminals[c->nterminals++] = d;
             } else { /* --mcp-proxy */
                 char *nm = proxy_name(v);
                 if (!nm) {
@@ -230,6 +245,33 @@ int call_parse(int argc, char **argv, call_cfg_t *c, char *err, size_t errsz) {
     if (!have_prompt) {
         usage_err(err, errsz, "missing --prompt");
         goto fail;
+    }
+    /* --terminal-tool: the server prefix must name a --mcp-proxy server
+       (design sec.11: which entry to mark is CLI shape); whether that
+       server lists the tool stays record validation */
+    for (size_t i = 0; i < c->nterminals; i++) {
+        const char *v = c->terminals[i];
+        const char *dot = strchr(v, '.');
+        if (!dot || dot == v || !dot[1]) {
+            usage_err(err, errsz,
+                      "--terminal-tool wants <server.tool>, got '%s'", v);
+            goto fail;
+        }
+        bool match = false;
+        for (size_t j = 0; j < c->nproxies && !match; j++) {
+            char *nm = proxy_name(c->proxies[j]);
+            size_t nl = nm ? strlen(nm) : 0;
+            match = nm && nl == (size_t)(dot - v) &&
+                    !strncmp(v, nm, nl);
+            free(nm);
+        }
+        if (!match) {
+            usage_err(err, errsz,
+                      "--terminal-tool server '%.*s' is no --mcp-proxy "
+                      "server",
+                      (int)(dot - v), v);
+            goto fail;
+        }
     }
     return 0;
 fail:
@@ -287,6 +329,13 @@ cJSON *call_build_system(const call_cfg_t *c) {
     return text_record("system", c->system);
 }
 
+/* --terminal-tool fold helper: does <server.tool> belong to this server?
+   The exact-dot boundary keeps server 'fs' from matching 'fs2.tool'. */
+static bool terminal_of_server(const char *tv, const char *srv_name) {
+    size_t nl = strlen(srv_name);
+    return strncmp(tv, srv_name, nl) == 0 && tv[nl] == '.' && tv[nl + 1];
+}
+
 cJSON *call_build_tools(const call_cfg_t *c, const char *exe_path) {
     if (!c->nproxies) return NULL;
     cJSON *t = cJSON_CreateObject();
@@ -302,9 +351,18 @@ cJSON *call_build_tools(const call_cfg_t *c, const char *exe_path) {
         cJSON_AddStringToObject(srv, "type", "stdio");
         char *nm = proxy_name(c->proxies[i]);
         cJSON_AddStringToObject(srv, "name", nm);
-        free(nm);
         cJSON_AddStringToObject(srv, "command_line", cl.data);
         buf_free(&cl);
+        /* fold this server's --terminal-tool entries, argv order */
+        cJSON *tt = NULL;
+        for (size_t k = 0; nm && k < c->nterminals; k++) {
+            const char *tv = c->terminals[k];
+            if (!terminal_of_server(tv, nm)) continue;
+            if (!tt) tt = cJSON_AddArrayToObject(srv, "terminal_tools");
+            cJSON_AddItemToArray(tt,
+                                 cJSON_CreateString(tv + strlen(nm) + 1));
+        }
+        free(nm);
         cJSON_AddItemToArray(arr, srv);
     }
     return t;
@@ -321,20 +379,42 @@ typedef struct call_sink {
     bool wrote;    /* any text byte written */
     bool last_nl;  /* last written byte was \n */
     bool io_fail;  /* stdout write failed (design sec.12: exit 1) */
+    /* tool_response snapshot: the terminal ending's answer is the record
+       whose id matches engine terminal_id (design sec.11) */
+    char **tresp_ids, **tresp_texts;
+    size_t ntresp, captresp;
 } call_sink_t;
+
+static void call_sink_write(call_sink_t *s, const char *t) {
+    if (t && *t) {
+        size_t n = strlen(t);
+        if (fwrite(t, 1, n, s->out) != n || fflush(s->out) != 0)
+            s->io_fail = true;
+        s->wrote = true;
+        s->last_nl = t[n - 1] == '\n';
+    }
+}
+
+static void call_sink_tresp_push(call_sink_t *s, cJSON *rec) {
+    if (s->ntresp == s->captresp) {
+        s->captresp = s->captresp ? s->captresp * 2 : 8;
+        s->tresp_ids = realloc(s->tresp_ids, s->captresp * sizeof(char *));
+        s->tresp_texts = realloc(s->tresp_texts, s->captresp * sizeof(char *));
+    }
+    const char *id = rec_str(rec, "id");
+    const char *tx = rec_str(rec, "text");
+    s->tresp_ids[s->ntresp] = strdup(id ? id : "");
+    s->tresp_texts[s->ntresp] = strdup(tx ? tx : "");
+    s->ntresp++;
+}
 
 static void call_sink_fn(void *ctx, cJSON *rec) {
     call_sink_t *s = ctx;
     int k = rec_classify(rec);
     if (k == R_RESPONSE) {
-        const char *t = rec_str(rec, "text");
-        if (t && *t) {
-            size_t n = strlen(t);
-            if (fwrite(t, 1, n, s->out) != n || fflush(s->out) != 0)
-                s->io_fail = true;
-            s->wrote = true;
-            s->last_nl = t[n - 1] == '\n';
-        }
+        call_sink_write(s, rec_str(rec, "text"));
+    } else if (k == R_TOOL_RESPONSE) {
+        call_sink_tresp_push(s, rec);
     } else if (k == R_ERROR) {
         const char *code = rec_str(rec, "code");
         const char *msg = rec_str(rec, "message");
@@ -357,7 +437,10 @@ static int utf8_check_str(const char *s) {
 
 int call_run(const call_cfg_t *c, FILE *out, FILE *errf, const char *exe_path,
              wire_t *(*factory)(engine_t *)) {
-    call_sink_t s = { out, errf, false, false, false };
+    call_sink_t s;
+    memset(&s, 0, sizeof s);
+    s.out = out;
+    s.err = errf;
     engine_t *e = engine_new(call_sink_fn, &s);
     if (factory) e->wire_factory = factory;
     int rc = 0;
@@ -437,12 +520,30 @@ int call_run(const call_cfg_t *c, FILE *out, FILE *errf, const char *exe_path,
     rc = engine_start(e); /* validates llm + user presence, connects servers */
     if (rc == 0) rc = engine_run(e);
 
+    /* terminal ending: the answer is the terminal tool's tool_response
+       text, not a final response (there is none) */
+    if (rc == EXIT_TERMINAL_TOOL && e->terminal_id) {
+        for (size_t i = 0; i < s.ntresp; i++) {
+            if (!strcmp(s.tresp_ids[i], e->terminal_id)) {
+                call_sink_write(&s, s.tresp_texts[i]);
+                break;
+            }
+        }
+    }
+
 done:
     /* the answer ends with a newline; an empty answer writes nothing */
-    if (rc == 0 && s.wrote && !s.last_nl && !s.io_fail) {
+    if ((rc == 0 || rc == EXIT_TERMINAL_TOOL) && s.wrote && !s.last_nl &&
+        !s.io_fail) {
         if (fputc('\n', out) == EOF || fflush(out) != 0) s.io_fail = true;
     }
     if (s.io_fail) rc = EXIT_OUT_OF_CHANNEL;
+    for (size_t i = 0; i < s.ntresp; i++) {
+        free(s.tresp_ids[i]);
+        free(s.tresp_texts[i]);
+    }
+    free(s.tresp_ids);
+    free(s.tresp_texts);
     engine_free(e);
     return rc;
 }
@@ -503,7 +604,9 @@ static void call_usage(FILE *out) {
           "[--max-tokens <n>]\n"
           "                [--system-prompt <text>] "
           "[--header <name=value>]...\n"
-          "                [--mcp-proxy <config>]... --prompt <text|->\n",
+          "                [--mcp-proxy <config>]... "
+          "[--terminal-tool <name.tool>]...\n"
+          "                --prompt <text|->\n",
           out);
 }
 

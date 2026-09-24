@@ -162,6 +162,8 @@ typedef struct ftool {
     const char *text;
     int rc; /* 0 ok, 1 failed, 2 timeout */
     bool stop_after; /* set the stop flag after this call (SIGINT mid tool) */
+    const char *mid_rec; /* user record queued while the tool executes */
+    bool mid_flush;     /* a flush queued while the tool executes */
 } ftool_t;
 
 typedef struct ftool_script {
@@ -173,7 +175,6 @@ ftool_script_t g_ftools;
 
 static int ftool_exec(engine_t *e, const char *tool, cJSON *args,
                       buf_t *text_out, bool *is_error, char *err, size_t errsz) {
-    (void)e;
     (void)args;
     (void)is_error;
     ftool_t *t =
@@ -183,6 +184,11 @@ static int ftool_exec(engine_t *e, const char *tool, cJSON *args,
     if (t->rc == 1) snprintf(err, errsz, "tool failed: %s", tool);
     if (t->rc == 2) snprintf(err, errsz, "tool timed out: %s", tool);
     int rc = t->rc;
+    /* stdin traffic arriving while the tool runs */
+    if (t->mid_rec)
+        engine_test_push_record(e, cJSON_Parse(t->mid_rec));
+    if (t->mid_flush)
+        engine_test_push_record(e, cJSON_Parse("{\"type\":\"flush\"}"));
     if (t->stop_after) g_stop_flag = 1;
     return rc;
 }
@@ -254,6 +260,7 @@ static void add_tool(engine_t *e, const char *name, const char *desc) {
     tl->v[tl->n].tool = cJSON_Parse(tool);
     tl->v[tl->n].srv = NULL;
     tl->v[tl->n].exposed_name = strdup(name);
+    tl->v[tl->n].terminal = false;
     tl->n++;
 }
 
@@ -1987,6 +1994,415 @@ static void test_call(void) {
     }
 }
 
+/* ================= terminal tools ================= */
+
+static void add_tool_term(engine_t *e, const char *name) {
+    add_tool(e, name, "terminal tool");
+    mcp_mgr_t *m = (mcp_mgr_t *)e->mcp;
+    m->listing.v[m->listing.n - 1].terminal = true;
+}
+
+/* a terminal-marked listing entry for the scripted run helper */
+static wire_t *term_script_factory(engine_t *e) {
+    add_tool_term(e, "fs.echo");
+    e->tool_exec = ftool_exec;
+    return g_factory_wire;
+}
+
+static void test_terminal_tools(void) {
+    cap_t cap = { 0 };
+    engine_t *e;
+    int rc;
+
+    /* terminal tool ends the run: rest of the batch suspended, no error
+       record, no further turn */
+    fturn_t turns[] = {
+        { .recs = (const char *[]){
+             "{\"type\":\"response\",\"text\":\"t\",\"partial\":false}",
+             "{\"type\":\"tool_request\",\"tool\":\"a.t1\",\"arguments\":{},\"id\":\"c1\"}",
+             "{\"type\":\"tool_request\",\"tool\":\"a.t2\",\"arguments\":{},\"id\":\"c2\"}"},
+          .nrecs = 3, .kind = TURN_TOOLS, .abort_after = -1 },
+        { .recs = (const char *[]){"{\"type\":\"response\",\"text\":\"after\",\"partial\":false}"},
+          .nrecs = 1, .kind = TURN_FINAL, .abort_after = -1 },
+    };
+    ftool_t tools[] = { { .tool = "a.t1", .text = "done", .rc = 0 } };
+    g_ftools = (ftool_script_t){ tools, 1, 0 };
+    g_factory_wire = fwire_new(turns, 2);
+    e = engine_new(cap_fn, &cap);
+    e->wire_factory = script_factory;
+    e->tool_exec = ftool_exec;
+    e->inq = queue_new();
+    feed_line(e, "{\"type\":\"llm\",\"endpoint_protocol\":\"openai\",\"api_base\":\"http://x\"}");
+    feed_line(e, "{\"type\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"q\"}]}");
+    check(engine_start(e) == 0, "terminal: start ok");
+    add_tool_term(e, "a.t1");
+    cap_reset(&cap);
+    rc = engine_run(e);
+    check(rc == EXIT_TERMINAL_TOOL, "terminal: exit code 9");
+    check_str(e->terminal_id, "c1", "terminal: engine records the id");
+    {
+        bool c1_ok = false, c2_susp = false, any_error = false,
+             any_after = false;
+        for (size_t i = 0; i < cap.n; i++) {
+            cJSON *r = cJSON_Parse(cap.v[i]);
+            int k = rec_classify(r);
+            if (k == R_ERROR) any_error = true;
+            if (k == R_RESPONSE && rec_bool(r, "partial", true) == false)
+                any_after = !strcmp(rec_str(r, "text"), "after");
+            if (k == R_TOOL_RESPONSE) {
+                const char *id = rec_str(r, "id");
+                if (!strcmp(id, "c1") && !rec_bool(r, "is_error", false))
+                    c1_ok = strstr(cap.v[i], "done") != NULL;
+                if (!strcmp(id, "c2") && rec_bool(r, "is_error", false))
+                    c2_susp = strstr(cap.v[i], "terminal") != NULL;
+            }
+            cJSON_Delete(r);
+        }
+        check(c1_ok, "terminal: the tool's own answer is emitted");
+        check(c2_susp, "terminal: the rest of the batch suspended");
+        check(!any_error, "terminal: no error record for the ending");
+        check(!any_after, "terminal: the would-be next turn never ran");
+    }
+    engine_free(e);
+    cap_reset(&cap);
+
+    /* failed terminal tool still ends: answered is_error + non-fatal
+       tool_failed, exit 9, no retry */
+    ftool_t tools2[] = { { .tool = "a.t1", .text = NULL, .rc = 1 } };
+    g_ftools = (ftool_script_t){ tools2, 1, 0 };
+    g_factory_wire = fwire_new(turns, 2);
+    e = engine_new(cap_fn, &cap);
+    e->wire_factory = script_factory;
+    e->tool_exec = ftool_exec;
+    e->inq = queue_new();
+    feed_line(e, "{\"type\":\"llm\",\"endpoint_protocol\":\"openai\",\"api_base\":\"http://x\"}");
+    feed_line(e, "{\"type\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"q\"}]}");
+    check(engine_start(e) == 0, "terminal: start ok (failed tool)");
+    add_tool_term(e, "a.t1");
+    cap_reset(&cap);
+    rc = engine_run(e);
+    check(rc == EXIT_TERMINAL_TOOL, "terminal: failed tool still exits 9");
+    {
+        bool failed = false;
+        for (size_t i = 0; i < cap.n; i++) {
+            cJSON *r = cJSON_Parse(cap.v[i]);
+            if (rec_classify(r) == R_ERROR &&
+                !strcmp(rec_str(r, "code"), EC_TOOL_FAILED) &&
+                !cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(r, "fatal")))
+                failed = true;
+            cJSON_Delete(r);
+        }
+        check(failed, "terminal: non-fatal tool_failed precedes the ending");
+    }
+    engine_free(e);
+    cap_reset(&cap);
+
+    /* steering arriving during the terminal tool: dropped silently */
+    ftool_t tools3[] = {
+        { .tool = "a.t1", .text = "done", .rc = 0,
+          .mid_rec = "{\"type\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"steer\"}]}",
+          .mid_flush = true },
+    };
+    g_ftools = (ftool_script_t){ tools3, 1, 0 };
+    g_factory_wire = fwire_new(turns, 2);
+    e = engine_new(cap_fn, &cap);
+    e->wire_factory = script_factory;
+    e->tool_exec = ftool_exec;
+    e->inq = queue_new();
+    feed_line(e, "{\"type\":\"llm\",\"endpoint_protocol\":\"openai\",\"api_base\":\"http://x\"}");
+    feed_line(e, "{\"type\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"q\"}]}");
+    check(engine_start(e) == 0, "terminal: start ok (steering case)");
+    add_tool_term(e, "a.t1");
+    cap_reset(&cap);
+    rc = engine_run(e);
+    check(rc == EXIT_TERMINAL_TOOL, "terminal: steering case exits 9");
+    {
+        bool io_err = false, start_marker = false;
+        for (size_t i = 0; i < cap.n; i++) {
+            cJSON *r = cJSON_Parse(cap.v[i]);
+            if (rec_classify(r) == R_ERROR) io_err = true;
+            if (rec_classify(r) == R_START) start_marker = true;
+            cJSON_Delete(r);
+        }
+        check(!io_err, "terminal: flushed steering dropped, no io_error");
+        check(!start_marker, "terminal: no start marker, no resume");
+    }
+    engine_free(e);
+    cap_reset(&cap);
+
+    /* unflushed records during the terminal tool: the drop rule applies */
+    ftool_t tools4[] = {
+        { .tool = "a.t1", .text = "done", .rc = 0,
+          .mid_rec = "{\"type\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"never\"}]}",
+          .mid_flush = false },
+    };
+    g_ftools = (ftool_script_t){ tools4, 1, 0 };
+    g_factory_wire = fwire_new(turns, 2);
+    e = engine_new(cap_fn, &cap);
+    e->wire_factory = script_factory;
+    e->tool_exec = ftool_exec;
+    e->inq = queue_new();
+    feed_line(e, "{\"type\":\"llm\",\"endpoint_protocol\":\"openai\",\"api_base\":\"http://x\"}");
+    feed_line(e, "{\"type\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"q\"}]}");
+    check(engine_start(e) == 0, "terminal: start ok (drop rule case)");
+    add_tool_term(e, "a.t1");
+    cap_reset(&cap);
+    rc = engine_run(e);
+    check(rc == EXIT_TERMINAL_TOOL, "terminal: drop rule case exits 9");
+    {
+        int io_at = -1;
+        for (size_t i = 0; i < cap.n; i++) {
+            cJSON *r = cJSON_Parse(cap.v[i]);
+            if (rec_classify(r) == R_ERROR &&
+                !strcmp(rec_str(r, "code"), "io_error")) {
+                io_at = (int)i;
+                cJSON_Delete(r);
+                break;
+            }
+            cJSON_Delete(r);
+        }
+        check(io_at >= 0, "terminal: drop rule io_error before the exit");
+        if (io_at >= 0)
+            check_str(cap_field(&cap, (size_t)io_at, "fatal"), "false",
+                      "terminal: drop rule io_error is non-fatal");
+    }
+    engine_free(e);
+    cap_reset(&cap);
+
+    /* SIGINT during the terminal tool: the terminal ending wins, exit 9 */
+    ftool_t tools5[] = {
+        { .tool = "a.t1", .text = "done", .rc = 0, .stop_after = true },
+    };
+    g_ftools = (ftool_script_t){ tools5, 1, 0 };
+    g_factory_wire = fwire_new(turns, 2);
+    e = engine_new(cap_fn, &cap);
+    e->wire_factory = script_factory;
+    e->tool_exec = ftool_exec;
+    e->inq = queue_new();
+    feed_line(e, "{\"type\":\"llm\",\"endpoint_protocol\":\"openai\",\"api_base\":\"http://x\"}");
+    feed_line(e, "{\"type\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"q\"}]}");
+    check(engine_start(e) == 0, "terminal: start ok (sigint case)");
+    add_tool_term(e, "a.t1");
+    cap_reset(&cap);
+    rc = engine_run(e);
+    check(rc == EXIT_TERMINAL_TOOL, "terminal: sigint during tool exits 9");
+    {
+        bool interrupted = false, c2_term = false;
+        for (size_t i = 0; i < cap.n; i++) {
+            cJSON *r = cJSON_Parse(cap.v[i]);
+            if (rec_classify(r) == R_ERROR &&
+                !strcmp(rec_str(r, "code"), EC_INTERRUPTED))
+                interrupted = true;
+            if (rec_classify(r) == R_TOOL_RESPONSE &&
+                !strcmp(rec_str(r, "id"), "c2"))
+                c2_term = strstr(cap.v[i], "terminal") != NULL;
+            cJSON_Delete(r);
+        }
+        check(!interrupted, "terminal: no interrupted record");
+        check(c2_term, "terminal: suspension names the terminal ending");
+    }
+    g_stop_flag = 0;
+    engine_free(e);
+    cap_reset(&cap);
+
+    /* shape validation of terminal_tools */
+    {
+        char *m = validate_tools(cJSON_Parse(
+            "{\"type\":\"tools\",\"tools\":[{\"type\":\"stdio\",\"name\":\"a\","
+            "\"command_line\":\"x\",\"terminal_tools\":\"echo\"}]}"));
+        check(m != NULL, "terminal: terminal_tools must be a list");
+        free(m);
+        m = validate_tools(cJSON_Parse(
+            "{\"type\":\"tools\",\"tools\":[{\"type\":\"stdio\",\"name\":\"a\","
+            "\"command_line\":\"x\",\"terminal_tools\":[42]}]}"));
+        check(m != NULL, "terminal: entries must be strings");
+        free(m);
+        m = validate_tools(cJSON_Parse(
+            "{\"type\":\"tools\",\"tools\":[{\"type\":\"stdio\",\"name\":\"a\","
+            "\"command_line\":\"x\",\"terminal_tools\":[\"echo\"]}]}"));
+        check(m == NULL, "terminal: valid shape passes");
+        free(m);
+    }
+
+    /* name resolution at reconcile against a real fake server */
+    write_file("/tmp/llmkit-test-fake-mcp.py", FAKE_MCP_PY);
+    {
+        cap_reset(&cap);
+        e = engine_new(cap_fn, &cap);
+        cJSON *trec = cJSON_Parse(
+            "{\"type\":\"tools\",\"tools\":[{\"type\":\"stdio\",\"name\":\"srv\","
+            "\"command_line\":\"python3 /tmp/llmkit-test-fake-mcp.py\","
+            "\"terminal_tools\":[\"echo\"]}]}");
+        check(mcp_reconcile((mcp_mgr_t *)e->mcp, e, trec) == 0,
+              "terminal: reconcile ok with a listed name");
+        check(mcp_tool_is_terminal((mcp_mgr_t *)e->mcp, "srv.echo"),
+              "terminal: listed name marks the listing entry");
+        check(!mcp_tool_is_terminal((mcp_mgr_t *)e->mcp, "srv.boom"),
+              "terminal: unmarked tool stays ordinary");
+        check(!mcp_tool_is_terminal((mcp_mgr_t *)e->mcp, "srv.nope"),
+              "terminal: unknown tool is not terminal");
+        cJSON_Delete(trec);
+        mcp_kill_all((mcp_mgr_t *)e->mcp);
+        engine_free(e);
+
+        e = engine_new(cap_fn, &cap);
+        trec = cJSON_Parse(
+            "{\"type\":\"tools\",\"tools\":[{\"type\":\"stdio\",\"name\":\"srv\","
+            "\"command_line\":\"python3 /tmp/llmkit-test-fake-mcp.py\","
+            "\"terminal_tools\":[\"echo\",\"nope\"]}]}");
+        cap_reset(&cap);
+        check(mcp_reconcile((mcp_mgr_t *)e->mcp, e, trec) ==
+                  EXIT_INVALID_RECORD,
+              "terminal: unlisted name is fatal invalid_record");
+        check(cap.n == 1 && !strcmp(cap_field(&cap, 0, "code"), "invalid_record") &&
+                  !strcmp(cap_field(&cap, 0, "fatal"), "true"),
+              "terminal: reconcile emits the fatal record");
+        cJSON_Delete(trec);
+        engine_free(e);
+        cap_reset(&cap);
+    }
+
+    /* call: --terminal-tool compilation, folding, usage errors */
+    {
+        call_cfg_t c;
+        char err[256];
+        char *av[] = {"--openai", "http://x", "--mcp-proxy", "/tmp/fs.jsonl",
+                      "--terminal-tool", "fs.echo", "--terminal-tool",
+                      "fs.boom", "--prompt", "p"};
+        check(call_parse((int)(sizeof av / sizeof av[0]), av, &c, err,
+                         sizeof err) == 0,
+              "terminal: call vector parses");
+        check(c.nterminals == 2, "terminal: both flags captured");
+        cJSON *t = call_build_tools(&c, "/x");
+        buf_t b;
+        buf_init(&b);
+        buf_append_tree(&b, t);
+        cJSON_Delete(t);
+        check_str(b.data,
+                  "{\"type\":\"tools\",\"tools\":[{\"type\":\"stdio\","
+                  "\"name\":\"fs\",\"command_line\":\"'/x' mcp-proxy "
+                  "'/tmp/fs.jsonl'\",\"terminal_tools\":[\"echo\","
+                  "\"boom\"]}]}",
+                  "terminal: flags fold into terminal_tools");
+        buf_free(&b);
+        call_cfg_free(&c);
+
+        char *u1[] = {"--openai", "http://x", "--prompt", "p",
+                      "--terminal-tool", "fs.echo"};
+        check(call_parse(6, u1, &c, err, sizeof err) == 1,
+              "terminal: --terminal-tool without --mcp-proxy is a usage error");
+        char *u2[] = {"--openai", "http://x", "--mcp-proxy", "/tmp/fs.jsonl",
+                      "--prompt", "p", "--terminal-tool", "other.tool"};
+        check(call_parse(8, u2, &c, err, sizeof err) == 1,
+              "terminal: unknown server prefix is a usage error");
+        char *u3[] = {"--openai", "http://x", "--mcp-proxy", "/tmp/fs.jsonl",
+                      "--prompt", "p", "--terminal-tool", "fsdotless"};
+        check(call_parse(8, u3, &c, err, sizeof err) == 1,
+              "terminal: missing dot is a usage error");
+    }
+
+    /* call end-to-end: terminal ending prints the tool text, exit 9 */
+    {
+        fturn_t ct[] = {
+            { .recs = (const char *[]){
+                  "{\"type\":\"tool_request\",\"tool\":\"fs.echo\",\"arguments\":{},\"id\":\"c1\"}"},
+              .nrecs = 1, .kind = TURN_TOOLS, .abort_after = -1 },
+            { .recs = (const char *[]){"{\"type\":\"response\",\"text\":\"after\",\"partial\":false}"},
+              .nrecs = 1, .kind = TURN_FINAL, .abort_after = -1 },
+        };
+        ftool_t ct_tools[] = { { .tool = "fs.echo", .text = "done", .rc = 0 } };
+        g_ftools = (ftool_script_t){ ct_tools, 1, 0 };
+        g_factory_wire = fwire_new(ct, 2);
+        call_cfg_t c;
+        memset(&c, 0, sizeof c);
+        c.protocol = PROTO_OPENAI;
+        c.api_base = strdup("http://x");
+        c.prompt = strdup("q");
+        char *ob = NULL, *eb = NULL;
+        size_t on = 0, en = 0;
+        FILE *out = open_memstream(&ob, &on);
+        FILE *er = open_memstream(&eb, &en);
+        int rc2 = call_run(&c, out, er, "/x", term_script_factory);
+        fclose(out);
+        fclose(er);
+        check(rc2 == EXIT_TERMINAL_TOOL, "terminal: call exits 9");
+        check_str(ob, "done\n", "terminal: call prints the tool text");
+        check(en == 0, "terminal: no stderr on a clean terminal ending");
+        free(ob);
+        free(eb);
+        call_cfg_free(&c);
+    }
+
+    /* agent-as-tool end-to-end: invoke replies with the terminal answer */
+    {
+        const char *log = "/tmp/llmkit-test-agent-term.log";
+        unlink(log);
+        spawn_t sp;
+        char url[128];
+        if (!endpoint_spawn(&sp, log, url, sizeof url)) {
+            check(false, "terminal agent endpoint spawned");
+            return;
+        }
+        char seed[1024];
+        snprintf(seed, sizeof seed,
+                 "{\"type\":\"llm\",\"endpoint_protocol\":\"openai\","
+                 "\"api_base\":\"%s\",\"model\":\"m\",\"inference_options\":"
+                 "{\"stream\":false}}\n"
+                 "{\"type\":\"tools\",\"tools\":[{\"type\":\"stdio\",\"name\":"
+                 "\"fs\",\"command_line\":\"python3 "
+                 "/tmp/llmkit-test-fake-mcp.py\",\"terminal_tools\":"
+                 "[\"echo\"]}]}\n"
+                 "{\"type\":\"agent-as-tool\",\"tool_description\":\"t\","
+                 "\"input_description\":\"i\"}\n",
+                 url);
+        write_file("/tmp/llmkit-test-agent-term-seed.jsonl", seed);
+
+        int in_pipe[2], out_pipe[2];
+        if (pipe(in_pipe) || pipe(out_pipe)) {
+            check(false, "terminal agent pipes");
+            spawn_kill(&sp);
+            return;
+        }
+        pid_t pid = fork();
+        check(pid >= 0, "terminal agent fork");
+        if (pid == 0) {
+            dup2(in_pipe[0], 0);
+            dup2(out_pipe[1], 1);
+            close(in_pipe[0]); close(in_pipe[1]);
+            close(out_pipe[0]); close(out_pipe[1]);
+            int rc3 = cmd_agent("/tmp/llmkit-test-agent-term-seed.jsonl");
+            _exit(rc3 == 0 ? 0 : 1);
+        }
+        close(in_pipe[0]);
+        close(out_pipe[1]);
+        FILE *to = fdopen(in_pipe[1], "w");
+        FILE *from = fdopen(out_pipe[0], "r");
+        char line[4096];
+        fprintf(to, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\","
+                    "\"params\":{\"protocolVersion\":\"2025-11-25\"}}\n");
+        fflush(to);
+        check(fgets(line, sizeof line, from) != NULL,
+              "terminal agent: initialize reply");
+        fprintf(to, "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\","
+                    "\"params\":{\"name\":\"invoke\",\"arguments\":"
+                    "{\"input\":\"go\"}}}\n");
+        fflush(to);
+        check(fgets(line, sizeof line, from) != NULL &&
+                  strstr(line, "echo:") != NULL &&
+                  strstr(line, "isError") == NULL,
+              "terminal agent: invoke replies with the terminal answer");
+        fclose(to);
+        int st = 0;
+        waitpid(pid, &st, 0);
+        check(WIFEXITED(st) && WEXITSTATUS(st) == 0,
+              "terminal agent: exits 0");
+        fclose(from);
+        spawn_kill(&sp);
+    }
+
+    cap_destroy(&cap);
+}
+
 int main(void) {
     signals_init();
     http_global_init();
@@ -2014,6 +2430,8 @@ int main(void) {
     test_agent_tool();
     fprintf(stderr, "selfcheck: call\n");
     test_call();
+    fprintf(stderr, "selfcheck: terminal tools\n");
+    test_terminal_tools();
     fprintf(stderr, "%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
 }

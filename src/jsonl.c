@@ -217,6 +217,14 @@ char *validate_tools(const cJSON *t) {
         }
         const cJSON *rq = cJSON_GetObjectItemCaseSensitive(s, "required");
         if (rq && !cJSON_IsBool(rq)) return vmsg("required must be a boolean");
+        const cJSON *tt =
+            cJSON_GetObjectItemCaseSensitive(s, "terminal_tools");
+        if (tt && !cJSON_IsArray(tt))
+            return vmsg("terminal_tools must be a list of tool names");
+        if (tt)
+            for (const cJSON *e = tt->child; e; e = e->next)
+                if (!cJSON_IsString(e))
+                    return vmsg("terminal_tools entries must be strings");
         const cJSON *h = cJSON_GetObjectItemCaseSensitive(s, "headers");
         if (h && !cJSON_IsObject(h)) return vmsg("server headers must be an object");
         if (h) {

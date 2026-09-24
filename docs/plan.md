@@ -60,6 +60,21 @@ rides on the finished core:
     end-to-end per protocol (text out, `thinking` dropped, trailing
     newline, exit 0); `llmkit help` and the README command table updated
     in the same change.
+12. **terminal tools** - requirements sec.2.7, sec.8 `terminal_tools`, sec.11
+    `--terminal-tool`; design sec.4 stop condition, sec.6 attribute
+    handling, sec.8 sigint precedence, sec.9 reply, sec.11 flag and sink,
+    sec.12 exit 9: shape validation in `validate_tools`, name resolution
+    and the per-server terminal set in `mcp_reconcile`, the engine stop
+    (batch suspension, drop rule, no error record, exit 9), the agent
+    invoke terminal reply and its retention under `retain_context`, the
+    call flag, its folding into the compiled `tools` record and the sink
+    rule. Tests: engine vectors through the fake endpoint and the
+    tool-exec seam (terminal ends exit 9, batch suspension, failed
+    terminal tool still ends, steering and unflushed records dropped,
+    sigint during the terminal tool exits 9 not 8), validation vectors
+    (non-string entry, name missing from a connected listing), `call`
+    compilation vectors and the usage error, agent reply shape, exit
+    code 9 end to end.
 
 Out of scope per design sec.14: network integration tests in-tree; a
 `test/live.sh` against a real endpoint appears when the first endpoint bug

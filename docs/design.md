@@ -118,10 +118,16 @@ Main thread, per turn:
 5. turn end: `response` final record, or complete `tool_request` records.
    Tool turns: execute each request strictly in order (sec.6), emit
    `tool_response` per request plus non-fatal `tool_failed` / `tool_timeout`
-   on failure; then next turn.
+   on failure; then next turn. A terminal tool (sec.6) ends the run at its
+   own `tool_response`, failure and timeout included - no retry, the model
+   never sees the result: the remaining requests of the turn are suspended
+   and answered `is_error` (the steering synthesis), unflushed records get
+   sec.3's drop rule (their non-fatal `io_error`, at detection), no error
+   record is emitted for the ending, the exit code is 9 (sec.12).
 6. stop conditions: final `response` with no steering pending (exit 0),
-   `max_tool_rounds` (the would-exceed turn is not started; fatal
-   `max_tool_rounds_exceeded`), fatal `error`, external stop (sec.8).
+   terminal tool answered (exit 9, no error record), `max_tool_rounds` (the
+   would-exceed turn is not started; fatal `max_tool_rounds_exceeded`),
+   fatal `error`, external stop (sec.8).
 
 `usage` and `finish_reason` attach to the final record of the turn
 (`response`, or the last `tool_request` on tool turns). `signature` attaches
@@ -280,6 +286,17 @@ fractional `llm_connect_timeout`/`llm_read_timeout` values are floored;
   tool order exposed to the model is the `tools` record's server order, then
   each server's own listing order. It changes only when a `tools` record
   changes it (sec.7).
+- `terminal_tools` (requirements sec.8, sec.2.7): per server entry, two
+  validation tiers - shape (list of strings) at record validation, name
+  resolution at reconcile against that server's own listing: a name a
+  connected server does not list is fatal `invalid_record`, the proxy's
+  expose/hide typo rule; a server that failed to connect is not validated,
+  its tools are not offered anyway. The resolved set lives on the server
+  struct, re-derived by every reconcile, so a `tools` record change
+  revalidates at the boundary it applies at. The engine resolves an exposed
+  `name.tool` through the same prefix split `tools/call` uses; execution of
+  a terminal tool is the sec.4 stop condition. The attribute is config, it
+  never enters the serialized tool list - no request byte changes.
 - `tools/call` `{name, arguments}`; the `name` sent to the server is the part
   after the server prefix. Result: text content blocks concatenate with `\n`
   into `tool_response.text`; `isError: true` -> `is_error: true` plus
@@ -367,6 +384,12 @@ openai_responses the `system` record maps to the envelope-side
   `tool_response`, answer suspended `tool_request`s with `is_error`, drop
   unapplied steering, apply the drop rule for unflushed records (`io_error`
   first), emit fatal `interrupted`, kill stdio children, exit.
+- Terminal precedence: when the tool that just finished - or one answered
+  earlier in the batch - is terminal (sec.6), the terminal ending replaces
+  the orderly stop: no `interrupted` record, exit 9. Once a terminal tool's
+  `tool_response` is emitted the ending is committed; a SIGINT after that
+  moment cannot turn it into `interrupted`. A SIGINT before the terminal
+  tool started is the orderly stop above, unchanged.
 - The stdin reader stops enqueueing the moment the flag is set: records
   received after the stop are not read.
 - Second SIGINT: the handler `_exit()`s with the
@@ -391,15 +414,18 @@ Same core, second entry point. `llmkit agent-as-tool <seed.jsonl>`:
   in request order.
 - Each `invoke` builds a record list - seed records + `user` carrying
   `input` - and runs the engine over it unchanged (mapping, options, error
-  rules). Reply: concatenated final `response` text. A fatal `error` becomes
-  a failed tool call carrying code + message.
+  rules). Reply: concatenated final `response` text; a run ended by a
+  terminal tool (sec.6) replies with that tool's `tool_response` text
+  instead, a failed one (`is_error`) as a failed call carrying the message.
+  A fatal `error` becomes a failed tool call carrying code + message.
 - `retain_context` false: the record list is rebuilt per invoke from the
   immutable seed; the seed prefix serializes identically every time, so cache
   hits accumulate.
 - `retain_context` true: one accumulated transcript; each invoke appends its
   `user` record and turns. On fatal error the store truncates back to the
   last successful invoke's marker (the bare seed if none) before the next
-  invoke.
+  invoke. A terminal ending is a successful ending: retained like a final
+  `response`, no truncation.
 - Nested agents are ordinary child processes; spawn cycles are not detected
   (per the requirements).
 
@@ -421,6 +447,11 @@ Same core, third entry point. `llmkit mcp-proxy <config.jsonl>`:
   order. `ponytail:` the listing is a startup snapshot,
   `notifications/tools/list_changed` from an upstream is ignored; relay it
   only if an upstream needs it.
+- `terminal_tools` in the config's `tools` record is accepted and ignored:
+  the proxy relays calls and stays up, it has no conversation to end. Only
+  the shape is validated (a non-string entry is still `invalid_record`);
+  name resolution does not apply - the marking is the runner's rule, and an
+  upstream listing carries no field to propagate it through.
 - Serving: the stdio json-rpc server loop of sec.9, tools capability only.
   `tools/call` maps the exposed name back to server + upstream tool name and
   applies the inverse argument renaming before forwarding through the sec.6
@@ -450,6 +481,12 @@ new wire, mcp or loop code; one new `src/call.c`, a dispatch line in
   for the `user` record, then `engine_start` + `engine_run`, exit code
   passed through. No stdin reader thread, no queue, no header record: the
   record channel does not exist.
+- **`--terminal-tool <name.tool>`** - appends to the `terminal_tools` list
+  of the matching server entry of the compiled `tools` record, argv order;
+  without `--mcp-proxy` servers there is no entry to attach to. The server
+  prefix must name a `--mcp-proxy` server of the same command line, else
+  usage error - which entry to mark is CLI shape; whether that server lists
+  the tool stays record validation, the runner's `invalid_record` tier.
 - **`--prompt -`** - stdin is read to EOF before anything else runs. Byte
   hygiene is sec.3's minus the line splitting: every `0x0d` dropped, strict
   UTF-8, a leading BOM rejected, NUL rejected - violations take the
@@ -463,6 +500,10 @@ new wire, mcp or loop code; one new `src/call.c`, a dispatch line in
   answer does not already end with one, an empty answer writes nothing.
   Out-of-channel errors use the same prefix with no code:
   `llmkit call: <what>`, exit 1.
+- **terminal ending** - the sink prints the `text` of the terminal tool's
+  `tool_response` instead of a final `response` (there is none), same
+  `fwrite` + `fflush` and trailing-newline rules; the exit code is 9
+  (sec.12), so scripts branch on it.
 - **`--mcp-proxy` spawn** - the `tools` record `command_line` runs through
   `/bin/sh -c` (sec.6), so both paths are POSIX single-quote quoted
   (`'` becomes `'\''`): `'<exe>' mcp-proxy '<config>'`. `<exe>` is
@@ -491,9 +532,12 @@ new wire, mcp or loop code; one new `src/call.c`, a dispatch line in
 | 6 | `max_tool_rounds_exceeded` |
 | 7 | `io_error` (fatal case) |
 | 8 | `interrupted`, including the second-SIGINT hard exit |
+| 9 | conversation ended by a terminal tool (requirements sec.2.7): the last record is that tool's `tool_response`, no error record |
 
 When several fatal records could apply, the first one emitted decides.
-Non-fatal error records never influence the exit code.
+Non-fatal error records never influence the exit code. Exit 9 pairs with no
+error record at all - the terminal ending is requested, not an error - and
+outranks a simultaneous `interrupted` (sec.8).
 
 ## 13. build and packaging
 
@@ -534,6 +578,15 @@ validation), `src/wire_openai.c`, `src/wire_anthropic.c`, `src/sse.c`,
   quoting and name derivation, usage errors exiting 1 - plus one
   fake-endpoint end-to-end per protocol: text on stdout, `thinking`
   dropped, trailing newline, exit 0.
+- **terminal tools**: engine vectors through the fake endpoint and the tool
+  exec seam - a terminal `tool_request` ends the run with exit 9 and no
+  error record, the rest of the batch suspended `is_error`, a failed or
+  timed out terminal tool still ends, steering and unflushed records
+  dropped by the rules, sigint during the terminal tool exits 9 not 8;
+  validation vectors (non-string entry, name missing from a connected
+  listing); `call` `--terminal-tool` compilation, folding and usage
+  errors; the agent invoke terminal reply and its retention under
+  `retain_context`.
 
 `ponytail:` no network integration tests in-tree; a `test/live.sh` hitting a
 real endpoint is added when the first endpoint bug shows up.

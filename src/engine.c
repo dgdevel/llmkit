@@ -148,6 +148,7 @@ void engine_free(engine_t *e) {
     if (e->wire) e->wire->destroy(e->wire);
     for (size_t i = 0; i < e->npending; i++) cJSON_Delete(e->pending[i]);
     free(e->pending);
+    free(e->terminal_id);
     if (e->inq && !e->inq_shared)
         queue_free(e->inq); /* shared: the stdin reader may still push;
                                leaking at exit beats freeing under it
@@ -618,10 +619,17 @@ int engine_run(engine_t *e) {
         turns++;
 
         if (kind == TURN_TOOLS) {
-            bool susp_int = false, susp_steer = false;
+            bool susp_int = false, susp_steer = false, term = false;
             for (size_t i = tr_before; i < e->tr.n; i++) {
                 trec_t *r = e->tr.v[i];
                 if (r->kind != T_TREQ) continue;
+                if (term) {
+                    /* the terminal ending supersedes every other
+                       suspension: the conversation was already ending */
+                    synth_tool_response(
+                        e, r, "a terminal tool ended the conversation");
+                    continue;
+                }
                 if (susp_int) {
                     synth_tool_response(e, r, "conversation interrupted");
                     continue;
@@ -653,6 +661,11 @@ int engine_run(engine_t *e) {
                     continue;
                 }
                 run_tool(e, r);
+                if (mcp_tool_is_terminal((mcp_mgr_t *)e->mcp, r->tool)) {
+                    term = true;
+                    free(e->terminal_id);
+                    e->terminal_id = strdup(r->id);
+                }
             }
             engine_drain_input(e);
             if (e->fatal_code) {
@@ -663,6 +676,25 @@ int engine_run(engine_t *e) {
                 engine_emit_error(e, EC_IO_ERROR, "stdin read failed", true);
                 mcp_kill_all((mcp_mgr_t *)e->mcp);
                 return EXIT_IO_ERROR;
+            }
+            if (term) {
+                /* terminal ending (design sec.4): requested, not an error -
+                   no error record for it, and it outranks a simultaneous
+                   external stop. Steering not yet applied is dropped;
+                   records without a flush get the drop rule. */
+                if (e->npending && !e->flush_seen && !e->stdin_eof) {
+                    char msg[128];
+                    snprintf(msg, sizeof msg,
+                             "%zu record(s) received without a flush were "
+                             "dropped",
+                             e->npending);
+                    engine_emit_error(e, EC_IO_ERROR, msg, false);
+                }
+                for (size_t i = 0; i < e->npending; i++)
+                    cJSON_Delete(e->pending[i]);
+                e->npending = 0;
+                mcp_kill_all((mcp_mgr_t *)e->mcp);
+                return EXIT_TERMINAL_TOOL;
             }
             if (g_stop_flag) return engine_stop_orderly(e, NULL);
             if (steering_ready(e)) {

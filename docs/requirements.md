@@ -15,7 +15,7 @@ applies. Rules marked *(proposed)* are working desiderata, not yet frozen.
 
 1. [cli conventions](#1-cli-conventions)
 2. [llmkit runner](#2-llmkit-runner)
-   - [i/o model](#21-io-model) - [start, continuation, replay](#22-start-continuation-replay) - [conversation loop](#23-conversation-loop) - [steering](#24-steering) - [process lifecycle](#25-process-lifecycle) - [external stop](#26-external-stop)
+   - [i/o model](#21-io-model) - [start, continuation, replay](#22-start-continuation-replay) - [conversation loop](#23-conversation-loop) - [steering](#24-steering) - [process lifecycle](#25-process-lifecycle) - [external stop](#26-external-stop) - [terminal tools](#27-terminal-tools)
 3. [record to api mapping](#3-record-to-api-mapping)
 4. [inference options](#4-inference-options)
 5. [duplicate and change semantics](#5-duplicate-and-change-semantics)
@@ -102,9 +102,15 @@ The runner drives the loop between model and tools:
      `tool_timeout`); the loop continues so the model can react *(proposed)*.
    - anthropic rejects a request whose `tool_use` lacks its `tool_result`, so
      a tool request is never left unanswered.
-4. After the last `tool_response` a new turn starts.
-5. The loop ends when a turn ends with `response` (final answer) or with a
-   fatal `error`.
+   - a terminal tool, once answered, ends the conversation: every not yet
+     started `tool_request` of the same turn is suspended and answered with
+     `is_error` true, and no new turn starts - see
+     [terminal tools](#27-terminal-tools) *(proposed)*.
+4. After the last `tool_response` a new turn starts, unless a terminal tool
+   ended the conversation.
+5. The loop ends when a turn ends with `response` (final answer), with a
+   fatal `error`, or when a terminal tool ended it
+   ([terminal tools](#27-terminal-tools)).
 
 Tool calls are strictly sequential, never parallel or concurrent. Loop limits
 and timeouts live in the `options` record.
@@ -134,6 +140,10 @@ One conversation per process; the transcript lives as long as the process.
   the conversation when the turn carries no `tool_request` and no steering
   is pending: the runner exits right after emitting it, whether stdin is
   open or closed.
+- A terminal tool ending terminates the conversation right after the last
+  `tool_response` of its turn: no further request reaches the endpoint, no
+  `error` record is emitted for it, and the exit code is a dedicated
+  nonzero one - see [terminal tools](#27-terminal-tools) *(proposed)*.
 - Steering is pending when records and a `flush` arrived while the turn was
   in flight; the conversation then resumes with those records, see steering.
 - Records that never receive a `flush` never run: when the runner exits with
@@ -166,6 +176,14 @@ endpoint.
   `tool_response`; every not yet started `tool_request` of the batch is
   suspended and answered with `is_error` true, as under steering. A
   `tool_request` is never left unanswered, so the transcript stays replayable.
+- A stop arriving while a terminal tool
+  ([terminal tools](#27-terminal-tools)) is executing lets it complete and
+  emit its `tool_response` as above; the terminal ending then applies
+  instead of the `interrupted` one - the conversation was already ending,
+  and the exit code is the terminal one. The same holds for a stop after
+  that `tool_response`: once it is emitted the ending is committed. A stop
+  before the terminal tool started follows the rules above unchanged
+  *(proposed)*.
 - The aborted turn then ends with a fatal `error` record, code `interrupted`,
   emitted after the last record of the turn. Steering records not yet applied
   are dropped; records that never received a `flush` follow the drop rule
@@ -184,6 +202,39 @@ endpoint.
   their `signature` exists on the final record only, which never came. Under
   anthropic with thinking enabled the turn's tool records are omitted with
   them, see [record to api mapping](#3-record-to-api-mapping) *(proposed)*.
+
+### 2.7 terminal tools
+
+The `tools` record marks individual tools as terminal through its servers'
+`terminal_tools` attribute (sec.8). A terminal tool's selection and use ends
+the conversation: the runner answers it, emits the answer, and terminates -
+no further llm interaction happens after that tool was used *(proposed)*.
+
+- The ending triggers on execution. The turn that requests a terminal tool
+  runs unchanged up to and including its `tool_response`: text streamed
+  before the tool call is emitted as `response` records of the turn, the
+  call is executed and answered like any other. A failed or timed out
+  terminal tool is still answered (`is_error` true, plus the non-fatal
+  `tool_failed` / `tool_timeout` record) and still ends the conversation:
+  the model never sees the result, there is no retry.
+- Tool calls are strictly sequential, so with more than one terminal tool
+  requested in a turn the first executed one ends it. Every not yet started
+  `tool_request` of the turn - terminal or not - is suspended and answered
+  with a `tool_response` record, `is_error` true, stating that a terminal
+  tool ended the conversation: the same suspension rule as steering and
+  external stop, for the same replayability.
+- The runner then exits. Steering not yet applied is dropped; records that
+  never received a `flush` follow the drop rule
+  ([process lifecycle](#25-process-lifecycle)) with their non-fatal
+  `io_error`.
+- The ending is requested, not an error: no `error` record is emitted for
+  it. The exit code is a dedicated nonzero one (the design's exit table),
+  distinct from every error code, so applications running the runner in the
+  background can tell this ending from both success and failure.
+- On continuation the transcript of a terminal ending is legal input: the
+  turn is complete, every `tool_request` answered. A continuation may keep
+  conversing - the ending was a process decision, and the replayed `tools`
+  record re-marks the same tools terminal.
 
 ## 3. record to api mapping
 
@@ -402,6 +453,7 @@ Common fields:
 | `name` | yes | unique name of the mcp server, uniqueness enforced (`invalid_record`, fatal); used as prefix for the tool names exposed to the model (`name.tool_name`) |
 | `protocol` | no | mcp protocol revision, `2025-11-25` (v1) by default; any published v1 revision from `2024-11-05` to `2025-11-25` is accepted, and `2026-07-28` (v2) is supported; a server answering with a revision the runner does not support is a `connect_failed`; v2 is stateless, no `initialize` handshake - the per revision flow is pinned in the design |
 | `required` | no | boolean, signals if a failure to connect and offer the tool to the model is a deal breaker and should stop processing the conversation instead |
+| `terminal_tools` | no | list of the server's tool names - as the server lists them, the part after the server prefix of the exposed `name.tool_name` - whose selection and use ends the conversation, see [terminal tools](#27-terminal-tools); order is irrelevant and a repeated name is not an error; a non-string entry, or a name a connected server does not list, is `invalid_record`, fatal - catches typos; a server that failed to connect is not validated, its tools are not offered to the model anyway; a `tools` record change revalidates at the boundary it applies, like the connection rules *(proposed)* |
 
 Fields per `type`:
 
@@ -421,6 +473,12 @@ Connection rules:
   `connect_failed` error record and the conversation continues without its
   tools.
 - stdio servers run as child processes spawned by the runner.
+
+Example marking the `confirm` tool of the `ui` server terminal:
+
+```
+{"type":"tools","tools":[{"type":"stdio","name":"ui","command_line":"...","terminal_tools":["confirm"]}]}
+```
 
 ### options
 
@@ -638,6 +696,8 @@ catalog states otherwise:
 - Missing `llm` record at conversation start (fatal).
 - No `user` record in the transcript (fatal).
 - Duplicate server `name` in a `tools` record (fatal).
+- `terminal_tools` entry that is not a string, or a named tool a connected
+  server does not list (fatal).
 - Transcript that would start with a non-user message under anthropic
   (fatal).
 - Unsupported `header` `version` (fatal).
@@ -690,12 +750,17 @@ argument `input`; their descriptions come from the `agent-as-tool` record.
 - `retain_context` true: the agent keeps one growing conversation for the
   life of the process; each `invoke` appends its `user` record and its turns
   to the accumulated transcript. Only conversations ended by a final
-  `response` are retained: a fatal `error` rolls the transcript back to the
+  `response` or by a terminal tool ([terminal tools](#27-terminal-tools))
+  are retained: a fatal `error` rolls the transcript back to the
   last successful `invoke`, the bare seed if none. Either way the transcript
   stays append only and cache hits keep accumulating.
 - The reply is the concatenated text of the final `response` record, nothing
   else: no partial records, no `thinking`, no intermediate tool traffic
-  exists on this interface.
+  exists on this interface. A conversation ended by a terminal tool
+  ([terminal tools](#27-terminal-tools)) replies with the text of that
+  tool's `tool_response` instead - there is no final `response` to read; a
+  failed one (`is_error` true) is returned as a failed tool call carrying
+  the message *(proposed)*.
 - A conversation that ends in a fatal `error` instead of a final `response`
   is returned as a failed tool call carrying the code and message.
 - Nesting is allowed: an agent seed may list other `agent-as-tool` servers
@@ -718,6 +783,10 @@ the whole behavior of the proxy:
   `invalid_record`, fatal. Optional: `header` (as the first record), and
   `expose` / `hide` records.
 - Every other record type is invalid in a config (`invalid_record`, fatal).
+- A `terminal_tools` attribute in the config's `tools` record is accepted
+  and ignored: the proxy relays calls and stays up, it has no conversation
+  to end - [terminal tools](#27-terminal-tools) is the runner's rule
+  *(proposed)*.
 - Fatal config or startup errors are out of channel: reported on stderr, no
   mcp traffic, the process exits nonzero. After bootstrap stdout is the mcp
   channel and carries no records.
@@ -781,6 +850,7 @@ llmkit call (--anthropic | --openai | --openai-responses) <api_base>
             [--key <token>] [--model <name>] [--max-tokens <n>]
             [--system-prompt <text>]
             [--header <name=value>]... [--mcp-proxy <config>]...
+            [--terminal-tool <name.tool>]...
             --prompt <text|->
 ```
 
@@ -798,17 +868,21 @@ Arguments may come in any order; `<api_base>` is the only positional.
 | `--system-prompt <text>` | 0-1 | compiles to one `system` record; absent compiles to no `system` record at all - an absent record and an empty text are different on the wire and the absent one is meant |
 | `--header <name>=<value>` | 0-n | compiles to `headers` entries; a later `--header` with the same name replaces the earlier one; a missing `=` or an empty name is a usage error |
 | `--mcp-proxy <config>` | 0-n | one stdio mcp server per flag, see [below](#--mcp-proxy) |
+| `--terminal-tool <name.tool>` | 0-n | marks the named exposed tool terminal on the compiled `tools` record, see [terminal tools](#27-terminal-tools); repeatable, appends in argv order; the server prefix must name a `--mcp-proxy` server of the same command line, else usage error; whether that server lists the tool stays record validation (`invalid_record`, fatal), exactly as in the runner *(proposed)* |
 | `--prompt <text\|->` | exactly one | compiles to the `user` record; the value `-` reads the whole of stdin as the prompt text, UTF-8 enforced - argv length limits make stdin the channel for long prompts |
 
 CLI shape errors - protocol flag missing or repeated, positional argument
-missing or extra, `--prompt` missing, unknown flag, malformed `--header` -
+missing or extra, `--prompt` missing, unknown flag, malformed `--header`, a
+`--terminal-tool` whose server prefix matches no `--mcp-proxy` server -
 are usage errors: message on stderr, exit 1, nothing connects or runs.
 
 ### compiled record stream
 
 The command line compiles to, in order: one `llm` record - carrying
 `inference_options.max_tokens` when `--max-tokens` is given - the optional
-`system` record, the optional `tools` record, one `user` record. From there
+`system` record, the optional `tools` record, one `user` record.
+`--terminal-tool` entries append to the `terminal_tools` list of the
+matching server entry of that `tools` record, in argv order. From there
 the conversation is the runner's, unchanged: same loop (tool rounds run to
 completion when `--mcp-proxy` servers are given), same record validation,
 same option defaults - no `options` record is compiled. Record level
@@ -867,6 +941,11 @@ Each `--mcp-proxy <config>` compiles to one stdio server entry of a single
   is `runner` territory.
 - The last write ensures a trailing newline unless the text already ends
   with one; an empty answer writes nothing at all.
+- A terminal tool ending ([terminal tools](#27-terminal-tools)) prints the
+  text of that tool's `tool_response` instead - the final `response` does
+  not exist - under the same trailing newline rule; the exit code is the
+  dedicated nonzero one from the design table, so scripts can branch on
+  it *(proposed)*.
 - Error records surface as one human readable stderr line each; the exact
   format is a design decision.
 - SIGINT is the runner's external stop; text already printed stays printed,

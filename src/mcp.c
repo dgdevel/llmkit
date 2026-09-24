@@ -488,6 +488,16 @@ static void emit_connect_failed(engine_t *e, const char *name, const char *err,
     e->emit(e->emit_ctx, rec_error(EC_CONNECT_FAILED, msg, fatal));
 }
 
+static bool cfg_marks_terminal(const cJSON *srv_cfg, const char *tool_name) {
+    const cJSON *tt =
+        cJSON_GetObjectItemCaseSensitive(srv_cfg, "terminal_tools");
+    if (!cJSON_IsArray(tt)) return false;
+    for (const cJSON *e = tt->child; e; e = e->next)
+        if (cJSON_IsString(e) && !strcmp(e->valuestring, tool_name))
+            return true;
+    return false;
+}
+
 static void listing_rebuild(mcp_mgr_t *m) {
     for (size_t i = 0; i < m->listing.n; i++) {
         cJSON_Delete(m->listing.v[i].tool);
@@ -511,6 +521,7 @@ static void listing_rebuild(mcp_mgr_t *m) {
             char *ex = malloc(strlen(s->name) + strlen(nm) + 2);
             sprintf(ex, "%s.%s", s->name, nm);
             te->exposed_name = ex;
+            te->terminal = cfg_marks_terminal(s->cfg, nm);
         }
     }
 }
@@ -594,10 +605,52 @@ int mcp_reconcile(mcp_mgr_t *m, engine_t *e, const cJSON *tools_record) {
         free(ord);
     }
     listing_rebuild(m);
+
+    /* terminal_tools name resolution: every name must appear in its own
+       server's listing (typo catching, the proxy's expose/hide rule). A
+       server that failed to connect never reached m->v: not validated,
+       its tools are not offered anyway. */
+    for (size_t i = 0; i < m->n; i++) {
+        mcp_server_t *s = m->v[i];
+        const cJSON *tt =
+            cJSON_GetObjectItemCaseSensitive(s->cfg, "terminal_tools");
+        if (!cJSON_IsArray(tt)) continue;
+        for (const cJSON *name = tt->child; name; name = name->next) {
+            if (!cJSON_IsString(name)) continue; /* shape: validation */
+            const char *nm = name->valuestring;
+            bool found = false;
+            for (const cJSON *t = s->tools ? s->tools->child : NULL; t;
+                 t = t->next) {
+                const cJSON *tn = cJSON_GetObjectItemCaseSensitive(t, "name");
+                if (cJSON_IsString(tn) && !strcmp(tn->valuestring, nm)) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                char msg[512];
+                snprintf(msg, sizeof msg,
+                         "terminal_tools names tool '%s', not listed by "
+                         "server '%s'",
+                         nm, s->name);
+                if (e && e->emit)
+                    e->emit(e->emit_ctx,
+                            rec_error(EC_INVALID_RECORD, msg, true));
+                return EXIT_INVALID_RECORD;
+            }
+        }
+    }
     return 0;
 }
 
 const tool_listing_t *mcp_listing(mcp_mgr_t *m) { return &m->listing; }
+
+bool mcp_tool_is_terminal(mcp_mgr_t *m, const char *tool) {
+    for (size_t i = 0; i < m->listing.n; i++)
+        if (!strcmp(m->listing.v[i].exposed_name, tool))
+            return m->listing.v[i].terminal;
+    return false;
+}
 
 /* ================= tools/call ================= */
 

@@ -31,6 +31,7 @@ typedef struct engine engine_t;
 #define EXIT_MAX_TOOL_ROUNDS    6
 #define EXIT_IO_ERROR           7
 #define EXIT_INTERRUPTED        8
+#define EXIT_TERMINAL_TOOL      9
 
 /* ---- error codes ---- */
 #define EC_INVALID_RECORD   "invalid_record"
@@ -357,6 +358,8 @@ struct engine {
     cJSON **pending; /* buffered steering candidate trees */
     size_t npending, cappending;
     int fatal_code; /* set when a drained record failed validation */
+    char *terminal_id; /* id of the answered terminal tool_request, NULL
+                          when none ran (design sec.4; the sinks read it) */
     int wire_proto;
 
     /* seams for tests */
@@ -420,6 +423,7 @@ typedef struct tool_entry {
     mcp_server_t *srv;
     cJSON *tool; /* owned snapshot of the upstream tool object */
     char *exposed_name;
+    bool terminal; /* terminal_tools marks it (design sec.6) */
 } tool_entry_t;
 
 typedef struct tool_listing {
@@ -442,6 +446,9 @@ void mcp_mgr_free(mcp_mgr_t *m);
 int mcp_reconcile(mcp_mgr_t *m, engine_t *e, const cJSON *tools_record);
 const tool_listing_t *mcp_listing(mcp_mgr_t *m); /* ordered snapshot */
 mcp_server_t *mcp_find(mcp_mgr_t *m, const char *name);
+/* exposed name (server.tool) marked terminal by its server's
+   terminal_tools; false when unknown (design sec.6) */
+bool mcp_tool_is_terminal(mcp_mgr_t *m, const char *tool);
 /* raw call: 0 ok (result tree owned by caller), 1 failed (err), 2 timeout */
 int mcp_call_raw(mcp_mgr_t *m, mcp_server_t *srv, const char *upstream_tool,
                  const cJSON *args, cJSON **result_out, char *err, size_t errsz,
@@ -527,6 +534,8 @@ typedef struct call_cfg {
     size_t nhdrs;
     char **proxies;                  /* owned config paths, argv order */
     size_t nproxies;
+    char **terminals;                /* owned --terminal-tool values */
+    size_t nterminals;
 } call_cfg_t;
 
 void call_cfg_free(call_cfg_t *c);

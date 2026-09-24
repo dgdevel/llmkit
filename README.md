@@ -41,6 +41,22 @@ Tools: add a `tools` record before the `user` record -
 {"type":"tools","tools":[{"type":"stdio","name":"fs","command_line":"npx -y @modelcontextprotocol/server-filesystem /tmp"}]}
 ```
 
+A tool can be marked **terminal** through its server's `terminal_tools`
+list: once the model selects and uses it, the runner answers the call,
+emits the `tool_response` and terminates - no further llm interaction,
+exit code 9, no error record (a requested ending, not a failure). The
+rest of the batch is answered `is_error: true` so the transcript stays
+replayable -
+
+```json
+{"type":"tools","tools":[{"type":"stdio","name":"ui","command_line":"...","terminal_tools":["confirm","cancel"]}]}
+```
+
+`llmkit call --mcp-proxy cfg.jsonl --terminal-tool fs.confirm` marks
+tools the same way from the command line; the answer is then the tool's
+text. `llmkit agent-as-tool` seeds honor the attribute too: the `invoke`
+reply is the terminal tool's answer.
+
 Integrations that need steering keep stdin open, feed records and a
 `{"type":"flush"}` while a turn is in flight; the records apply at the
 next turn boundary. The full record catalogue, the conversation rules and
@@ -84,7 +100,8 @@ No build system beyond the plain Makefile.
 ## behavior notes
 
 - Exit code 0 only when the conversation ended with a successful final
-  `response`; every fatal condition has its own exit code (see design sec.12).
+  `response`; every fatal condition has its own exit code (see design
+  sec.12). Exit 9 is the terminal-tool ending: requested, not an error.
 - SIGINT is an orderly stop: buffered text is flushed as a trailing
   partial record, running tools complete, a second SIGINT kills the
   process immediately.
