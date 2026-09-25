@@ -176,8 +176,6 @@ int proxy_resolve_and_build(proxy_state_t *p) {
         return -1;
     }
     /* connect upstreams; non-required failures are skipped silently */
-    engine_t *nuleng = NULL;
-    (void)nuleng;
     engine_t tmpeng;
     memset(&tmpeng, 0, sizeof tmpeng);
     tmpeng.emit = NULL; /* no record channel */
@@ -200,7 +198,6 @@ int proxy_resolve_and_build(proxy_state_t *p) {
     }
 
     /* resolve selectors against connected listings */
-    char err[512];
     for (size_t i = 0; i < p->nex; i++) {
         cJSON *t = p->ex[i].presentation;
         const char *sel = rec_str(t, "tool");
@@ -238,7 +235,6 @@ int proxy_resolve_and_build(proxy_state_t *p) {
         p->ex[i].srv = server;
         p->ex[i].upstream_name = strdup(tool);
         p->ex[i].upstream_srv = strdup(srv);
-        (void)err;
     }
 
     /* uniqueness: each upstream tool by at most one record; exposed names
@@ -390,11 +386,7 @@ int proxy_handle(void *ctx, const char *method, cJSON *params,
         cJSON *res = cJSON_CreateObject();
         const char *pr = rec_str(params, "protocolVersion");
         const char *use =
-            (pr && (!strcmp(pr, "2026-07-28") || !strcmp(pr, "2025-11-25") ||
-                    !strcmp(pr, "2025-06-18") || !strcmp(pr, "2025-03-26") ||
-                    !strcmp(pr, "2024-11-05")))
-                ? pr
-                : "2025-11-25";
+            (pr && mcp_protocol_supported(pr)) ? pr : "2025-11-25";
         cJSON_AddStringToObject(res, "protocolVersion", use);
         cJSON *caps = cJSON_CreateObject();
         cJSON_AddItemToObject(caps, "tools", cJSON_CreateObject());
@@ -442,7 +434,7 @@ int proxy_handle(void *ctx, const char *method, cJSON *params,
             }
         cJSON *result = NULL;
         char err[512] = "";
-        int rc = mcp_call_raw(p->mgr, e->srv, e->upstream_name, upargs, &result,
+        int rc = mcp_call_raw(e->srv, e->upstream_name, upargs, &result,
                               err, sizeof err, -1);
         cJSON_Delete(upargs);
         if (rc != 0) {
@@ -479,31 +471,12 @@ void proxy_state_free(proxy_state_t *p) {
     memset(p, 0, sizeof *p);
 }
 
-static bool proxy_load_file(const char *path, proxy_state_t *p) {
-    FILE *f = fopen(path, "r");
-    if (!f) return false;
-    jsonl_pusher_t push;
-    jsonl_pusher_init(&push, proxy_file_on_line, p);
-    char bbuf[8192];
-    size_t n;
-    bool ok = true;
-    while ((n = fread(bbuf, 1, sizeof bbuf, f)) > 0)
-        if (jsonl_feed(&push, bbuf, n) != 0) {
-            ok = false;
-            break;
-        }
-    if (ok && jsonl_eof(&push) != 0) ok = false;
-    jsonl_pusher_free(&push);
-    fclose(f);
-    return ok;
-}
-
 int cmd_proxy(const char *config_path) {
     signals_init();
     proxy_state_t p;
     proxy_state_init(&p);
 
-    if (!proxy_load_file(config_path, &p) || !p.ok ||
+    if (!jsonl_read_file(config_path, proxy_file_on_line, &p) || !p.ok ||
         proxy_resolve_and_build(&p) != 0) {
         fprintf(stderr, "llmkit mcp-proxy: fatal config error in %s\n",
                 config_path);

@@ -1,6 +1,6 @@
 /* repl.c - llmkit repl: the interactive chat front-end (design sec.12).
    call's compiler minus --prompt, one session loop over one engine, and
-   the display sink: ascii separators, capability-gated bold and italic,
+   the display sink: ascii separators, tty-gated bold and italic,
    thinking and tool traffic rendered. Input is a program-owned raw-mode
    line buffer on a tty - the two Ctrl-C stages and the typed echo lean
    on it - or a plain line loop on anything else. */
@@ -10,7 +10,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
-#include <sys/wait.h>
 #include <termios.h>
 #include <unistd.h>
 
@@ -22,37 +21,16 @@ typedef struct style {
     char bold[32], italic[32], reset[32]; /* "" = attribute off */
 } style_t;
 
-/* one terminfo capability through tput; the fallback string goes in when
-   tput itself is missing, an empty answer keeps the attribute off */
-static void style_probe_cap(const char *cmd, char *out, size_t outsz,
-                            const char *fallback) {
-    snprintf(out, outsz, "%s", fallback);
-    FILE *p = popen(cmd, "r");
-    if (!p) return;
-    char tmp[64] = "";
-    if (!fgets(tmp, sizeof tmp, p)) tmp[0] = '\0';
-    int st = pclose(p);
-    int xc = WIFEXITED(st) ? WEXITSTATUS(st) : -1;
-    if (xc == 127 || xc == 126) return; /* no tput: hardcoded SGR stays */
-    tmp[strcspn(tmp, "\r\n")] = '\0';
-    snprintf(out, outsz, "%s", tmp); /* empty = capability absent, off */
-}
-
 static void style_probe(style_t *st, FILE *out) {
     memset(st, 0, sizeof *st);
     int fd = fileno(out);
     if (fd < 0 || !isatty(fd)) return;
     const char *term = getenv("TERM");
     if (!term || !*term || !strcmp(term, "dumb")) return;
-    style_probe_cap("tput bold 2>/dev/null", st->bold, sizeof st->bold,
-                    "\033[1m");
-    style_probe_cap("tput sitm 2>/dev/null", st->italic, sizeof st->italic,
-                    "\033[3m");
-    style_probe_cap("tput sgr0 2>/dev/null", st->reset, sizeof st->reset,
-                    "\033[0m");
-    /* a terminfo without sgr0 but with bold would leak the attribute */
-    if (!st->reset[0] && (st->bold[0] || st->italic[0]))
-        snprintf(st->reset, sizeof st->reset, "\033[0m");
+    /* SGR escapes: universal in every terminal TERM admits here */
+    snprintf(st->bold, sizeof st->bold, "\033[1m");
+    snprintf(st->italic, sizeof st->italic, "\033[3m");
+    snprintf(st->reset, sizeof st->reset, "\033[0m");
 }
 
 /* ================= display sink ================= */
@@ -576,9 +554,7 @@ int cmd_repl(int argc, char **argv) {
         return EXIT_OUT_OF_CHANNEL;
     }
     char exe[4096];
-    ssize_t n = readlink("/proc/self/exe", exe, sizeof exe - 1);
-    if (n > 0 && (size_t)n < sizeof exe - 1) exe[n] = '\0';
-    else snprintf(exe, sizeof exe, "%s", argv ? argv[0] : "llmkit");
+    self_exe(exe, sizeof exe, argv ? argv[0] : NULL);
     int rc = repl_run(&c, STDIN_FILENO, stdout, exe, NULL);
     call_cfg_free(&c);
     return rc;

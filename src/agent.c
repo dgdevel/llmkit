@@ -165,26 +165,6 @@ static void seed_on_line(void *ctx, char *line) {
     }
 }
 
-static bool load_jsonl_file(const char *path, void (*on_line)(void *, char *),
-                            void *ctx) {
-    FILE *f = fopen(path, "r");
-    if (!f) return false;
-    jsonl_pusher_t p;
-    jsonl_pusher_init(&p, on_line, ctx);
-    char bbuf[8192];
-    size_t n;
-    bool ok = true;
-    while ((n = fread(bbuf, 1, sizeof bbuf, f)) > 0)
-        if (jsonl_feed(&p, bbuf, n) != 0) {
-            ok = false;
-            break;
-        }
-    if (ok && jsonl_eof(&p) != 0) ok = false;
-    jsonl_pusher_free(&p);
-    fclose(f);
-    return ok;
-}
-
 /* ---- invoke ---- */
 
 typedef struct invoke_out {
@@ -307,11 +287,7 @@ static int agent_handle(void *ctx, const char *method, cJSON *params,
         cJSON *res = cJSON_CreateObject();
         const char *pr = rec_str(params, "protocolVersion");
         const char *use =
-            (pr && (!strcmp(pr, "2026-07-28") || !strcmp(pr, "2025-11-25") ||
-                    !strcmp(pr, "2025-06-18") || !strcmp(pr, "2025-03-26") ||
-                    !strcmp(pr, "2024-11-05")))
-                ? pr
-                : "2025-11-25";
+            (pr && mcp_protocol_supported(pr)) ? pr : "2025-11-25";
         cJSON_AddStringToObject(res, "protocolVersion", use);
         cJSON *caps = cJSON_CreateObject();
         cJSON_AddItemToObject(caps, "tools", cJSON_CreateObject());
@@ -404,7 +380,7 @@ int cmd_agent(const char *seed_path) {
     a.retain = false;
 
     seed_ctx_t sc = { &a, true, true };
-    if (!load_jsonl_file(seed_path, seed_on_line, &sc) || !sc.ok) {
+    if (!jsonl_read_file(seed_path, seed_on_line, &sc) || !sc.ok) {
         fprintf(stderr, "llmkit agent-as-tool: fatal seed error in %s\n",
                 seed_path);
         return 1;

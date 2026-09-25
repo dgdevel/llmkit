@@ -79,6 +79,8 @@ static char *vmsg(const char *fmt, ...) {
     return m;
 }
 
+static char *validate_inference(const cJSON *t); /* below */
+
 /* header objects travel verbatim into http request lines: CR/LF in a
    name or value would inject additional headers */
 static char *validate_headers(const cJSON *h) {
@@ -133,7 +135,7 @@ static const char *const known_inference[] = {
     "stream", NULL,
 };
 
-char *validate_inference(const cJSON *t) {
+static char *validate_inference(const cJSON *t) {
     if (!cJSON_IsObject(t)) return vmsg("inference_options must be an object");
     for (const cJSON *f = t->child; f; f = f->next) {
         bool known = false;
@@ -318,6 +320,25 @@ int jsonl_eof(jsonl_pusher_t *p) {
     return 0;
 }
 
+bool jsonl_read_file(const char *path, jsonl_line_fn on_line, void *ctx) {
+    FILE *f = fopen(path, "r");
+    if (!f) return false;
+    jsonl_pusher_t p;
+    jsonl_pusher_init(&p, on_line, ctx);
+    char bbuf[8192];
+    size_t n;
+    bool ok = true;
+    while ((n = fread(bbuf, 1, sizeof bbuf, f)) > 0)
+        if (jsonl_feed(&p, bbuf, n) != 0) {
+            ok = false;
+            break;
+        }
+    if (ok && jsonl_eof(&p) != 0) ok = false;
+    jsonl_pusher_free(&p);
+    fclose(f);
+    return ok;
+}
+
 /* ---- output record builders (fixed field order) ---- */
 
 cJSON *rec_error(const char *code, const char *message, bool fatal) {
@@ -347,10 +368,6 @@ cJSON *rec_thinking_final(const char *text, const char *signature) {
     cJSON *r = rec_text("thinking", text, false);
     cJSON_AddStringToObject(r, "signature", signature ? signature : "");
     return r;
-}
-
-cJSON *rec_response_final(const char *text) {
-    return rec_text("response", text, false);
 }
 
 cJSON *rec_tool_request(const char *tool, const cJSON *arguments, const char *id) {

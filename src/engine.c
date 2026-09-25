@@ -761,20 +761,19 @@ int engine_run(engine_t *e) {
 /* ================= stdin reader thread ================= */
 
 static void reader_on_line(void *ctx, char *line) {
-    stdin_reader_ctx_t *rc = ctx;
+    engine_t *e = ctx;
     cJSON *t = jsonl_parse_line(line);
     free(line);
-    if (t) queue_push(rc->e->inq, qmsg_new(Q_REC, t, NULL));
+    if (t) queue_push(e->inq, qmsg_new(Q_REC, t, NULL));
     else
-        queue_push(rc->e->inq,
+        queue_push(e->inq,
                    qmsg_new(Q_BADLINE, NULL, strdup("malformed json line")));
 }
 
 void *stdin_reader_thread(void *arg) {
-    stdin_reader_ctx_t *rc = arg;
-    engine_t *e = rc->e;
+    engine_t *e = arg;
     jsonl_pusher_t p;
-    jsonl_pusher_init(&p, reader_on_line, rc);
+    jsonl_pusher_init(&p, reader_on_line, e);
     char bbuf[8192];
     for (;;) {
         ssize_t n = read(STDIN_FILENO, bbuf, sizeof bbuf);
@@ -803,7 +802,6 @@ void *stdin_reader_thread(void *arg) {
         }
     }
     jsonl_pusher_free(&p);
-    free(rc);
     return NULL;
 }
 
@@ -817,11 +815,6 @@ void engine_test_push_record(engine_t *e, cJSON *tree) {
 void engine_test_push_eof(engine_t *e) {
     if (!e->inq) e->inq = queue_new();
     queue_push(e->inq, qmsg_new(Q_EOF, NULL, NULL));
-}
-
-void engine_test_push_ioerr(engine_t *e) {
-    if (!e->inq) e->inq = queue_new();
-    queue_push(e->inq, qmsg_new(Q_IOERR, NULL, NULL));
 }
 
 /* ================= runner command ================= */
@@ -839,11 +832,8 @@ int cmd_runner(void) {
     engine_t *e = engine_new(jsonl_stdout_sink, NULL);
     e->emit(e->emit_ctx, cJSON_Parse("{\"type\":\"header\",\"version\":1}"));
     e->inq = queue_new();
-
-    stdin_reader_ctx_t *rc = calloc(1, sizeof *rc);
-    rc->e = e;
     e->inq_shared = true;
-    thread_start_detached(stdin_reader_thread, rc);
+    thread_start_detached(stdin_reader_thread, e);
 
     int code = 0;
     bool started = false;

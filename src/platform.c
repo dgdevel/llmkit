@@ -8,6 +8,7 @@
 #include <signal.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -87,20 +88,6 @@ void queue_push(queue_t *q, void *item) {
     q->tail = n;
     pthread_cond_signal(&q->c);
     pthread_mutex_unlock(&q->m);
-}
-
-void *queue_pop(queue_t *q) {
-    pthread_mutex_lock(&q->m);
-    while (!q->head && !q->closed)
-        pthread_cond_wait(&q->c, &q->m);
-    if (!q->head) { pthread_mutex_unlock(&q->m); return NULL; }
-    qnode_t *n = q->head;
-    q->head = n->next;
-    if (!q->head) q->tail = NULL;
-    pthread_mutex_unlock(&q->m);
-    void *d = n->data;
-    free(n);
-    return d;
 }
 
 void *queue_try_pop(queue_t *q) {
@@ -350,21 +337,123 @@ bool http_hdrs_from_json(struct curl_slist **list, const cJSON *obj,
                          char *err, size_t errsz) {
     if (!obj) return true;
     if (!cJSON_IsObject(obj)) {
-        snprintf(err, errsz, "headers must be an object");
+        if (err) snprintf(err, errsz, "headers must be an object");
         return false;
     }
     for (const cJSON *it = obj->child; it; it = it->next) {
         if (!cJSON_IsString(it) || !it->valuestring) {
-            snprintf(err, errsz, "header value of '%s' must be a string", it->string);
+            if (err)
+                snprintf(err, errsz, "header value of '%s' must be a string",
+                         it->string);
             return false;
         }
         if (!http_hdr_add(list, it->string, it->valuestring)) {
-            snprintf(err, errsz,
-                     "header '%s': names and values must not contain "
-                     "CR or LF",
-                     it->string);
+            if (err)
+                snprintf(err, errsz,
+                         "header '%s': names and values must not contain "
+                         "CR or LF",
+                         it->string);
             return false;
         }
     }
     return true;
+}
+
+/* ---- llm endpoint glue shared by both wires ---- */
+
+cJSON *http_transport_error(http_req_t *req) {
+    char msg[512];
+    if (req->curl_res == CURLE_OPERATION_TIMEDOUT && !req->got_data) {
+        snprintf(msg, sizeof msg, "connect to llm endpoint timed out");
+        return rec_error(EC_CONNECT_FAILED, msg, true);
+    }
+    if (req->curl_res == CURLE_COULDNT_RESOLVE_HOST ||
+        req->curl_res == CURLE_COULDNT_CONNECT ||
+        req->curl_res == CURLE_SSL_CONNECT_ERROR) {
+        snprintf(msg, sizeof msg, "cannot reach llm endpoint: %s",
+                 curl_easy_strerror(req->curl_res));
+        return rec_error(EC_CONNECT_FAILED, msg, true);
+    }
+    snprintf(msg, sizeof msg, "llm endpoint transport error: %s",
+             curl_easy_strerror(req->curl_res));
+    return rec_error(EC_HTTP_ERROR, msg, true);
+}
+
+cJSON *http_status_error(http_req_t *req, bool with_type) {
+    cJSON *body =
+        cJSON_ParseWithLength(req->resp.data ? req->resp.data : "", req->resp.len);
+    char msg[768];
+    const cJSON *err = body ? cJSON_GetObjectItemCaseSensitive(body, "error") : NULL;
+    if (err) {
+        const cJSON *m = cJSON_GetObjectItemCaseSensitive(err, "message");
+        const cJSON *t = cJSON_GetObjectItemCaseSensitive(err, "type");
+        if (cJSON_IsString(m) && m->valuestring) {
+            if (with_type && cJSON_IsString(t) && t->valuestring)
+                snprintf(msg, sizeof msg, "HTTP %ld: %s (%s)", req->status,
+                         m->valuestring, t->valuestring);
+            else
+                snprintf(msg, sizeof msg, "HTTP %ld: %s", req->status,
+                         m->valuestring);
+            cJSON_Delete(body);
+            return rec_error(EC_API_ERROR, msg, true);
+        }
+    }
+    cJSON_Delete(body);
+    size_t n = req->resp.len > 200 ? 200 : req->resp.len;
+    char cut[256] = "";
+    if (n) {
+        memcpy(cut, req->resp.data, n);
+        cut[n] = '\0';
+    }
+    snprintf(msg, sizeof msg, "HTTP %ld: %s", req->status, cut);
+    return rec_error(EC_HTTP_ERROR, msg, true);
+}
+
+void llm_http_setup(engine_t *e, const char *path, bool stream,
+                    void (*on_data)(void *, const char *, size_t), void *ctx,
+                    buf_t *url, struct curl_slist **hdrs, http_req_t *r) {
+    buf_init(url);
+    buf_append_str(url, rec_str(e->llm, "api_base"));
+    buf_append_str(url, path);
+
+    *hdrs = NULL;
+    http_hdr_add_json(hdrs);
+    const cJSON *custom = cJSON_GetObjectItemCaseSensitive(e->llm, "headers");
+    bool auth_override = false;
+    if (cJSON_IsObject(custom))
+        for (const cJSON *it = custom->child; it; it = it->next)
+            if (it->string && !strcasecmp(it->string, "Authorization"))
+                auth_override = true;
+    const char *key = rec_str(e->llm, "api_key");
+    if (key && key[0] && !auth_override) {
+        buf_t auth;
+        buf_init(&auth);
+        buf_appendf(&auth, "Bearer %s", key);
+        /* guards CR/LF: validate_llm rejects them up front; this drops
+           the header rather than letting a crafted key inject one */
+        http_hdr_add(hdrs, "Authorization", auth.data);
+        buf_free(&auth);
+    }
+    /* header shape: validate_llm rejected bad ones up front */
+    http_hdrs_from_json(hdrs, custom, NULL, 0);
+    if (stream) http_hdr_add(hdrs, "Accept", "text/event-stream");
+
+    memset(r, 0, sizeof *r);
+    buf_init(&r->resp);
+    buf_init(&r->content_type);
+    r->url = url->data;
+    r->hdrs = *hdrs;
+    r->connect_to = e->llm_connect_timeout;
+    r->read_to = e->llm_read_timeout;
+    if (stream) {
+        r->on_data = on_data;
+        r->cb_ctx = ctx;
+    }
+}
+
+void llm_http_teardown(buf_t *url, struct curl_slist *hdrs, http_req_t *r) {
+    buf_free(&r->resp);
+    buf_free(&r->content_type);
+    curl_slist_free_all(hdrs);
+    buf_free(url);
 }

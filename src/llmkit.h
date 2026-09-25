@@ -81,7 +81,6 @@ typedef struct queue queue_t;
 queue_t *queue_new(void);
 void queue_free(queue_t *q); /* drops remaining items (freed with free()) */
 void queue_push(queue_t *q, void *item);
-void *queue_pop(queue_t *q);            /* blocking; NULL iff closed and empty */
 void *queue_try_pop(queue_t *q);        /* NULL if empty */
 void *queue_pop_timeout(queue_t *q, double seconds); /* NULL on timeout/empty */
 void queue_close(queue_t *q);
@@ -133,9 +132,25 @@ typedef struct http_req {
 int http_perform(http_req_t *r);
 bool http_hdr_add(struct curl_slist **list, const char *name, const char *value);
 void http_hdr_add_json(struct curl_slist **list);
-/* build a header list from a cJSON object of name->value strings; false on bad type */
+/* build a header list from a cJSON object of name->value strings; false on
+   bad type. err may be NULL (config-time validation already reports) */
 bool http_hdrs_from_json(struct curl_slist **list, const cJSON *obj,
                          char *err, size_t errsz);
+
+/* llm endpoint error mapping shared by both wires (from curl result /
+   http status + captured body; fatal records) */
+cJSON *http_transport_error(http_req_t *req);
+/* with_type: include the openai error.type suffix in the message */
+cJSON *http_status_error(http_req_t *req, bool with_type);
+
+/* the per-turn llm request shared by both wires: url (api_base + path),
+   headers (content type, bearer key unless overridden, custom, sse
+   accept), timeouts, stream callback. The caller sets body/body_len,
+   performs and calls llm_http_teardown. */
+void llm_http_setup(engine_t *e, const char *path, bool stream,
+                    void (*on_data)(void *, const char *, size_t), void *ctx,
+                    buf_t *url, struct curl_slist **hdrs, http_req_t *r);
+void llm_http_teardown(buf_t *url, struct curl_slist *hdrs, http_req_t *r);
 
 /* ================= sse.c ================= */
 typedef struct sse_parser sse_parser_t;
@@ -171,7 +186,6 @@ int rec_classify(const cJSON *tree); /* R_* or R_UNKNOWN */
 char *validate_llm(const cJSON *t);
 char *validate_tools(const cJSON *t);
 char *validate_options(const cJSON *t);        /* merged options object */
-char *validate_inference(const cJSON *t);      /* inference_options object */
 char *validate_content(const cJSON *content);  /* list of {type:"text",text} */
 
 const char *rec_str(const cJSON *t, const char *field); /* string field or NULL */
@@ -198,13 +212,16 @@ int jsonl_eof(jsonl_pusher_t *p);
 /* parse one line; NULL on malformed json (or embedded NUL - pre-checked) */
 cJSON *jsonl_parse_line(const char *line);
 
+/* feed a whole file through the byte pipeline; false on io error or a
+   byte-rule violation (record validity is the callback's business) */
+bool jsonl_read_file(const char *path, jsonl_line_fn on_line, void *ctx);
+
 /* output record builders (field order fixed, deterministic) */
 cJSON *rec_error(const char *code, const char *message, bool fatal);
 cJSON *rec_start(void);
 cJSON *rec_text(const char *type /*"response"|"thinking"*/, const char *text,
                 bool partial);
 cJSON *rec_thinking_final(const char *text, const char *signature);
-cJSON *rec_response_final(const char *text); /* usage/finish attached later */
 cJSON *rec_tool_request(const char *tool, const cJSON *arguments, const char *id);
 cJSON *rec_tool_response(const char *id, const char *text, bool is_error);
 void rec_attach_usage(cJSON *rec, double in, double out);
@@ -385,10 +402,7 @@ int engine_pre_start_stop(engine_t *e);  /* SIGINT before start; returns exit co
 void engine_rebuild_options_cache(engine_t *e);
 wire_t *wire_factory_default(engine_t *e);
 
-/* stdin reader thread body */
-typedef struct stdin_reader_ctx {
-    engine_t *e;
-} stdin_reader_ctx_t;
+/* stdin reader thread body (arg is the engine) */
 void *stdin_reader_thread(void *arg);
 
 /* jsonl.c */
@@ -441,6 +455,9 @@ typedef struct mcp_mgr {
 
 mcp_mgr_t *mcp_mgr_new(void);
 void mcp_mgr_free(mcp_mgr_t *m);
+/* protocol revision accepted on either side of a connection (server
+   config, client initialize) */
+bool mcp_protocol_supported(const char *rev);
 /* reconcile server set with a validated tools record; connects new servers.
    Emits connect_failed error records through e->emit (if set) for
    non-required failures. Returns 0, or exit code 3 if a required server
@@ -452,7 +469,7 @@ mcp_server_t *mcp_find(mcp_mgr_t *m, const char *name);
    terminal_tools; false when unknown (design sec.6) */
 bool mcp_tool_is_terminal(mcp_mgr_t *m, const char *tool);
 /* raw call: 0 ok (result tree owned by caller), 1 failed (err), 2 timeout */
-int mcp_call_raw(mcp_mgr_t *m, mcp_server_t *srv, const char *upstream_tool,
+int mcp_call_raw(mcp_server_t *srv, const char *upstream_tool,
                  const cJSON *args, cJSON **result_out, char *err, size_t errsz,
                  double timeout);
 /* call: 0 ok (text_out,is_error), 1 failed (err), 2 timeout */
@@ -488,7 +505,6 @@ void http_global_init(void);
    reader thread would */
 void engine_test_push_record(engine_t *e, cJSON *tree); /* takes tree */
 void engine_test_push_eof(engine_t *e);
-void engine_test_push_ioerr(engine_t *e);
 
 /* ================= wire constructors ================= */
 wire_t *wire_openai_new(int proto /*PROTO_OPENAI|PROTO_RESPONSES*/);
@@ -552,6 +568,8 @@ cJSON *call_build_system(const call_cfg_t *c); /* NULL when absent */
 cJSON *call_build_tools(const call_cfg_t *c, const char *exe_path); /* NULL */
 cJSON *call_build_user(const char *prompt);
 void call_shell_quote(buf_t *b, const char *s); /* POSIX single-quote */
+/* /proc/self/exe with argv0 fallback: the mcp-proxy command line */
+void self_exe(char *out, size_t sz, const char *argv0);
 /* compile the leading records - llm, optional system, optional tools -
    into the engine, validation included; 0 ok or the exit code, errors
    rendered through the engine sink (design sec.11/12) */

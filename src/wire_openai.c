@@ -302,7 +302,7 @@ static void append_tool_entry(buf_t *b, const tool_entry_t *t, bool nested) {
     }
     const cJSON *sch = cJSON_GetObjectItemCaseSensitive(t->tool, "inputSchema");
     if (sch) {
-        buf_append_str(b, nested ? ",\"parameters\":" : ",\"parameters\":");
+        buf_append_str(b, ",\"parameters\":");
         buf_append_tree(b, sch);
     }
     buf_append_str(b, nested ? "}}" : "}");
@@ -405,56 +405,6 @@ static bool build_body(owire_t *w, engine_t *e) {
         buf_append_byte(b, '}');
     }
     return stream;
-}
-
-/* ---------------- error records ---------------- */
-
-static cJSON *transport_error(http_req_t *req) {
-    char msg[512];
-    if (req->curl_res == CURLE_OPERATION_TIMEDOUT && !req->got_data) {
-        snprintf(msg, sizeof msg, "connect to llm endpoint timed out");
-        return rec_error(EC_CONNECT_FAILED, msg, true);
-    }
-    if (req->curl_res == CURLE_COULDNT_RESOLVE_HOST ||
-        req->curl_res == CURLE_COULDNT_CONNECT ||
-        req->curl_res == CURLE_SSL_CONNECT_ERROR) {
-        snprintf(msg, sizeof msg, "cannot reach llm endpoint: %s",
-                 curl_easy_strerror(req->curl_res));
-        return rec_error(EC_CONNECT_FAILED, msg, true);
-    }
-    snprintf(msg, sizeof msg, "llm endpoint transport error: %s",
-             curl_easy_strerror(req->curl_res));
-    return rec_error(EC_HTTP_ERROR, msg, true);
-}
-
-static cJSON *status_error(http_req_t *req) {
-    cJSON *body =
-        cJSON_ParseWithLength(req->resp.data ? req->resp.data : "", req->resp.len);
-    char msg[768];
-    const cJSON *err = body ? cJSON_GetObjectItemCaseSensitive(body, "error") : NULL;
-    if (err) {
-        const cJSON *m = cJSON_GetObjectItemCaseSensitive(err, "message");
-        const cJSON *t = cJSON_GetObjectItemCaseSensitive(err, "type");
-        if (cJSON_IsString(m) && m->valuestring) {
-            if (cJSON_IsString(t) && t->valuestring)
-                snprintf(msg, sizeof msg, "HTTP %ld: %s (%s)", req->status,
-                         m->valuestring, t->valuestring);
-            else
-                snprintf(msg, sizeof msg, "HTTP %ld: %s", req->status,
-                         m->valuestring);
-            cJSON_Delete(body);
-            return rec_error(EC_API_ERROR, msg, true);
-        }
-    }
-    cJSON_Delete(body);
-    size_t n = req->resp.len > 200 ? 200 : req->resp.len;
-    char cut[256] = "";
-    if (n) {
-        memcpy(cut, req->resp.data, n);
-        cut[n] = '\0';
-    }
-    snprintf(msg, sizeof msg, "HTTP %ld: %s", req->status, cut);
-    return rec_error(EC_HTTP_ERROR, msg, true);
 }
 
 /* ---------------- finish normalization ---------------- */
@@ -944,58 +894,23 @@ static int owire_turn(wire_t *base, engine_t *e, turn_out_t *out) {
     bool stream = build_body(w, e);
     owire_reset_turn(w, e, stream);
 
-    const char *base_url = rec_str(e->llm, "api_base");
     buf_t url;
-    buf_init(&url);
-    buf_append_str(&url, base_url);
-    buf_append_str(&url,
-                   w->proto == PROTO_OPENAI ? "/chat/completions" : "/responses");
-
-    struct curl_slist *hdrs = NULL;
-    http_hdr_add_json(&hdrs);
-    const cJSON *custom = cJSON_GetObjectItemCaseSensitive(e->llm, "headers");
-    bool auth_override = false;
-    if (cJSON_IsObject(custom))
-        for (const cJSON *it = custom->child; it; it = it->next)
-            if (it->string && !strcasecmp(it->string, "Authorization"))
-                auth_override = true;
-    const char *key = rec_str(e->llm, "api_key");
-    if (key && key[0] && !auth_override) {
-        buf_t auth;
-        buf_init(&auth);
-        buf_appendf(&auth, "Bearer %s", key);
-        /* guards CR/LF: validate_llm rejects them up front; this drops
-           the header rather than letting a crafted key inject one */
-        http_hdr_add(&hdrs, "Authorization", auth.data);
-        buf_free(&auth);
-    }
-    char errh[256] = "";
-    http_hdrs_from_json(&hdrs, custom, errh, sizeof errh);
-    if (stream) http_hdr_add(&hdrs, "Accept", "text/event-stream");
-
+    struct curl_slist *hdrs;
     http_req_t req;
-    memset(&req, 0, sizeof req);
-    buf_init(&req.resp);
-    buf_init(&req.content_type);
-    req.url = url.data;
-    req.hdrs = hdrs;
+    llm_http_setup(e, w->proto == PROTO_OPENAI ? "/chat/completions" : "/responses",
+                   stream, stream ? http_data_cb : NULL, &w->sctx, &url, &hdrs,
+                   &req);
     req.body = w->base.last_body.data;
     req.body_len = w->base.last_body.len;
-    req.connect_to = e->llm_connect_timeout;
-    req.read_to = e->llm_read_timeout;
-    if (stream) {
-        req.on_data = http_data_cb;
-        req.cb_ctx = &w->sctx;
-    }
 
     int rc = http_perform(&req);
     int result;
     if (rc == -1) {
         blk_abort(&w->be);
         result = g_stop_flag ? TURN_ABORTED : TURN_FATAL;
-        if (result == TURN_FATAL) out->error_rec = transport_error(&req);
+        if (result == TURN_FATAL) out->error_rec = http_transport_error(&req);
     } else if (rc == 1) {
-        out->error_rec = status_error(&req);
+        out->error_rec = http_status_error(&req, true);
         result = TURN_FATAL;
     } else if (w->failed) {
         out->error_rec = rec_error(EC_API_ERROR, w->fail_msg, true);
@@ -1004,10 +919,7 @@ static int owire_turn(wire_t *base, engine_t *e, turn_out_t *out) {
         result = map_response(w, e, stream, &req, out);
     }
 
-    buf_free(&req.resp);
-    buf_free(&req.content_type);
-    curl_slist_free_all(hdrs);
-    buf_free(&url);
+    llm_http_teardown(&url, hdrs, &req);
     sse_free(&w->sse);
     return result;
 }

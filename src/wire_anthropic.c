@@ -13,11 +13,6 @@
 
 #define CACHE_MARK ",\"cache_control\":{\"type\":\"ephemeral\"}"
 
-typedef struct ablock {
-    int type; /* 0 text, 1 thinking, 2 tool_use */
-    const trec_t *rec;
-} ablock_t;
-
 typedef struct awire awire_t;
 
 struct ant_ctx {
@@ -592,51 +587,6 @@ static int ant_body_map(awire_t *w, engine_t *e, const cJSON *body,
     return TURN_FINAL;
 }
 
-/* ---------------- errors (same shapes as openai) ---------------- */
-
-static cJSON *ant_transport_error(http_req_t *req) {
-    char msg[512];
-    if (req->curl_res == CURLE_OPERATION_TIMEDOUT && !req->got_data)
-        return rec_error(EC_CONNECT_FAILED, "connect to llm endpoint timed out",
-                         true);
-    if (req->curl_res == CURLE_COULDNT_RESOLVE_HOST ||
-        req->curl_res == CURLE_COULDNT_CONNECT ||
-        req->curl_res == CURLE_SSL_CONNECT_ERROR) {
-        snprintf(msg, sizeof msg, "cannot reach llm endpoint: %s",
-                 curl_easy_strerror(req->curl_res));
-        return rec_error(EC_CONNECT_FAILED, msg, true);
-    }
-    snprintf(msg, sizeof msg, "llm endpoint transport error: %s",
-             curl_easy_strerror(req->curl_res));
-    return rec_error(EC_HTTP_ERROR, msg, true);
-}
-
-static cJSON *ant_status_error(http_req_t *req) {
-    cJSON *body = cJSON_ParseWithLength(req->resp.data ? req->resp.data : "",
-                                        req->resp.len);
-    char msg[768];
-    const cJSON *err =
-        body ? cJSON_GetObjectItemCaseSensitive(body, "error") : NULL;
-    if (err) {
-        const cJSON *m = cJSON_GetObjectItemCaseSensitive(err, "message");
-        if (cJSON_IsString(m) && m->valuestring) {
-            snprintf(msg, sizeof msg, "HTTP %ld: %s", req->status,
-                     m->valuestring);
-            cJSON_Delete(body);
-            return rec_error(EC_API_ERROR, msg, true);
-        }
-    }
-    cJSON_Delete(body);
-    size_t n = req->resp.len > 200 ? 200 : req->resp.len;
-    char cut[256] = "";
-    if (n) {
-        memcpy(cut, req->resp.data, n);
-        cut[n] = '\0';
-    }
-    snprintf(msg, sizeof msg, "HTTP %ld: %s", req->status, cut);
-    return rec_error(EC_HTTP_ERROR, msg, true);
-}
-
 /* ---------------- turn driver ---------------- */
 
 static int awire_turn(wire_t *base, engine_t *e, turn_out_t *out) {
@@ -663,55 +613,21 @@ static int awire_turn(wire_t *base, engine_t *e, turn_out_t *out) {
     sse_init(&w->sse, ant_event, &w->sctx);
 
     buf_t url;
-    buf_init(&url);
-    buf_append_str(&url, rec_str(e->llm, "api_base"));
-    buf_append_str(&url, "/messages");
-
-    struct curl_slist *hdrs = NULL;
-    http_hdr_add_json(&hdrs);
-    const cJSON *custom = cJSON_GetObjectItemCaseSensitive(e->llm, "headers");
-    bool auth_override = false;
-    if (cJSON_IsObject(custom))
-        for (const cJSON *it = custom->child; it; it = it->next)
-            if (it->string && !strcasecmp(it->string, "Authorization"))
-                auth_override = true;
-    const char *key = rec_str(e->llm, "api_key");
-    if (key && key[0] && !auth_override) {
-        buf_t auth;
-        buf_init(&auth);
-        buf_appendf(&auth, "Bearer %s", key);
-        /* guards CR/LF: validate_llm rejects them up front; this drops
-           the header rather than letting a crafted key inject one */
-        http_hdr_add(&hdrs, "Authorization", auth.data);
-        buf_free(&auth);
-    }
-    char errh[256] = "";
-    http_hdrs_from_json(&hdrs, custom, errh, sizeof errh);
-    if (stream) http_hdr_add(&hdrs, "Accept", "text/event-stream");
-
+    struct curl_slist *hdrs;
     http_req_t req;
-    memset(&req, 0, sizeof req);
-    buf_init(&req.resp);
-    buf_init(&req.content_type);
-    req.url = url.data;
-    req.hdrs = hdrs;
+    llm_http_setup(e, "/messages", stream, stream ? ant_http_data : NULL,
+                   &w->sctx, &url, &hdrs, &req);
     req.body = w->base.last_body.data;
     req.body_len = w->base.last_body.len;
-    req.connect_to = e->llm_connect_timeout;
-    req.read_to = e->llm_read_timeout;
-    if (stream) {
-        req.on_data = ant_http_data;
-        req.cb_ctx = &w->sctx;
-    }
 
     int rc = http_perform(&req);
     int result;
     if (rc == -1) {
         blk_abort(&w->be);
         result = g_stop_flag ? TURN_ABORTED : TURN_FATAL;
-        if (result == TURN_FATAL) out->error_rec = ant_transport_error(&req);
+        if (result == TURN_FATAL) out->error_rec = http_transport_error(&req);
     } else if (rc == 1) {
-        out->error_rec = ant_status_error(&req);
+        out->error_rec = http_status_error(&req, false);
         result = TURN_FATAL;
     } else if (w->failed) {
         out->error_rec = rec_error(EC_API_ERROR, w->fail_msg, true);
@@ -740,10 +656,7 @@ static int awire_turn(wire_t *base, engine_t *e, turn_out_t *out) {
         }
     }
 
-    buf_free(&req.resp);
-    buf_free(&req.content_type);
-    curl_slist_free_all(hdrs);
-    buf_free(&url);
+    llm_http_teardown(&url, hdrs, &req);
     sse_free(&w->sse);
     return result;
 }

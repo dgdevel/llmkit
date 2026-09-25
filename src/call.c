@@ -608,7 +608,7 @@ static int read_stdin_prompt(char **out, char *err, size_t errsz) {
     return 0;
 }
 
-static void self_exe(char *out, size_t sz, const char *argv0) {
+void self_exe(char *out, size_t sz, const char *argv0) {
     ssize_t n = readlink("/proc/self/exe", out, sz - 1);
     if (n > 0 && (size_t)n < sz - 1) {
         out[n] = '\0';

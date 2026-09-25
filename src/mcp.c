@@ -18,7 +18,8 @@ static const char *const v1_revisions[] = {
     "2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25", NULL,
 };
 
-static bool revision_supported(const char *rev) {
+/* shared with the agent/proxy initialize handlers */
+bool mcp_protocol_supported(const char *rev) {
     for (int i = 0; v1_revisions[i]; i++)
         if (!strcmp(v1_revisions[i], rev)) return true;
     return !strcmp(rev, "2026-07-28");
@@ -315,8 +316,8 @@ static int http_rpc(mcp_server_t *s, cJSON *req, cJSON **reply, double timeout,
     http_hdr_add_json(&hdrs);
     hdrs = curl_slist_append(hdrs, "Accept: application/json, text/event-stream");
     const cJSON *custom = cJSON_GetObjectItemCaseSensitive(s->cfg, "headers");
-    char eh[256] = "";
-    http_hdrs_from_json(&hdrs, custom, eh, sizeof eh);
+    /* header shape: validate_tools rejected bad ones up front */
+    http_hdrs_from_json(&hdrs, custom, NULL, 0);
     if (s->session && s->session[0])
         http_hdr_add(&hdrs, "Mcp-Session-Id", s->session);
 
@@ -441,7 +442,7 @@ static int server_connect(mcp_server_t *s, char *err, size_t errsz) {
         cJSON_Delete(req);
         if (rc) return rc;
         const char *rev = rec_str(reply, "protocolVersion");
-        if (!rev || !revision_supported(rev) ||
+        if (!rev || !mcp_protocol_supported(rev) ||
             !strcmp(rev, "2026-07-28")) {
             snprintf(err, errsz,
                      "mcp server '%s' answered unsupported protocol '%s'",
@@ -654,10 +655,9 @@ bool mcp_tool_is_terminal(mcp_mgr_t *m, const char *tool) {
 
 /* ================= tools/call ================= */
 
-int mcp_call_raw(mcp_mgr_t *m, mcp_server_t *srv, const char *upstream_tool,
+int mcp_call_raw(mcp_server_t *srv, const char *upstream_tool,
                  const cJSON *args, cJSON **result_out, char *err,
                  size_t errsz, double timeout) {
-    (void)m;
     cJSON *params = cJSON_CreateObject();
     cJSON_AddStringToObject(params, "name", upstream_tool);
     cJSON_AddItemToObject(params, "arguments",
@@ -693,7 +693,7 @@ int mcp_call(mcp_mgr_t *m, const char *tool, cJSON *args, buf_t *text_out,
         return 1;
     }
     cJSON *result = NULL;
-    int rc = mcp_call_raw(m, s, dot + 1, args, &result, err, errsz, timeout);
+    int rc = mcp_call_raw(s, dot + 1, args, &result, err, errsz, timeout);
     if (rc) return rc;
 
     /* map the result to text (requirements sec.6) */
