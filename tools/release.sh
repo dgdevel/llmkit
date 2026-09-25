@@ -72,10 +72,15 @@ for f in dist/*; do
 done
 
 # ---- 5. tag, push, release ---------------------------------------------------
+# notes: artifact-to-system table + the generated changelog appended
+# (tools/release-notes.sh); --notes-file instead of --generate-notes
+notes=$(mktemp /tmp/llmkit-notes.XXXXXX)
+tools/release-notes.sh "$TAG" > "$notes"
 git tag -a "$TAG" -m "llmkit $TAG"
 git push origin "refs/tags/$TAG"
 gh release create "$TAG" dist/* \
-    --title "llmkit $TAG" --generate-notes
+    --title "llmkit $TAG" --notes-file "$notes"
+rm -f "$notes"
 
 echo "released $TAG:"
 ls -l dist/*

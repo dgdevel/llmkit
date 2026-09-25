@@ -28,12 +28,26 @@ In order, [tools/release.sh](../tools/release.sh):
    builds the matrix below (set `PACKAGES=0` to skip; no docker skips with
    a warning).
 6. **checksums** - one `dist/checksums-v1.2.3.txt` covering every artifact.
-7. **publish** - annotated tag, tag push, `gh release create` with
-   `--generate-notes` (changelog from commits since the previous tag) and
-   everything in `dist/` uploaded.
+7. **publish** - annotated tag, tag push, `gh release create` with everything
+   in `dist/` uploaded. The release body comes from
+   [tools/release-notes.sh](../tools/release-notes.sh) via `--notes-file`:
+   a which-file-for-which-system table generated from what is actually in
+   `dist/` (rows appear only for artifacts that were built), followed by
+   the auto-generated changelog (commits since the previous release)
+   fetched through the `generate-notes` api and appended - the text
+   `--generate-notes` would produce, just below the table.
 
 The tag and the GitHub release only happen at the very end: any earlier
 failure leaves nothing behind to clean up.
+
+To fix the text of a release that is already out (say v1.0.0 was published
+with the bare changelog):
+
+```sh
+tools/package.sh v1.0.0        # repopulate dist/ if it is gone
+tools/release-notes.sh v1.0.0 > /tmp/n.md
+gh release edit v1.0.0 --notes-file /tmp/n.md
+```
 
 ## distro packages only
 
