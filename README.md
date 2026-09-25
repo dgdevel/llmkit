@@ -23,52 +23,6 @@ stable across turns so endpoint prefix caches actually hit.
 
 ## example
 
-```sh
-{ echo '{"type":"llm","endpoint_protocol":"openai","api_base":"http://localhost:11434/v1","model":"llama3.1","inference_options":{"max_tokens":1024}}'
-  echo '{"type":"user","content":[{"type":"text","text":"hello"}]}'
-} | llmkit runner
-```
-
-stdout (one json object per line):
-
-```
-{"type":"header","version":1}
-{"type":"response","text":"Hello! How can I help you today?","partial":false,"finish_reason":"stop","usage":{...}}
-```
-
-Tools: add a `tools` record before the `user` record -
-
-```json
-{"type":"tools","tools":[{"type":"stdio","name":"fs","command_line":"npx -y @modelcontextprotocol/server-filesystem /tmp"}]}
-```
-
-A tool can be marked **terminal** through its server's `terminal_tools`
-list: once the model selects and uses it, the runner answers the call,
-emits the `tool_response` and terminates - no further llm interaction,
-exit code 9, no error record (a requested ending, not a failure). The
-rest of the batch is answered `is_error: true` so the transcript stays
-replayable -
-
-```json
-{"type":"tools","tools":[{"type":"stdio","name":"ui","command_line":"...","terminal_tools":["confirm","cancel"]}]}
-```
-
-`llmkit call --mcp-proxy cfg.jsonl --terminal-tool fs.confirm` marks
-tools the same way from the command line; the answer is then the tool's
-text. `llmkit agent-as-tool` seeds honor the attribute too: the `invoke`
-reply is the terminal tool's answer.
-
-Integrations that need steering keep stdin open, feed records and a
-`{"type":"flush"}` while a turn is in flight; the records apply at the
-next turn boundary. The full record catalogue, the conversation rules and
-the per-protocol wire mapping are specified in
-[docs/requirements.md](docs/requirements.md), the implementation decisions
-(libraries, exit codes, `cache_control` placement, threading model) in
-[docs/design.md](docs/design.md). Runnable examples for every command and
-every record type live in [examples/](examples/) - see
-[examples/records.md](examples/records.md) for the minimal and complete
-form of each record.
-
 For talking to a model there is `llmkit repl`: same flags as `call`,
 minus `--prompt` - the turns are typed, every line is one turn of one
 growing conversation. The whole exchange renders as it happens - thinking
@@ -104,6 +58,40 @@ I'm fine, thank you!
 `--prompt -` reads the prompt from stdin, so it pipes and captures:
 `ANSWER=$(llmkit call --openai "$API_BASE" --prompt - < input.txt)`.
 Anything past one prompt is `runner` territory.
+
+```sh
+{ echo '{"type":"llm","endpoint_protocol":"openai","api_base":"http://localhost:11434/v1","model":"llama3.1","inference_options":{"max_tokens":1024}}'
+  echo '{"type":"user","content":[{"type":"text","text":"hello"}]}'
+} | llmkit runner
+```
+
+stdout (one json object per line):
+
+```
+{"type":"header","version":1}
+{"type":"response","text":"Hello! How can I help you today?","partial":false,"finish_reason":"stop","usage":{...}}
+```
+
+Tools: add a `tools` record before the `user` record -
+
+```json
+{"type":"tools","tools":[{"type":"stdio","name":"fs","command_line":"npx -y @modelcontextprotocol/server-filesystem /tmp"}]}
+```
+
+`llmkit call --mcp-proxy cfg.jsonl --terminal-tool fs.confirm` marks
+tools the same way from the command line; the answer is then the tool's
+text. `llmkit agent-as-tool` seeds honor the attribute too: the `invoke`
+reply is the terminal tool's answer.
+
+Integrations that need steering keep stdin open, feed records and a
+`{"type":"flush"}` while a turn is in flight; the records apply at the
+next turn boundary. The full record catalogue, the conversation rules and
+the per-protocol wire mapping are specified in
+[docs/requirements.md](docs/requirements.md), the implementation decisions
+(libraries, exit codes, `cache_control` placement, threading model) in
+[docs/design.md](docs/design.md). Runnable examples for every command live in
+[examples/](examples/) - see [docs/records.md](docs/records.md) for the
+minimal and complete form of each record.
 
 ## building
 

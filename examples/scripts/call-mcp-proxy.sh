@@ -5,7 +5,7 @@
 # before the final answer text. The model sees the config's exposed tools
 # prefixed with the config basename: examples/mcp-proxy/expose.jsonl
 # yields expose.list_dir and expose.read_file (the renames are the
-# config's, see records.md, the expose record). The flag is repeatable,
+# config's, see docs/records.md, the expose record). The flag is repeatable,
 # one config per server, each basename a unique server name. Spawning
 # the upstream needs node/npx; the endpoint is the usual local ollama.
 set -euo pipefail

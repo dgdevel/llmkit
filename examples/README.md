@@ -1,11 +1,10 @@
 # examples
 
-Runnable examples for every llmkit command and every jsonl record type.
+Runnable examples for every llmkit command and every jsonl record type -
+the record catalogue itself now lives in [../docs/records.md](../docs/records.md).
 
 ```
 examples/
-|-- records.md                    every record type: a minimal and a complete
-|                                 example, one record per line (valid jsonl)
 |-- runner/
 |   |-- minimal.jsonl             the smallest conversation that runs
 |   |-- complete.jsonl            every input record type in one file
@@ -44,7 +43,8 @@ make    # builds ./llmkit (needs libcjson and libcurl)
 The runner examples talk to an openai-compatible or anthropic-compatible
 endpoint. The shipped files assume a local ollama (`ollama serve`, then
 `ollama pull llama3.1`); edit the `llm` record of any example to point it
-elsewhere - see [records.md](records.md) for the field-by-field catalogue.
+elsewhere - see [../docs/records.md](../docs/records.md) for the
+field-by-field catalogue.
 `examples/runner/complete.jsonl` targets the real anthropic api and contains
 a placeholder `x-api-key` you must replace. The `call-*.sh` scripts assume
 the same endpoints; `call-anthropic.sh` wants `ANTHROPIC_API_KEY` set and
