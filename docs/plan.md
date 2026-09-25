@@ -6,7 +6,7 @@ serialization first - cheapest to test, everything depends on them - then
 the wire clients, then the engine, then the subprocess and network edge
 features, and the two extra entry points last: they are thin compositions
 of the finished core. Every phase lands with its tests, so `make check`
-grows with the build instead of arriving at the end; design sec.14's selfcheck
+grows with the build instead of arriving at the end; design sec.15's selfcheck
 categories map onto the phases one to one.
 
 1. **scaffold** - makefile, subcommand dispatch, help/version, exit code
@@ -63,7 +63,7 @@ rides on the finished core:
 12. **terminal tools** - requirements sec.2.7, sec.8 `terminal_tools`, sec.11
     `--terminal-tool`; design sec.4 stop condition, sec.6 attribute
     handling, sec.8 sigint precedence, sec.9 reply, sec.11 flag and sink,
-    sec.12 exit 9: shape validation in `validate_tools`, name resolution
+    sec.13 exit 9: shape validation in `validate_tools`, name resolution
     and the per-server terminal set in `mcp_reconcile`, the engine stop
     (batch suspension, drop rule, no error record, exit 9), the agent
     invoke terminal reply and its retention under `retain_context`, the
@@ -75,7 +75,22 @@ rides on the finished core:
     (non-string entry, name missing from a connected listing), `call`
     compilation vectors and the usage error, agent reply shape, exit
     code 9 end to end.
+13. **repl** - requirements sec.12, the interactive chat front-end
+    (design sec.12): the `call` flag compiler minus `--prompt`
+    plus the compiled `options` record (`stream_interval` 0), the session
+    loop - one `user` record per submitted input, engine run to turn end,
+    prompt again - and the display sink: ascii separator rules, bold and
+    italic typography gated on terminal capability with per-attribute
+    fallback, thinking and tool traffic rendered, sigint abort followed
+    by continue over the continuation rules, the two-stage prompt rule
+    (clear typed input, then exit 8), the repl exit codes. Tests:
+    compilation vectors (options record, `--prompt` usage error),
+    scripted stdin sessions against the fake endpoint - multi-turn,
+    thinking and tool rendering, empty input, interrupt then continue,
+    the prompt clear and clear-again stages, terminal ending exit 9,
+    EOF exit codes - and the styling fallback off-tty; `llmkit help`,
+    the README command table and examples updated in the same change.
 
-Out of scope per design sec.14: network integration tests in-tree; a
+Out of scope per design sec.15: network integration tests in-tree; a
 `test/live.sh` against a real endpoint appears when the first endpoint bug
 shows up.

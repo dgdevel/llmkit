@@ -16,6 +16,8 @@ static int usage(FILE *out) {
           "                         servers on stdio\n"
           "  call <flags>           one prompt in, one answer out: plain\n"
           "                         text on stdout\n"
+          "  repl <flags>           interactive chat: type the turns, see\n"
+          "                         thinking and tool calls as they happen\n"
           "  help                   show this help\n"
           "  version                show the version\n",
           out);
@@ -49,6 +51,7 @@ int main(int argc, char **argv) {
         return cmd_proxy(argv[2]);
     }
     if (!strcmp(cmd, "call")) return cmd_call(argc, argv);
+    if (!strcmp(cmd, "repl")) return cmd_repl(argc, argv);
     if (!strcmp(cmd, "help")) return cmd_help();
     if (!strcmp(cmd, "version")) return cmd_version();
     fprintf(stderr, "llmkit: unknown command '%s'\n", cmd);

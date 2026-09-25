@@ -95,7 +95,8 @@ static char *proxy_name(const char *path) {
     return strndup(base, n);
 }
 
-int call_parse(int argc, char **argv, call_cfg_t *c, char *err, size_t errsz) {
+int call_parse_ex(int argc, char **argv, call_cfg_t *c, char *err,
+                  size_t errsz, bool with_prompt) {
     memset(c, 0, sizeof *c);
     c->protocol = -1;
     c->max_tokens = -1;
@@ -115,7 +116,8 @@ int call_parse(int argc, char **argv, call_cfg_t *c, char *err, size_t errsz) {
                                                          : PROTO_RESPONSES;
         } else if (!strcmp(a, "--key") || !strcmp(a, "--model") ||
                    !strcmp(a, "--max-tokens") ||
-                   !strcmp(a, "--system-prompt") || !strcmp(a, "--prompt") ||
+                   !strcmp(a, "--system-prompt") ||
+                   (with_prompt && !strcmp(a, "--prompt")) ||
                    !strcmp(a, "--header") || !strcmp(a, "--mcp-proxy") ||
                    !strcmp(a, "--terminal-tool")) {
             if (i + 1 >= argc) {
@@ -159,7 +161,7 @@ int call_parse(int argc, char **argv, call_cfg_t *c, char *err, size_t errsz) {
                 }
                 have_system = true;
                 c->system = strdup(v);
-            } else if (!strcmp(a, "--prompt")) {
+            } else if (with_prompt && !strcmp(a, "--prompt")) {
                 if (have_prompt) {
                     usage_err(err, errsz, "--prompt given twice");
                     goto fail;
@@ -242,7 +244,7 @@ int call_parse(int argc, char **argv, call_cfg_t *c, char *err, size_t errsz) {
         usage_err(err, errsz, "missing <api_base>");
         goto fail;
     }
-    if (!have_prompt) {
+    if (with_prompt && !have_prompt) {
         usage_err(err, errsz, "missing --prompt");
         goto fail;
     }
@@ -277,6 +279,10 @@ int call_parse(int argc, char **argv, call_cfg_t *c, char *err, size_t errsz) {
 fail:
     call_cfg_free(c);
     return 1;
+}
+
+int call_parse(int argc, char **argv, call_cfg_t *c, char *err, size_t errsz) {
+    return call_parse_ex(argc, argv, c, err, errsz, true);
 }
 
 /* ================= record builders ================= */
@@ -435,6 +441,68 @@ static int utf8_check_str(const char *s) {
     return !s || utf8_valid((const uint8_t *)s, strlen(s));
 }
 
+static int compile_fail(engine_t *e, char *msg /* malloc'd or NULL */,
+                        const char *stat) {
+    engine_emit_record(e, rec_error(EC_INVALID_RECORD, msg ? msg : stat, true));
+    free(msg);
+    return EXIT_INVALID_RECORD;
+}
+
+int call_compile(const call_cfg_t *c, engine_t *e, const char *exe_path) {
+    if (!utf8_check_str(c->api_base) || !utf8_check_str(c->key) ||
+        !utf8_check_str(c->model) || !utf8_check_str(c->system)) {
+        engine_emit_record(e, rec_error(EC_INVALID_RECORD,
+                                        "invalid UTF-8 in a flag value",
+                                        true));
+        return EXIT_INVALID_RECORD;
+    }
+    for (size_t i = 0; i < c->nhdrs; i++)
+        if (!utf8_check_str(c->hdr_names[i]) ||
+            !utf8_check_str(c->hdr_values[i])) {
+            engine_emit_record(e, rec_error(EC_INVALID_RECORD,
+                                            "invalid UTF-8 in a --header "
+                                            "value",
+                                            true));
+            return EXIT_INVALID_RECORD;
+        }
+
+    cJSON *llm = call_build_llm(c);
+    int rc = 0;
+    char *m = validate_llm(llm);
+    if (m) {
+        rc = compile_fail(e, m, "invalid llm record");
+        cJSON_Delete(llm);
+        return rc;
+    }
+    engine_apply_config_record(e, llm);
+    cJSON_Delete(llm);
+
+    if (c->system) {
+        cJSON *sys = call_build_system(c);
+        m = validate_content(cJSON_GetObjectItemCaseSensitive(sys, "content"));
+        if (m) {
+            rc = compile_fail(e, m, "invalid system record");
+            cJSON_Delete(sys);
+            return rc;
+        }
+        engine_apply_config_record(e, sys);
+        cJSON_Delete(sys);
+    }
+
+    if (c->nproxies) {
+        cJSON *tools = call_build_tools(c, exe_path);
+        m = validate_tools(tools);
+        if (m) {
+            rc = compile_fail(e, m, "invalid tools record");
+            cJSON_Delete(tools);
+            return rc;
+        }
+        engine_apply_config_record(e, tools);
+        cJSON_Delete(tools);
+    }
+    return 0;
+}
+
 int call_run(const call_cfg_t *c, FILE *out, FILE *errf, const char *exe_path,
              wire_t *(*factory)(engine_t *)) {
     call_sink_t s;
@@ -445,66 +513,18 @@ int call_run(const call_cfg_t *c, FILE *out, FILE *errf, const char *exe_path,
     if (factory) e->wire_factory = factory;
     int rc = 0;
 
-    if (!utf8_check_str(c->api_base) || !utf8_check_str(c->key) ||
-        !utf8_check_str(c->model) || !utf8_check_str(c->system) ||
-        !utf8_check_str(c->prompt)) {
+    rc = call_compile(c, e, exe_path);
+    if (rc) goto done;
+
+    if (!utf8_check_str(c->prompt)) {
         sink_error(&s, EC_INVALID_RECORD, "invalid UTF-8 in a flag value");
         rc = EXIT_INVALID_RECORD;
         goto done;
     }
-    for (size_t i = 0; i < c->nhdrs; i++)
-        if (!utf8_check_str(c->hdr_names[i]) ||
-            !utf8_check_str(c->hdr_values[i])) {
-            sink_error(&s, EC_INVALID_RECORD,
-                       "invalid UTF-8 in a --header value");
-            rc = EXIT_INVALID_RECORD;
-            goto done;
-        }
-
-    cJSON *llm = call_build_llm(c);
-    char *m = validate_llm(llm);
-    if (m) {
-        sink_error(&s, EC_INVALID_RECORD, m);
-        free(m);
-        cJSON_Delete(llm);
-        rc = EXIT_INVALID_RECORD;
-        goto done;
-    }
-    engine_apply_config_record(e, llm);
-    cJSON_Delete(llm);
-
-    if (c->system) {
-        cJSON *sys = call_build_system(c);
-        m = validate_content(
-            cJSON_GetObjectItemCaseSensitive(sys, "content"));
-        if (m) {
-            sink_error(&s, EC_INVALID_RECORD, m);
-            free(m);
-            cJSON_Delete(sys);
-            rc = EXIT_INVALID_RECORD;
-            goto done;
-        }
-        engine_apply_config_record(e, sys);
-        cJSON_Delete(sys);
-    }
-
-    if (c->nproxies) {
-        cJSON *tools = call_build_tools(c, exe_path);
-        m = validate_tools(tools);
-        if (m) {
-            sink_error(&s, EC_INVALID_RECORD, m);
-            free(m);
-            cJSON_Delete(tools);
-            rc = EXIT_INVALID_RECORD;
-            goto done;
-        }
-        engine_apply_config_record(e, tools);
-        cJSON_Delete(tools);
-    }
 
     {
         cJSON *user = call_build_user(c->prompt);
-        m = validate_content(
+        char *m = validate_content(
             cJSON_GetObjectItemCaseSensitive(user, "content"));
         if (m) {
             sink_error(&s, EC_INVALID_RECORD, m);

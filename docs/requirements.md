@@ -27,6 +27,8 @@ applies. Rules marked *(proposed)* are working desiderata, not yet frozen.
 10. [llmkit mcp-proxy](#10-llmkit-mcp-proxy)
 11. [llmkit call](#11-llmkit-call)
    - [cli surface](#cli-surface) - [--mcp-proxy](#--mcp-proxy) - [output and errors](#output-and-errors)
+12. [llmkit repl](#12-llmkit-repl)
+   - [cli surface](#cli-surface-1) - [session model](#session-model) - [display](#display) - [interrupts and exit codes](#interrupts-and-exit-codes)
 
 ## 1. cli conventions
 
@@ -958,3 +960,187 @@ Deliberately not offered: multi-turn conversation, inference-option flags
 beyond `--max-tokens`, `options` knobs, environment-variable or
 config-file indirection for any flag, record/jsonl output. The escape hatch
 is composition - the same call as `llmkit runner` with hand-written records.
+
+## 12. llmkit repl
+
+Fifth command: the interactive chat front-end. The flag surface is
+[llmkit call](#11-llmkit-call)'s verbatim, minus `--prompt`: no prompt is
+supplied on the command line, the user types the turns. Each submitted
+input is one `user` record of one growing conversation - loop, mapping,
+options and error rules are the runner's, unchanged - and the conversation
+renders as it happens: `thinking` and tool traffic included, framed by
+ascii-art separator lines, with bold and italic typography when the
+terminal provides them. Everything in this section is *(proposed)*.
+
+```
+llmkit repl (--anthropic | --openai | --openai-responses) <api_base>
+            [--key <token>] [--model <name>] [--max-tokens <n>]
+            [--system-prompt <text>]
+            [--header <name=value>]... [--mcp-proxy <config>]...
+            [--terminal-tool <name.tool>]...
+```
+
+### cli surface
+
+Every flag of [llmkit call](#11-llmkit-call) keeps its meaning, count,
+repeat rules, usage-error catalog and two error tiers: the protocol
+selector, the `<api_base>` positional, `--key`, `--model`, `--max-tokens`,
+`--system-prompt`, `--header`, `--mcp-proxy`, `--terminal-tool`. One flag
+does not exist here: `--prompt`. Given to `repl` it is an unknown flag -
+usage error, message on stderr, exit 1, nothing connects or runs. The
+prompt channel is the terminal itself.
+
+### session model
+
+- The command line compiles to the same leading records `call` compiles -
+  one `llm` record (carrying `inference_options.max_tokens` when
+  `--max-tokens` is given), the optional `system` record, the optional
+  `tools` record with `--terminal-tool` entries folded - plus one record
+  `call` does not compile: an `options` record setting `stream_interval`
+  to 0. Display latency is the point of a chat front-end: every streamed
+  chunk renders as it arrives, no grouping. No `user` record is compiled;
+  the first one arrives typed.
+- Then the session loop: read one input line, append it as a `user`
+  record, run the conversation to the end of the turn - tool rounds
+  included, the runner's [conversation loop](#23-conversation-loop)
+  unchanged - rendering every record as it arrives, then prompt again.
+  The repl is the integrated application of
+  [start, continuation, replay](#22-start-continuation-replay): it keeps
+  the channel open and submits one input per turn boundary; steering is
+  not offered, the escape hatch is composition with the runner.
+- The conversation starts with the first submitted input - the runner's
+  start validation and connection rules: the mcp servers connect then, a
+  non required server that fails to connect is the non-fatal
+  `connect_failed`, rendered like any error record, and the conversation
+  continues without its tools. EOF before any input ends the session with
+  nothing connected and nothing run, exit 0.
+- Input discipline: one line is one input, submitted on enter; a paste
+  containing newlines therefore submits one input per line, and the turns
+  run in sequence. The line's byte hygiene is `--prompt -`'s from
+  [llmkit call](#11-llmkit-call): carriage returns dropped, strict UTF-8,
+  NUL rejected - violations take the `invalid_record` tier, exit 2. An
+  empty input is ignored: no `user` record, no turn, the prompt returns.
+- While a turn is in flight no input is read; the terminal's own line
+  buffering holds type-ahead, consumed at the next prompt.
+- Input editing: backspace and line kill always; arrow-key history
+  *(proposed)*. Whether the line buffer is the terminal's canonical one or
+  a program owned raw-mode buffer is design - the same decision the Ctrl-C
+  stages and the typed echo lean on. Multi-line input is not offered.
+- EOF - Ctrl-D on an empty line, or a closed pipe when stdin is not a
+  terminal - ends the session. EOF is observed at the prompt only: turns
+  always run to their own ending, input is read between turns. A
+  non-terminal stdin changes nothing in the discipline: same lines, same
+  turns; a piped session is plain rendering plus the same transcript.
+
+### display
+
+stdout is the transcript area: every record renders as it arrives, one
+block per record kind, in arrival order; stderr keeps `call`'s
+out-of-channel role. Rendering is append only: what was printed is never
+redrawn.
+
+| record | block |
+|---|---|
+| `user` | the submitted input, bold |
+| `thinking` | the reasoning text, italic |
+| `response` | the answer text, unstyled |
+| `tool_request` | bold: the tool name and the request arguments |
+| `tool_response` | bold: the full response text |
+| `error` | one line with its own marker glyph, unstyled; a fatal one additionally ends the session |
+
+- Separators: each block opens with a separator line, ascii-art symbols
+  repeated to a width - the kit's own framing, never record text. Two
+  weights: a heavy rule opens each user block, a light rule opens every
+  block of the assistant's answer - thinking, each tool call, each tool
+  response, the response text. Partials of one block append under the
+  block's single separator. The glyphs, the width rule (fixed or
+  terminal width) and any per-line prefix glyphs are design decisions;
+  pure ascii is required (the repo's ascii-only rule), box drawing
+  unicode is out.
+- Typography: bold and italic apply per the table above, only when the
+  output terminal reports support for the attribute; each attribute
+  degrades to unstyled on its own - a pipe, or a terminal without
+  italics, gets the same layout without the escape sequences. How support
+  is detected is design. No flag forces styling on or off: redirection
+  is the override, and the plain rendering is deliberately the same
+  layout so piped sessions stay readable.
+- Record text renders verbatim - model text, thinking text, tool
+  arguments and tool payloads alike: no sanitizing, no re-wrapping. The
+  repl adds framing only.
+- A block whose complete text is empty renders nothing, separator
+  included; a block's text is written followed by one newline unless it
+  already ends with one.
+- `start` markers render nothing; `usage`, `finish_reason`, `signature`,
+  `partial` flags and every other record field are never displayed.
+  Metadata is `runner` territory.
+- Whether the terminal's own typing echo stays in place - the bold user
+  block then follows the typed line - or is suppressed through raw mode
+  input is design; the rendered transcript carries the bold user block
+  either way.
+
+Illustrative rendering of one exchange (the glyphs, width and prefix
+choices are design; bold and italic apply only on a capable terminal):
+
+```
+============================================================
+list the files in /tmp                        <- bold
+------------------------------------------------------------
+The user wants a directory listing; the fs server offers
+list_directory, i will call it.               <- italic
+------------------------------------------------------------
+fs.list_directory {"path":"/tmp"}             <- bold
+------------------------------------------------------------
+file1.txt
+file2.log                                     <- bold
+------------------------------------------------------------
+The /tmp directory holds two files: file1.txt and
+file2.log.                                     <- plain
+```
+
+### interrupts and exit codes
+
+- SIGINT with a turn in flight is the runner's
+  [external stop](#26-external-stop) for that conversation, records
+  unchanged: the endpoint request aborts, buffered text flushes as the
+  trailing partial, suspended tool requests are answered, the fatal
+  `interrupted` error record renders. Then the session, unlike the
+  runner's process, continues: the prompt returns, and the next
+  submitted input continues the conversation as a continuation - the
+  stopped turn's records included, the unsigned thinking dropped per the
+  replay rules, exactly as a replayed transcript would.
+- A second SIGINT while the orderly stop is still running terminates the
+  process immediately: the runner's rule, exit 8, nothing further
+  rendered.
+- SIGINT at the prompt - no turn in flight - is an input control in two
+  stages: with typed input it discards that input, nothing is submitted,
+  no `user` record, and the prompt returns on a fresh line; with the
+  prompt already clear it ends the session, exit 8 - SIGINT's own code,
+  the table's whatever-the-instant rule, so a scripted session can tell
+  a SIGINT departure from an EOF one. Nothing is being interrupted at a
+  clear prompt: no error record renders for the exit. Both stages apply
+  before and after the conversation started; the runner's pre-start rule
+  adds nothing here. How the two stages are told apart is the same design
+  decision as the echo one in [display](#display): the tty flushes its
+  input queue when it delivers the signal, so canonical mode cannot see
+  what it discarded - a program owned input buffer (raw mode) can.
+- A fatal `error` record renders and ends the session; the exit code is
+  the design table's for its code. A terminal tool ending
+  ([terminal tools](#27-terminal-tools)) renders the terminal
+  `tool_response` and ends the session, exit 9: the conversation it
+  ended is the session's, continuing past it is a non-goal.
+- EOF ends the session; the exit code is the ending of the last
+  conversation the session ran: 0 when it ended with a successful final
+  `response`, or when no conversation ever started; 8 when it ended
+  interrupted with no turn after it. Non-fatal error records never
+  influence the exit code.
+- Usage and startup errors - stderr, exit 1, nothing runs - and
+  record-level problems in flag values - `invalid_record`, exit 2 - are
+  `call`'s rules, unchanged.
+
+Deliberately not offered: `--prompt` in any form, slash commands (`/quit`
+and friends: Ctrl-D and Ctrl-C are the controls), transcript persistence
+or dumping (the transcript lives in memory and dies with the process;
+records are `runner` territory), usage or token displays, a banner,
+styling override flags, and everything on `call`'s own not-offered list:
+inference-option flags beyond `--max-tokens`, environment-variable or
+config-file indirection, record/jsonl output.

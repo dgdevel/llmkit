@@ -2002,11 +2002,398 @@ static void add_tool_term(engine_t *e, const char *name) {
     m->listing.v[m->listing.n - 1].terminal = true;
 }
 
+/* the repl tool vector: ftool_exec on the engine repl_run builds */
+static wire_t *repl_ftool_factory(engine_t *e) {
+    e->tool_exec = ftool_exec;
+    return g_factory_wire;
+}
+
+/* the repl terminal vector: mark a.t1 on the engine repl_run builds */
+static wire_t *repl_term_factory(engine_t *e) {
+    add_tool_term(e, "a.t1");
+    e->tool_exec = ftool_exec;
+    return g_factory_wire;
+}
+
 /* a terminal-marked listing entry for the scripted run helper */
 static wire_t *term_script_factory(engine_t *e) {
     add_tool_term(e, "fs.echo");
     e->tool_exec = ftool_exec;
     return g_factory_wire;
+}
+
+
+/* ================= repl (design sec.12) ================= */
+
+/* feed a script through a pipe: repl's non-tty input channel */
+static int pipe_feed(const char *data, size_t n) {
+    int fds[2];
+    if (pipe(fds) != 0) return -1;
+    size_t off = 0;
+    while (off < n) {
+        ssize_t w = write(fds[1], data + off, n - off);
+        if (w <= 0) break;
+        off += (size_t)w;
+    }
+    close(fds[1]);
+    return fds[0];
+}
+
+static void golden_rule(buf_t *b, char glyph) {
+    for (int i = 0; i < 80; i++) buf_append_byte(b, glyph);
+    buf_append_byte(b, '\n');
+}
+
+/* a minimal cfg: openai, no key/model, anthropic needs max_tokens */
+static void repl_cfg(call_cfg_t *c, int proto) {
+    memset(c, 0, sizeof *c);
+    c->protocol = proto;
+    c->api_base = strdup("http://x");
+    c->max_tokens = proto == PROTO_ANTHROPIC ? 512 : -1;
+}
+
+typedef struct repl_out {
+    char *ob;
+    size_t on;
+    int rc;
+} repl_out_t;
+
+static repl_out_t repl_session(call_cfg_t *c, const char *script,
+                               size_t sn) {
+    repl_out_t r = { NULL, 0, 0 };
+    int fd = pipe_feed(script, sn);
+    check(fd >= 0, "repl: pipe feed");
+    char *ob = NULL;
+    size_t on = 0;
+    FILE *out = open_memstream(&ob, &on);
+    r.rc = repl_run(c, fd, out, "/x", script_factory);
+    fclose(out);
+    close(fd);
+    r.ob = ob;
+    r.on = on;
+    return r;
+}
+
+static repl_out_t repl_session_ft(call_cfg_t *c, const char *script,
+                                  size_t sn) {
+    repl_out_t r = { NULL, 0, 0 };
+    int fd = pipe_feed(script, sn);
+    char *ob = NULL;
+    size_t on = 0;
+    FILE *out = open_memstream(&ob, &on);
+    r.rc = repl_run(c, fd, out, "/x", repl_ftool_factory);
+    fclose(out);
+    close(fd);
+    r.ob = ob;
+    r.on = on;
+    return r;
+}
+
+static void repl_session_free(repl_out_t *r) { free(r->ob); }
+
+static void test_repl(void) {
+    call_cfg_t c;
+    char err[256];
+
+    /* ---- compilation vectors ---- */
+    {
+        char *av[] = {"--openai", "http://x", "--prompt", "hi"};
+        call_cfg_t t;
+        check(call_parse_ex(4, av, &t, err, sizeof err, false) == 1,
+              "repl: --prompt is a usage error on the repl surface");
+        check(strstr(err, "unknown flag '--prompt'") != NULL,
+              "repl: --prompt reported as unknown");
+        check(call_parse_ex(4, av, &t, err, sizeof err, true) == 0,
+              "repl: call_parse_ex still accepts --prompt for call");
+        call_cfg_free(&t);
+    }
+    {
+        cJSON *o = repl_build_options();
+        buf_t b;
+        buf_init(&b);
+        buf_append_tree(&b, o);
+        check_str(b.data ? b.data : "",
+                  "{\"type\":\"options\",\"stream_interval\":0}",
+                  "repl: the one compiled options record");
+        buf_free(&b);
+        cJSON_Delete(o);
+    }
+    {
+        char *av[] = {"http://x"};
+        call_cfg_t t;
+        check(call_parse_ex(1, av, &t, err, sizeof err, false) == 1,
+              "repl: missing protocol flag is a usage error");
+        check(call_parse_ex(0, NULL, &t, err, sizeof err, false) == 1,
+              "repl: missing api_base is a usage error");
+    }
+
+    /* ---- session: rendering golden bytes, off-tty plain ---- */
+    {
+        /* the wire's real shape: text in the partials, empty-text
+           block-close finals carrying signature/usage only - a stale
+           armed separator must not leak into the next user block */
+        fturn_t turns[] = {
+            { .recs = (const char *[]){
+                  "{\"type\":\"thinking\",\"text\":\"th\",\"partial\":true}",
+                  "{\"type\":\"thinking\",\"text\":\"ink\",\"partial\":true}",
+                  "{\"type\":\"response\",\"text\":\"He\",\"partial\":true}",
+                  "{\"type\":\"response\",\"text\":\"llo\",\"partial\":true}",
+                  "{\"type\":\"thinking\",\"text\":\"\",\"partial\":false,"
+                  "\"signature\":\"s\"}",
+                  "{\"type\":\"response\",\"text\":\"\",\"partial\":false,"
+                  "\"finish_reason\":\"stop\"}"},
+              .nrecs = 6, .kind = TURN_FINAL, .abort_after = -1 },
+        };
+        g_factory_wire = fwire_new(turns, 1);
+        repl_cfg(&c, PROTO_OPENAI);
+        repl_out_t r = repl_session(&c, "hi\nagain\n", 9);
+        buf_t want;
+        buf_init(&want);
+        golden_rule(&want, '=');
+        buf_append_str(&want, "hi\n");
+        golden_rule(&want, '-');
+        buf_append_str(&want, "think\n");
+        golden_rule(&want, '-');
+        buf_append_str(&want, "Hello\n");
+        golden_rule(&want, '=');
+        buf_append_str(&want, "again\n");
+        golden_rule(&want, '-');
+        buf_append_str(&want, "think\n");
+        golden_rule(&want, '-');
+        buf_append_str(&want, "Hello\n");
+        check(r.rc == EXIT_OK, "repl: clean session exits 0 at EOF");
+        check_str(r.ob, want.data, "repl: user block, thinking, answer");
+        check(strchr(r.ob, '\033') == NULL,
+              "repl: off-tty styling fallback: no escape sequences");
+        buf_free(&want);
+        repl_session_free(&r);
+        call_cfg_free(&c);
+    }
+
+    /* ---- tool traffic rendered: name+args, full response ---- */
+    {
+        fturn_t turns[] = {
+            { .recs = (const char *[]){
+                  "{\"type\":\"response\",\"text\":\"checking\","
+                  "\"partial\":false}",
+                  "{\"type\":\"tool_request\",\"tool\":\"fs.echo\","
+                  "\"arguments\":{\"x\":1},\"id\":\"c1\"}"},
+              .nrecs = 2, .kind = TURN_TOOLS, .abort_after = -1 },
+            { .recs = (const char *[]){
+                  "{\"type\":\"response\",\"text\":\"done\","
+                  "\"partial\":false}"},
+              .nrecs = 1, .kind = TURN_FINAL, .abort_after = -1 },
+        };
+        ftool_t tools[] = { { .tool = "fs.echo", .text = "tool out", .rc = 0 } };
+        g_ftools = (ftool_script_t){ tools, 1, 0 };
+        g_factory_wire = fwire_new(turns, 2);
+        repl_cfg(&c, PROTO_OPENAI);
+        repl_out_t r = repl_session_ft(&c, "hi\n", 3);
+        buf_t want;
+        buf_init(&want);
+        golden_rule(&want, '=');
+        buf_append_str(&want, "hi\n");
+        golden_rule(&want, '-');
+        buf_append_str(&want, "checking\n");
+        golden_rule(&want, '-');
+        buf_append_str(&want, "fs.echo {\"x\":1}\n");
+        golden_rule(&want, '-');
+        buf_append_str(&want, "tool out\n");
+        golden_rule(&want, '-');
+        buf_append_str(&want, "done\n");
+        check(r.rc == EXIT_OK, "repl: tool session exits 0");
+        check_str(r.ob, want.data, "repl: tool call and response blocks");
+        buf_free(&want);
+        repl_session_free(&r);
+        call_cfg_free(&c);
+    }
+
+    /* ---- empty input ignored: no user record, no turn ---- */
+    {
+        fturn_t turns[] = {
+            { .recs = (const char *[]){
+                  "{\"type\":\"response\",\"text\":\"one\","
+                  "\"partial\":false}"},
+              .nrecs = 1, .kind = TURN_FINAL, .abort_after = -1 },
+            { .recs = (const char *[]){
+                  "{\"type\":\"response\",\"text\":\"two\","
+                  "\"partial\":false}"},
+              .nrecs = 1, .kind = TURN_FINAL, .abort_after = -1 },
+        };
+        g_factory_wire = fwire_new(turns, 2);
+        repl_cfg(&c, PROTO_OPENAI);
+        repl_out_t r = repl_session(&c, "a\n\nb\n", 4);
+        check(r.rc == EXIT_OK, "repl: empty-input session exits 0");
+        check(strstr(r.ob, "one") != NULL && strstr(r.ob, "two") != NULL,
+              "repl: two turns ran");
+        {
+            char heavy[82];
+            memset(heavy, '=', 80);
+            heavy[80] = '\n';
+            heavy[81] = '\0';
+            int rules = 0;
+            for (const char *q = r.ob; (q = strstr(q, heavy)) != NULL; q++)
+                rules++;
+            check(rules == 2,
+                  "repl: the empty line ran no turn (two user blocks)");
+        }
+        repl_session_free(&r);
+        call_cfg_free(&c);
+    }
+
+    /* ---- SIGINT mid turn: abort, session continues ---- */
+    {
+        fturn_t turns[] = {
+            { .recs = (const char *[]){
+                  "{\"type\":\"response\",\"text\":\"par\",\"partial\":true}"},
+              .nrecs = 1, .kind = TURN_FINAL, .abort_after = 1 },
+            { .recs = (const char *[]){
+                  "{\"type\":\"response\",\"text\":\"ok\",\"partial\":false}"},
+              .nrecs = 1, .kind = TURN_FINAL, .abort_after = -1 },
+        };
+        g_factory_wire = fwire_new(turns, 2);
+        repl_cfg(&c, PROTO_OPENAI);
+        repl_out_t r = repl_session(&c, "first\nagain\n", 12);
+        buf_t want;
+        buf_init(&want);
+        golden_rule(&want, '=');
+        buf_append_str(&want, "first\n");
+        golden_rule(&want, '-');
+        buf_append_str(&want, "par\n");
+        buf_append_str(&want,
+                       "! interrupted: conversation stopped externally\n");
+        golden_rule(&want, '=');
+        buf_append_str(&want, "again\n");
+        golden_rule(&want, '-');
+        buf_append_str(&want, "ok\n");
+        check(r.rc == EXIT_OK,
+              "repl: interrupt then continue: EOF exits with the last "
+              "ending");
+        check_str(r.ob, want.data, "repl: interrupted turn then continuation");
+        buf_free(&want);
+        repl_session_free(&r);
+        call_cfg_free(&c);
+    }
+
+    /* ---- EOF right after an interrupt exits 8; empty pipe exits 0 ---- */
+    {
+        fturn_t turns[] = {
+            { .recs = (const char *[]){
+                  "{\"type\":\"response\",\"text\":\"par\",\"partial\":true}"},
+              .nrecs = 1, .kind = TURN_FINAL, .abort_after = 0 },
+        };
+        g_factory_wire = fwire_new(turns, 1);
+        repl_cfg(&c, PROTO_OPENAI);
+        repl_out_t r = repl_session(&c, "one\n", 4);
+        check(r.rc == EXIT_INTERRUPTED,
+              "repl: EOF after an interrupted turn exits 8");
+        check(strstr(r.ob, "! interrupted:") != NULL,
+              "repl: the interrupted error line rendered");
+        repl_session_free(&r);
+        call_cfg_free(&c);
+
+        g_factory_wire = fwire_new(turns, 1);
+        repl_cfg(&c, PROTO_OPENAI);
+        r = repl_session(&c, "", 0);
+        check(r.rc == EXIT_OK, "repl: EOF before any input exits 0");
+        check(r.on == 0, "repl: EOF before any input renders nothing");
+        repl_session_free(&r);
+        call_cfg_free(&c);
+    }
+
+    /* ---- fatal error ends the session with its code ---- */
+    {
+        fturn_t turns[] = {
+            { .recs = NULL, .nrecs = 0, .kind = TURN_FATAL,
+              .fatal_json = "{\"type\":\"error\",\"code\":\"api_error\","
+                            "\"message\":\"boom\",\"fatal\":true}",
+              .abort_after = -1 },
+        };
+        g_factory_wire = fwire_new(turns, 1);
+        repl_cfg(&c, PROTO_OPENAI);
+        repl_out_t r = repl_session(&c, "q\nmore\n", 7);
+        check(r.rc == EXIT_API_ERROR, "repl: fatal error exits its code");
+        check(strstr(r.ob, "! api_error: boom\n") != NULL,
+              "repl: the error line rendered");
+        check(strstr(r.ob, "more") == NULL,
+              "repl: the session ended, the later line never ran");
+        repl_session_free(&r);
+        call_cfg_free(&c);
+    }
+
+    /* ---- terminal tool ending: exit 9, session over ---- */
+    {
+        fturn_t turns[] = {
+            { .recs = (const char *[]){
+                  "{\"type\":\"tool_request\",\"tool\":\"a.t1\","
+                  "\"arguments\":{},\"id\":\"c1\"}"},
+              .nrecs = 1, .kind = TURN_TOOLS, .abort_after = -1 },
+            { .recs = (const char *[]){
+                  "{\"type\":\"response\",\"text\":\"after\","
+                  "\"partial\":false}"},
+              .nrecs = 1, .kind = TURN_FINAL, .abort_after = -1 },
+        };
+        ftool_t tools[] = { { .tool = "a.t1", .text = "done", .rc = 0 } };
+        g_ftools = (ftool_script_t){ tools, 1, 0 };
+        g_factory_wire = fwire_new(turns, 2);
+        repl_cfg(&c, PROTO_OPENAI);
+        char *ob = NULL;
+        size_t on = 0;
+        int fd = pipe_feed("go\nmore\n", 8);
+        FILE *out = open_memstream(&ob, &on);
+        int rc = repl_run(&c, fd, out, "/x", repl_term_factory);
+        fclose(out);
+        close(fd);
+        check(rc == EXIT_TERMINAL_TOOL, "repl: terminal ending exits 9");
+        check(strstr(ob, "done") != NULL, "repl: terminal answer rendered");
+        check(strstr(ob, "after") == NULL,
+              "repl: no further turn after the terminal tool");
+        free(ob);
+        call_cfg_free(&c);
+    }
+
+    /* ---- input hygiene: NUL and bad UTF-8 take the record tier ---- */
+    {
+        fturn_t hturns[] = {
+            { .recs = (const char *[]){
+                  "{\"type\":\"response\",\"text\":\"x\",\"partial\":false}"},
+              .nrecs = 1, .kind = TURN_FINAL, .abort_after = -1 },
+        };
+        g_factory_wire = fwire_new(hturns, 1);
+        repl_cfg(&c, PROTO_OPENAI);
+        repl_out_t r = repl_session(&c, "a\0b\n", 4);
+        check(r.rc == EXIT_INVALID_RECORD, "repl: NUL in input exits 2");
+        check(strstr(r.ob, "! invalid_record:") != NULL,
+              "repl: NUL error line rendered");
+        repl_session_free(&r);
+        call_cfg_free(&c);
+
+        repl_cfg(&c, PROTO_OPENAI);
+        r = repl_session(&c, "\xff\n", 2);
+        check(r.rc == EXIT_INVALID_RECORD, "repl: bad UTF-8 exits 2");
+        repl_session_free(&r);
+        call_cfg_free(&c);
+    }
+
+    /* ---- multi-turn anthropic: same session, compiled max_tokens ---- */
+    {
+        fturn_t turns[] = {
+            { .recs = (const char *[]){
+                  "{\"type\":\"response\",\"text\":\"r1\",\"partial\":false}"},
+              .nrecs = 1, .kind = TURN_FINAL, .abort_after = -1 },
+            { .recs = (const char *[]){
+                  "{\"type\":\"response\",\"text\":\"r2\",\"partial\":false}"},
+              .nrecs = 1, .kind = TURN_FINAL, .abort_after = -1 },
+        };
+        g_factory_wire = fwire_new(turns, 2);
+        repl_cfg(&c, PROTO_ANTHROPIC);
+        repl_out_t r = repl_session(&c, "q1\nq2\n", 6);
+        check(r.rc == EXIT_OK, "repl: anthropic session exits 0");
+        check(strstr(r.ob, "r1") != NULL && strstr(r.ob, "r2") != NULL,
+              "repl: both anthropic turns answered");
+        repl_session_free(&r);
+        call_cfg_free(&c);
+    }
 }
 
 static void test_terminal_tools(void) {
@@ -2430,6 +2817,8 @@ int main(void) {
     test_agent_tool();
     fprintf(stderr, "selfcheck: call\n");
     test_call();
+    fprintf(stderr, "selfcheck: repl\n");
+    test_repl();
     fprintf(stderr, "selfcheck: terminal tools\n");
     test_terminal_tools();
     fprintf(stderr, "%d checks, %d failures\n", checks, failures);

@@ -2,7 +2,7 @@
 
 Implements [docs/requirements.md](requirements.md), transcript format version 1.
 Every deferral named there is answered here: libraries in sec.1, the exit code table
-in sec.12, `cache_control` placement and openai caching in sec.7, wire-level protocol
+in sec.13, `cache_control` placement and openai caching in sec.7, wire-level protocol
 details in sec.5 and sec.6. Where this document picks a ceiling, it is marked
 `ponytail:` with the upgrade path.
 
@@ -19,9 +19,10 @@ details in sec.5 and sec.6. Where this document picks a ceiling, it is marked
 9. [agent-as-tool](#9-agent-as-tool)
 10. [mcp-proxy](#10-mcp-proxy)
 11. [call](#11-call)
-12. [exit codes](#12-exit-codes)
-13. [build and packaging](#13-build-and-packaging)
-14. [testing](#14-testing)
+12. [repl](#12-repl)
+13. [exit codes](#13-exit-codes)
+14. [build and packaging](#14-build-and-packaging)
+15. [testing](#15-testing)
 
 ## 1. technology choices
 
@@ -123,7 +124,7 @@ Main thread, per turn:
    never sees the result: the remaining requests of the turn are suspended
    and answered `is_error` (the steering synthesis), unflushed records get
    sec.3's drop rule (their non-fatal `io_error`, at detection), no error
-   record is emitted for the ending, the exit code is 9 (sec.12).
+   record is emitted for the ending, the exit code is 9 (sec.13).
 6. stop conditions: final `response` with no steering pending (exit 0),
    terminal tool answered (exit 9, no error record), `max_tool_rounds` (the
    would-exceed turn is not started; fatal `max_tool_rounds_exceeded`),
@@ -152,7 +153,7 @@ block. openai: `choices[0].message` (`content` -> `response`,
 `status`/`incomplete_details` -> normalized `finish_reason`, and `usage`.
 anthropic: `content` blocks (`text`/`thinking`/`tool_use`), `stop_reason`,
 `usage`. Stream parity - both modes produce identical final records - is
-asserted by the selfcheck (sec.14).
+asserted by the selfcheck (sec.15).
 
 Timeouts:
 
@@ -383,7 +384,10 @@ openai_responses the `system` record maps to the envelope-side
   partial (`partial: true` stays), let a running tool finish and emit its
   `tool_response`, answer suspended `tool_request`s with `is_error`, drop
   unapplied steering, apply the drop rule for unflushed records (`io_error`
-  first), emit fatal `interrupted`, kill stdio children, exit.
+  first), emit fatal `interrupted`, kill stdio children, exit. `repl` stops
+  one step earlier (sec.12): its session continues after the stop, so the
+  children live and the engine returns the code instead of the process
+  exiting.
 - Terminal precedence: when the tool that just finished - or one answered
   earlier in the batch - is terminal (sec.6), the terminal ending replaces
   the orderly stop: no `interrupted` record, exit 9. Once a terminal tool's
@@ -503,7 +507,7 @@ new wire, mcp or loop code; one new `src/call.c`, a dispatch line in
 - **terminal ending** - the sink prints the `text` of the terminal tool's
   `tool_response` instead of a final `response` (there is none), same
   `fwrite` + `fflush` and trailing-newline rules; the exit code is 9
-  (sec.12), so scripts branch on it.
+  (sec.13), so scripts branch on it.
 - **`--mcp-proxy` spawn** - the `tools` record `command_line` runs through
   `/bin/sh -c` (sec.6), so both paths are POSIX single-quote quoted
   (`'` becomes `'\''`): `'<exe>' mcp-proxy '<config>'`. `<exe>` is
@@ -519,7 +523,81 @@ new wire, mcp or loop code; one new `src/call.c`, a dispatch line in
   tree is built once, before any turn: sec.7 determinism is unaffected.
 - Threads: none of its own beyond the engine's stdio server readers.
 
-## 12. exit codes
+## 12. repl
+
+Same core, fifth entry point, second front-end: `llmkit repl` compiles
+argv with `call`'s compiler and runs a session loop over one engine
+(requirements sec.12). One new `src/repl.c`; the flag parser and record
+compiler of `src/call.c` are factored into a shared `call_compile` - the
+flag set differs only by `--prompt`'s absence, and repl appends one
+`options` record (`stream_interval: 0`) after the compiled `llm` record.
+No new wire, mcp or loop code.
+
+- **session loop** - one engine for the whole session, transcript intact:
+  draw the prompt, read one input line, feed the `user` record,
+  `engine_run` to the turn's ending, render, prompt again. `engine_run`
+  returns its code - the call path already passes it through instead of
+  exiting inside the engine - and repl branches on the ending: a final
+  `response`, or the interrupted code after an external stop, returns to
+  the prompt; every other fatal code and the terminal-tool 9 end the
+  session, exit code passed through. An EOF ending exits with the last
+  ending the session saw, 0 before the first input. A `keep_mcp` flag on
+  the engine skips every mid-run child kill - sec.8's kills belong to
+  process teardown, which repl does not run mid-session; `engine_free`
+  tears the servers down once, at session end.
+- **input** - termios on stdin: `ICANON` and `ECHO` off, `ISIG` stays on.
+  The program owns the line buffer - which is what the two Ctrl-C stages
+  and the typed echo both need - and the driver's queue flush on the
+  signal then flushes nothing, raw mode reads bytes as they are typed.
+  The editor: printable bytes append, backspace deletes, Ctrl-U kills the
+  line, up/down recall history, enter and Ctrl-D submit; Ctrl-D on an
+  empty buffer is EOF, session end. Hygiene per the requirements: `0x0d`
+  dropped, NUL and invalid UTF-8 rejected - the `invalid_record` tier,
+  exit 2. `ponytail:` no cursor motion, input appends at the end only;
+  add left/right editing if it is ever missed.
+- **history** - in-memory ring, 128 lines, arrow recall only, no
+  persistence, no search. `ponytail:` grow it when someone complains.
+- **echo** - the editor echoes typed bytes wrapped in the bold sequence:
+  the typed line is the user block itself, under the heavy rule the
+  prompt drew; nothing re-renders on submit. When stdin is not a terminal
+  there is no editor and no echo - a plain `read` loop, line per input -
+  and the sink renders the `user` record instead. One bold user block
+  either way.
+- **typography** - the bold, italic and reset sequences are probed once at
+  startup: `isatty(stdout)`, `TERM` set and not `dumb`, then `tput bold`,
+  `tput sitm`, `tput sgr0`. A failed probe (no `tput`) falls back to the
+  hardcoded SGR (`ESC[1m`, `ESC[3m`, `ESC[0m`); an empty `sitm` degrades
+  italic to unstyled - the per-attribute rule - and an empty `sgr0` with a
+  present `bold`/`sitm` falls back to `ESC[0m`, so a style never leaks.
+  Not a tty: no sequences at all. The strings are output bytes only, sec.7 is untouched.
+  `ponytail:` terminfo through `tput` rather than an in-tree database
+  parser.
+- **separators and prompt** - heavy rule `=`, light rule `-`, `>` prompt
+  glyph; rule width is `TIOCGWINSZ` of stdout when it is a tty, else 80,
+  read at draw time - rendering stays append only, rules never redraw.
+  Error lines: `! <code>: <message>`, unstyled.
+- **sink** - `call`'s discipline, one `fwrite` + `fflush` per record, with
+  the block framing: a separator opens each block - the first record of
+  its kind since the last block closed, and only when its text is
+  non-empty: the wire's block-close records carry the signature or usage
+  with empty text, and a separator armed by one would leak into the next
+  user block; `partial: true` continues the open block. User bold, thinking italic, response raw, `tool_request`
+  bold `name` plus compact `arguments` on one line, `tool_response` bold
+  text, `start` markers nothing. The trailing newline rule is call's,
+  per block; a block whose text is empty renders nothing, separator
+  included.
+- **interrupts** - the sec.8 flag and orderly stop unchanged, with two
+  repl branch points. At the prompt the read returns `EINTR`
+  (`SA_RESTART` off) and the stage rule applies: buffer non-empty -
+  cleared, fresh prompt line; empty - exit 8, nothing rendered. During a
+  turn the stop ends the conversation, the engine returns the interrupted
+  code, the session continues. The second-SIGINT hard `_exit(8)` is
+  sec.8's, unchanged.
+- Threads: none of its own beyond the engine's stdio server readers -
+  input is read only at the prompt and turns run alone; there is no
+  steering to observe, so no stdin reader thread.
+
+## 13. exit codes
 
 | code | meaning |
 |---|---|
@@ -539,12 +617,12 @@ Non-fatal error records never influence the exit code. Exit 9 pairs with no
 error record at all - the terminal ending is requested, not an error - and
 outranks a simultaneous `interrupted` (sec.8).
 
-## 13. build and packaging
+## 14. build and packaging
 
 Plain Makefile, no build system:
 
 - `make` -> `llmkit` (cc, linux)
-- `make check` -> builds and runs `test/selfcheck` (sec.14)
+- `make check` -> builds and runs `test/selfcheck` (sec.15)
 
 Sources: `src/main.c` (subcommands), `src/agent.c` (agent-as-tool),
 `src/call.c` (argv->record compiler, plain-text sink for `llmkit call`),
@@ -552,9 +630,11 @@ Sources: `src/main.c` (subcommands), `src/agent.c` (agent-as-tool),
 `src/engine.c` (state machine + turn loop), `src/jsonl.c` (input pipeline,
 validation), `src/wire_openai.c`, `src/wire_anthropic.c`, `src/sse.c`,
 `src/mcp.c`, `src/buf.c` (byte buffers, the sec.7 append-only buffer),
-`src/platform.c` (threads, spawn, signals). Link flags: `-lcjson -lcurl`.
+`src/platform.c` (threads, spawn, signals),
+`src/repl.c` (repl session loop, raw-mode line editor, display sink).
+Link flags: `-lcjson -lcurl`.
 
-## 14. testing
+## 15. testing
 
 `make check` builds one `selfcheck` binary, plain asserts, no framework:
 
@@ -578,6 +658,14 @@ validation), `src/wire_openai.c`, `src/wire_anthropic.c`, `src/sse.c`,
   quoting and name derivation, usage errors exiting 1 - plus one
   fake-endpoint end-to-end per protocol: text on stdout, `thinking`
   dropped, trailing newline, exit 0.
+- **repl**: compilation vectors through the same seam - `--prompt`
+  rejected, the `options` record appended - plus scripted stdin sessions
+  against the fake endpoint: multi-turn rendering, block separators and
+  golden sink bytes, thinking and tool traffic, empty input, interrupt
+  then continue, terminal ending exit 9, the EOF exit codes, and the
+  off-tty styling fallback. `ponytail:` the raw-mode editor and the two
+  ctrl-c stages at the prompt need a pty; they are a manual smoke pass,
+  no in-tree pty harness.
 - **terminal tools**: engine vectors through the fake endpoint and the tool
   exec seam - a terminal `tool_request` ends the run with exit 9 and no
   error record, the rest of the batch suspended `is_error`, a failed or

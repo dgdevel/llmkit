@@ -30,7 +30,9 @@ examples/
     |-- call-anthropic.sh         llmkit call against the real anthropic api
     |-- call-openai-responses.sh  llmkit call on the responses api, --key auth
     |-- call-mcp-proxy.sh         llmkit call with tools from --mcp-proxy
-    `-- call-terminal-tool.sh     --terminal-tool ends it, exit 9, tool text
+    |-- call-terminal-tool.sh     --terminal-tool ends it, exit 9, tool text
+    |-- repl-minimal.sh           llmkit repl: the interactive chat
+    `-- repl-scripted.sh          a piped session, one turn per line
 ```
 
 ## prerequisites
@@ -53,7 +55,10 @@ in place).
 as its upstream server, so it needs node/npx (first run downloads the
 package). It never talks to an llm endpoint. `call-mcp-proxy.sh` and
 `call-terminal-tool.sh` spawn the same upstream through `--mcp-proxy` and
-additionally need the llm endpoint.
+additionally need the llm endpoint. The `repl-*.sh` scripts need the llm
+endpoint; `repl-minimal.sh` wants an interactive terminal (the styled chat),
+while `repl-scripted.sh` pipes its turns and shows the plain non-tty
+rendering.
 
 ## quick start
 

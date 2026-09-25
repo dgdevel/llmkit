@@ -361,6 +361,8 @@ struct engine {
     char *terminal_id; /* id of the answered terminal tool_request, NULL
                           when none ran (design sec.4; the sinks read it) */
     int wire_proto;
+    bool keep_mcp; /* repl: sessions continue after engine_run endings;
+                      mcp children die at engine_free only (sec.12) */
 
     /* seams for tests */
     tool_exec_fn tool_exec;
@@ -539,6 +541,10 @@ typedef struct call_cfg {
 } call_cfg_t;
 
 void call_cfg_free(call_cfg_t *c);
+/* 0 ok, 1 usage error (err filled, cfg freed). with_prompt false is the
+   repl surface: --prompt is an unknown flag there (requirements sec.12) */
+int call_parse_ex(int argc, char **argv, call_cfg_t *c, char *err,
+                  size_t errsz, bool with_prompt);
 /* 0 ok, 1 usage error (err filled, cfg freed) */
 int call_parse(int argc, char **argv, call_cfg_t *c, char *err, size_t errsz);
 cJSON *call_build_llm(const call_cfg_t *c);
@@ -546,8 +552,20 @@ cJSON *call_build_system(const call_cfg_t *c); /* NULL when absent */
 cJSON *call_build_tools(const call_cfg_t *c, const char *exe_path); /* NULL */
 cJSON *call_build_user(const char *prompt);
 void call_shell_quote(buf_t *b, const char *s); /* POSIX single-quote */
+/* compile the leading records - llm, optional system, optional tools -
+   into the engine, validation included; 0 ok or the exit code, errors
+   rendered through the engine sink (design sec.11/12) */
+int call_compile(const call_cfg_t *c, engine_t *e, const char *exe_path);
 /* compile + run one conversation; returns the exit code (design sec.11) */
 int call_run(const call_cfg_t *c, FILE *out, FILE *errf, const char *exe_path,
+             wire_t *(*factory)(engine_t *));
+
+/* ================= repl.c ================= */
+
+cJSON *repl_build_options(void); /* stream_interval 0 (requirements sec.12) */
+/* run the chat session: records compiled from c, input lines from in_fd,
+   rendered transcript on out. Returns the exit code (design sec.12). */
+int repl_run(const call_cfg_t *c, int in_fd, FILE *out, const char *exe_path,
              wire_t *(*factory)(engine_t *));
 
 /* ================= commands ================= */
@@ -556,6 +574,7 @@ int cmd_runner(void);
 int cmd_agent(const char *seed_path);
 int cmd_proxy(const char *config_path);
 int cmd_call(int argc, char **argv);
+int cmd_repl(int argc, char **argv);
 int cmd_help(void);
 int cmd_version(void);
 

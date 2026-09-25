@@ -1,14 +1,15 @@
 # llmkit
 
 A single static-purpose executable for llm interaction from the shell and
-from other programs. One binary, four commands:
+from other programs. One binary, five commands:
 
 | command | what it does |
 |---|---|
+| `llmkit repl <flags>` | the interactive chat: type the turns, watch thinking and tool calls render live |
+| `llmkit call <flags>` | one prompt in, one answer out: plain text on stdout, the shell one-liner front-end |
 | `llmkit runner` | runs an llm conversation: jsonl records on stdin, jsonl records on stdout |
 | `llmkit agent-as-tool <seed.jsonl>` | exposes one agent conversation as a single `invoke` tool on a stdio mcp interface |
 | `llmkit mcp-proxy <config.jsonl>` | exposes a curated view (rename, redescribe, hide) of upstream mcp servers on stdio |
-| `llmkit call <flags>` | one prompt in, one answer out: plain text on stdout, the shell one-liner front-end |
 
 Written in C11. Talks to any openai-compatible endpoint (chat completions
 and responses apis) and any anthropic-compatible endpoint. Tools are mcp
@@ -68,6 +69,28 @@ every record type live in [examples/](examples/) - see
 [examples/records.md](examples/records.md) for the minimal and complete
 form of each record.
 
+For talking to a model there is `llmkit repl`: same flags as `call`,
+minus `--prompt` - the turns are typed, every line is one turn of one
+growing conversation. The whole exchange renders as it happens - thinking
+italic, tool calls and their results bold, ascii rules framing each block -
+on terminals that support the typography, plain everywhere else. Ctrl-C
+stops the running turn without leaving (the session continues where the
+transcript left off) or clears the input line; a second Ctrl-C at a clear
+prompt exits 8, Ctrl-D exits cleanly. Piping stdin turns it into a scripted
+session with the same rendering, one turn per line.
+
+```sh
+$ llmkit repl --openai http://localhost:11434/v1 --model llama3.1
+================================================================================
+> hello, what is 2+2?
+--------------------------------------------------------------------------------
+The user asks simple arithmetic.
+--------------------------------------------------------------------------------
+2 + 2 equals 4.
+================================================================================
+>
+```
+
 For one-shot use from the shell there is `llmkit call`: flags in, the
 answer as plain text on stdout, thinking omitted, no records to write -
 
@@ -101,7 +124,7 @@ No build system beyond the plain Makefile.
 
 - Exit code 0 only when the conversation ended with a successful final
   `response`; every fatal condition has its own exit code (see design
-  sec.12). Exit 9 is the terminal-tool ending: requested, not an error.
+  sec.13). Exit 9 is the terminal-tool ending: requested, not an error.
 - SIGINT is an orderly stop: buffered text is flushed as a trailing
   partial record, running tools complete, a second SIGINT kills the
   process immediately.

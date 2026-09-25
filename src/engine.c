@@ -556,6 +556,14 @@ static void emit_held_final(engine_t *e, cJSON *rec) {
     e->emit(e->emit_ctx, rec);
 }
 
+/* repl owns a session that continues after engine_run endings: the mcp
+   children are not killed mid-session, engine_free tears them down once
+   (design sec.8/12) */
+static void engine_mcp_shutdown(engine_t *e) {
+    if (e->keep_mcp) return;
+    mcp_kill_all((mcp_mgr_t *)e->mcp);
+}
+
 int engine_stop_orderly(engine_t *e, cJSON *held_final) {
     emit_held_final(e, held_final);
     if (e->npending) {
@@ -569,7 +577,7 @@ int engine_stop_orderly(engine_t *e, cJSON *held_final) {
     }
     engine_emit_error(e, EC_INTERRUPTED, "conversation stopped externally",
                       true);
-    mcp_kill_all((mcp_mgr_t *)e->mcp);
+    engine_mcp_shutdown(e);
     return EXIT_INTERRUPTED;
 }
 
@@ -581,7 +589,7 @@ int engine_pre_start_stop(engine_t *e) {
                  e->records_since_flush);
         engine_emit_error(e, EC_IO_ERROR, msg, false);
     }
-    mcp_kill_all((mcp_mgr_t *)e->mcp);
+    engine_mcp_shutdown(e);
     return EXIT_INTERRUPTED;
 }
 
@@ -609,7 +617,7 @@ int engine_run(engine_t *e) {
             const char *code = rec_str(out.error_rec, "code");
             int rc = exit_code_of(code);
             e->emit(e->emit_ctx, out.error_rec);
-            mcp_kill_all((mcp_mgr_t *)e->mcp);
+            engine_mcp_shutdown(e);
             return rc;
         }
         if (kind == TURN_ABORTED) {
@@ -641,12 +649,12 @@ int engine_run(engine_t *e) {
                 }
                 engine_drain_input(e);
                 if (e->fatal_code) {
-                    mcp_kill_all((mcp_mgr_t *)e->mcp);
+                    engine_mcp_shutdown(e);
                     return e->fatal_code;
                 }
                 if (e->stdin_ioerr) {
                     engine_emit_error(e, EC_IO_ERROR, "stdin read failed", true);
-                    mcp_kill_all((mcp_mgr_t *)e->mcp);
+                    engine_mcp_shutdown(e);
                     return EXIT_IO_ERROR;
                 }
                 if (g_stop_flag) {
@@ -669,12 +677,12 @@ int engine_run(engine_t *e) {
             }
             engine_drain_input(e);
             if (e->fatal_code) {
-                mcp_kill_all((mcp_mgr_t *)e->mcp);
+                engine_mcp_shutdown(e);
                 return e->fatal_code;
             }
             if (e->stdin_ioerr) {
                 engine_emit_error(e, EC_IO_ERROR, "stdin read failed", true);
-                mcp_kill_all((mcp_mgr_t *)e->mcp);
+                engine_mcp_shutdown(e);
                 return EXIT_IO_ERROR;
             }
             if (term) {
@@ -693,14 +701,14 @@ int engine_run(engine_t *e) {
                 for (size_t i = 0; i < e->npending; i++)
                     cJSON_Delete(e->pending[i]);
                 e->npending = 0;
-                mcp_kill_all((mcp_mgr_t *)e->mcp);
+                engine_mcp_shutdown(e);
                 return EXIT_TERMINAL_TOOL;
             }
             if (g_stop_flag) return engine_stop_orderly(e, NULL);
             if (steering_ready(e)) {
                 int rc = apply_steering(e);
                 if (rc) {
-                    mcp_kill_all((mcp_mgr_t *)e->mcp);
+                    engine_mcp_shutdown(e);
                     return rc;
                 }
             }
@@ -711,13 +719,13 @@ int engine_run(engine_t *e) {
         engine_drain_input(e);
         if (e->fatal_code) {
             emit_held_final(e, out.final_rec);
-            mcp_kill_all((mcp_mgr_t *)e->mcp);
+            engine_mcp_shutdown(e);
             return e->fatal_code;
         }
         if (e->stdin_ioerr) {
             engine_emit_error(e, EC_IO_ERROR, "stdin read failed", true);
             emit_held_final(e, out.final_rec);
-            mcp_kill_all((mcp_mgr_t *)e->mcp);
+            engine_mcp_shutdown(e);
             return EXIT_IO_ERROR;
         }
         if (g_stop_flag) {
@@ -728,7 +736,7 @@ int engine_run(engine_t *e) {
             emit_held_final(e, out.final_rec);
             int rc = apply_steering(e);
             if (rc) {
-                mcp_kill_all((mcp_mgr_t *)e->mcp);
+                engine_mcp_shutdown(e);
                 return rc;
             }
             continue;
@@ -741,11 +749,11 @@ int engine_run(engine_t *e) {
                      e->npending);
             engine_emit_error(e, EC_IO_ERROR, msg, false);
             emit_held_final(e, out.final_rec);
-            mcp_kill_all((mcp_mgr_t *)e->mcp);
+            engine_mcp_shutdown(e);
             return EXIT_OK;
         }
         emit_held_final(e, out.final_rec);
-        mcp_kill_all((mcp_mgr_t *)e->mcp);
+        engine_mcp_shutdown(e);
         return EXIT_OK;
     }
 }
