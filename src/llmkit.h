@@ -16,7 +16,10 @@
 #include <curl/curl.h>
 #include <cjson/cJSON.h>
 
+/* release builds stamp this: tools/release.sh passes VERSION=<x.y.z> to make */
+#ifndef LLMKIT_VERSION
 #define LLMKIT_VERSION "1.0"
+#endif
 
 struct engine;
 typedef struct engine engine_t;

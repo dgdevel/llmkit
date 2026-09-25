@@ -1,7 +1,16 @@
 CC      ?= cc
 CFLAGS  ?= -O2
 CFLAGS  += -std=c11 -Wall -Wextra -pthread -Isrc
-LDLIBS   = -lcjson -lcurl -pthread
+CFLAGS  += $(EXTRA_CFLAGS)
+# json parser: system libcjson by default; distro packaging links a pinned
+# static build instead (make CJSON=/tmp/cj/libcjson.a EXTRA_CFLAGS=-I/tmp/cj/include)
+CJSON    = -lcjson
+LDLIBS   = $(CJSON) -lcurl -pthread
+
+# release builds stamp the version into the binary (tools/release.sh)
+ifneq ($(VERSION),)
+CFLAGS  += -DLLMKIT_VERSION=\"$(VERSION)\"
+endif
 
 SRC  = src/buf.c src/sse.c src/platform.c src/jsonl.c src/wire_openai.c \
        src/wire_anthropic.c src/engine.c src/mcp.c src/agent.c src/proxy.c \
@@ -27,6 +36,17 @@ check: test/selfcheck
 	./test/selfcheck
 
 clean:
+	rm -rf dist
 	rm -f llmkit test/selfcheck
 
-.PHONY: all check check-ascii clean
+# tag, build and publish binaries to GitHub Releases (needs gh)
+# usage: make release TAG=v1.2.3
+release:
+	@tools/release.sh "$(TAG)"
+
+# build distro packages (.deb/.rpm/.pkg.tar.zst) in docker; needs docker,
+# artifacts land in dist/. usage: make packages TAG=v1.2.3 [TGT="deb arch"]
+packages:
+	@tools/package.sh "$(TAG)" $(TGT)
+
+.PHONY: all check check-ascii clean release packages

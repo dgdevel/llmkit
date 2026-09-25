@@ -1,3 +1,4 @@
 llmkit
 test/selfcheck
 .*
+dist/
