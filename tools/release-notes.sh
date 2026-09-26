@@ -37,6 +37,9 @@ for f in dist/*; do
         *.pkg.tar.zst)
             sys="arch linux"
             ins="sudo pacman -U $b" ;;
+        *windows*.zip)
+            sys="windows 10+ 64-bit, no install"
+            ins="unzip, put llmkit.exe on PATH" ;;
         *)
             sys="any linux, release host's glibc or newer, needs libcurl + libcjson - prefer a package above"
             ins="unpack, put llmkit on PATH" ;;

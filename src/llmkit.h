@@ -16,6 +16,27 @@
 #include <curl/curl.h>
 #include <cjson/cJSON.h>
 
+/* ---- windows port (mingw-w64, msys2) ----
+   the code below is posix-shaped; platform.c carries the win32 half of
+   every os-dependent primitive and this header picks types accordingly. */
+#ifdef _WIN32
+#include <stdlib.h>
+#include <string.h>
+/* msys2 declares these inconsistently across strict-ansi settings; the
+   ms crt equivalents are always there */
+#define strcasecmp  _stricmp
+#define strncasecmp _strnicmp
+/* mingw has no strndup */
+static inline char *llmkit_strndup(const char *s, size_t n) {
+    char *d = malloc(n + 1);
+    if (!d) return NULL;
+    memcpy(d, s, n);
+    d[n] = '\0';
+    return d;
+}
+#define strndup llmkit_strndup
+#endif
+
 /* release builds stamp this: tools/release.sh passes VERSION=<x.y.z> to make */
 #ifndef LLMKIT_VERSION
 #define LLMKIT_VERSION "1.0"
@@ -97,14 +118,60 @@ int thread_start_detached(thread_fn fn, void *arg);
 /* monotonic clock seconds */
 double mono_now(void);
 
-/* /bin/sh -c spawn with pipes; returns pid or -1 */
+/* shell spawn with pipes (posix: /bin/sh -c; win: %ComSpec% /c);
+   returns 0, or -1 with all fields reset */
+#ifdef _WIN32
+typedef struct spawn {
+    void *hproc; /* HANDLE, owned; NULL when not running */
+    long pid;    /* GetProcessId(), for messages only */
+    int to_fd;   /* write to child stdin; -1 if none */
+    int from_fd; /* read child stdout; -1 if none */
+} spawn_t;
+#else
 typedef struct spawn {
     pid_t pid;
     int to_fd;   /* write to child stdin; -1 if none */
     int from_fd; /* read child stdout; -1 if none */
 } spawn_t;
+#endif
 int spawn_shell(const char *command_line, spawn_t *out);
-void spawn_kill(spawn_t *s); /* SIGTERM + reap + close; idempotent */
+void spawn_kill(spawn_t *s);  /* terminate + reap + close; idempotent */
+void spawn_wait(spawn_t *s);  /* block until exit, reap; idempotent */
+
+/* ---- tty (repl editor) ----
+   raw mode = byte-at-a-time, no echo, no line editing; ctrl-c is a 0x03
+   input byte on windows (processed input off) and a signal on posix. */
+#ifndef _WIN32
+#include <termios.h>
+#endif
+typedef struct tty_raw {
+    int fd;
+    bool on;
+#ifdef _WIN32
+    unsigned long orig; /* console mode */
+#else
+    struct termios orig;
+#endif
+} tty_raw_t;
+
+bool tty_raw_on(tty_raw_t *t, int fd); /* false: not a tty / failed */
+void tty_raw_off(tty_raw_t *t);        /* restore; safe when never on */
+/* 1: one byte in *c ('\r' normalized to '\n'); 0: EOF or read error;
+   -1: stop flag observed mid-read (posix EINTR path) */
+int tty_read_byte(tty_raw_t *t, unsigned char *c);
+/* terminal width in columns, 0 when not a terminal */
+int tty_cols(FILE *out);
+/* SGR escapes render: posix callers gate on TERM themselves */
+bool tty_vt_enabled(int fd);
+
+/* milliseconds, interruptible by nothing (same contract as usleep) */
+void msleep(int ms);
+
+/* own executable path with argv0 fallback: the mcp-proxy command line */
+void self_exe(char *out, size_t sz, const char *argv0);
+
+/* one-time process setup: utf-8 console, binary pipes (win); no-op posix */
+void platform_init(void);
 
 /* signals */
 extern volatile int g_stop_flag; /* SIGINT observed */
@@ -570,9 +637,8 @@ cJSON *call_build_llm(const call_cfg_t *c);
 cJSON *call_build_system(const call_cfg_t *c); /* NULL when absent */
 cJSON *call_build_tools(const call_cfg_t *c, const char *exe_path); /* NULL */
 cJSON *call_build_user(const char *prompt);
-void call_shell_quote(buf_t *b, const char *s); /* POSIX single-quote */
-/* /proc/self/exe with argv0 fallback: the mcp-proxy command line */
-void self_exe(char *out, size_t sz, const char *argv0);
+/* quote for the shell spawn_shell uses (posix sh / windows cmd.exe) */
+void call_shell_quote(buf_t *b, const char *s);
 /* compile the leading records - llm, optional system, optional tools -
    into the engine, validation included; 0 ok or the exit code, errors
    rendered through the engine sink (design sec.11/12) */

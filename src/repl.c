@@ -9,8 +9,6 @@
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/ioctl.h>
-#include <termios.h>
 #include <unistd.h>
 
 #define HIST_CAP 128 /* in-memory ring, arrow recall only (design sec.12) */
@@ -25,8 +23,14 @@ static void style_probe(style_t *st, FILE *out) {
     memset(st, 0, sizeof *st);
     int fd = fileno(out);
     if (fd < 0 || !isatty(fd)) return;
+#ifdef _WIN32
+    /* SGR escapes render only where the VT output mode was armed
+       (platform_init, win10+); windows consoles have no TERM contract */
+    if (!tty_vt_enabled(fd)) return;
+#else
     const char *term = getenv("TERM");
     if (!term || !*term || !strcmp(term, "dumb")) return;
+#endif
     /* SGR escapes: universal in every terminal TERM admits here */
     snprintf(st->bold, sizeof st->bold, "\033[1m");
     snprintf(st->italic, sizeof st->italic, "\033[3m");
@@ -60,12 +64,8 @@ static void ensure_nl(repl_sink_t *s) {
 
 static void draw_rule(repl_sink_t *s, char glyph) {
     ensure_nl(s);
-    int w = 80;
-    int fd = fileno(s->out);
-    if (fd >= 0 && isatty(fd)) {
-        struct winsize ws;
-        if (ioctl(fd, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0) w = ws.ws_col;
-    }
+    int w = tty_cols(s->out);
+    if (w <= 0) w = 80;
     char line[512];
     if (w > (int)sizeof line - 2) w = (int)sizeof line - 2;
     memset(line, glyph, (size_t)w);
@@ -166,9 +166,7 @@ enum {
 /* ================= tty editor (raw mode) ================= */
 
 typedef struct editor {
-    int fd;
-    struct termios orig;
-    bool raw_on;
+    tty_raw_t raw; /* fd + raw-mode state (platform.c owns the mechanics) */
     FILE *out;
     const style_t *st;
     buf_t line;
@@ -186,23 +184,6 @@ static void ed_echo(editor_t *ed, const char *t, size_t n) {
 
 static void ed_erase(editor_t *ed, size_t n) {
     for (size_t i = 0; i < n; i++) ed_echo(ed, "\b \b", 3);
-}
-
-static bool ed_raw_on(editor_t *ed) {
-    struct termios t;
-    if (tcgetattr(ed->fd, &t) != 0) return false;
-    ed->orig = t;
-    t.c_lflag &= ~(tcflag_t)(ICANON | ECHO);
-    t.c_cc[VMIN] = 1;
-    t.c_cc[VTIME] = 0;
-    if (tcsetattr(ed->fd, TCSANOW, &t) != 0) return false;
-    ed->raw_on = true;
-    return true;
-}
-
-static void ed_raw_off(editor_t *ed) {
-    if (ed->raw_on) tcsetattr(ed->fd, TCSANOW, &ed->orig);
-    ed->raw_on = false;
 }
 
 static void hist_push(editor_t *ed, const char *line) {
@@ -253,28 +234,17 @@ static int ed_sigint_stage(editor_t *ed) {
     return RLINE_QUIT;
 }
 
-static int ed_read_byte(editor_t *ed, unsigned char *c) {
-    for (;;) {
-        ssize_t n = read(ed->fd, c, 1);
-        if (n == 1) return 1;
-        if (n == 0) return 0; /* EOF */
-        if (errno == EINTR) {
-            if (g_stop_flag) return -1; /* SIGINT: the stage rule */
-            continue;
-        }
-        return 0; /* a read error ends input like EOF (ponytail) */
-    }
-}
-
 static int ed_line(editor_t *ed) {
     buf_clear(&ed->line);
     ed->hist_pos = -1;
     for (;;) {
         unsigned char c;
-        int r = ed_read_byte(ed, &c);
+        int r = tty_read_byte(&ed->raw, &c);
         if (r < 0) return ed_sigint_stage(ed);
         if (r == 0) return RLINE_EOF;
         if (c == '\n') return RLINE_SUBMIT;
+        if (c == 0x03) /* windows byte-mode ctrl-c: the same stage rule */
+            return ed_sigint_stage(ed);
         if (c == '\r' || c == 0) continue; /* hygiene: CR dropped */
         if (c == 0x04) {                   /* Ctrl-D: submit / EOF on empty */
             if (ed->line.len) return RLINE_SUBMIT;
@@ -291,9 +261,9 @@ static int ed_line(editor_t *ed) {
         }
         if (c == 0x1b) { /* escape: arrow history, the rest swallowed */
             unsigned char s1, s2;
-            if (ed_read_byte(ed, &s1) != 1) continue;
+            if (tty_read_byte(&ed->raw, &s1) != 1) continue;
             if (s1 != '[') continue;
-            if (ed_read_byte(ed, &s2) != 1) continue;
+            if (tty_read_byte(&ed->raw, &s2) != 1) continue;
             if (s2 == 'A') { /* up: older, clamped at the oldest */
                 int next = ed->hist_pos < 0 ? (int)ed->nhist - 1
                                             : ed->hist_pos - 1;
@@ -318,7 +288,7 @@ static int ed_line(editor_t *ed) {
 }
 
 static void ed_free(editor_t *ed) {
-    ed_raw_off(ed);
+    tty_raw_off(&ed->raw);
     buf_free(&ed->line);
     for (size_t i = 0; i < ed->nhist; i++) free(ed->hist[i]);
     free(ed->hist);
@@ -419,11 +389,10 @@ int repl_run(const call_cfg_t *c, int in_fd, FILE *out, const char *exe_path,
     plain_reader_t pr;
     memset(&pr, 0, sizeof pr);
     if (tty) {
-        ed.fd = in_fd;
         ed.out = out;
         ed.st = &st;
         buf_init(&ed.line);
-        ed_raw_on(&ed);
+        tty_raw_on(&ed.raw, in_fd);
     } else {
         pr.fd = in_fd;
         buf_init(&pr.hold);
@@ -509,8 +478,16 @@ int repl_run(const call_cfg_t *c, int in_fd, FILE *out, const char *exe_path,
             cJSON_Delete(user);
         }
 
+#ifdef _WIN32
+        /* cooked console while a turn runs: ctrl-c must raise the orderly
+           stop signal instead of queueing a 0x03 byte for the next line */
+        if (tty) tty_raw_off(&ed.raw);
+#endif
         rc = engine_start(e);
         if (rc == 0) rc = engine_run(e);
+#ifdef _WIN32
+        if (tty) tty_raw_on(&ed.raw, in_fd);
+#endif
         last_ending = rc;
         if (rc == EXIT_INTERRUPTED) {
             g_stop_flag = 0; /* consumed: the session continues */

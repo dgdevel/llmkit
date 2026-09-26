@@ -35,6 +35,7 @@ int cmd_version(void) {
 }
 
 int main(int argc, char **argv) {
+    platform_init(); /* console codepage/VT and byte-exact pipes on windows */
     http_global_init();
     if (argc < 2) return usage(stderr);
     const char *cmd = argv[1];

@@ -56,6 +56,25 @@ mutates conversation state, so there is no locking above the queues.
 stdout: one `fwrite` + `fflush` per record from main only; records are never
 interleaved or split.
 
+### windows
+
+The same shape builds on windows (mingw-w64 cross build, fully static,
+via `tools/pkg/win.sh`): every os primitive has a `_WIN32` half in
+`src/platform.c` behind a posix-shaped contract - `CreatePipe` +
+`CreateProcess` (`%ComSpec% /c`, handle-list restricted to the three
+standard handles) instead of `fork`/`exec`, `TerminateProcess` instead of
+`SIGTERM`, `WaitForSingleObject` instead of `waitpid`, console modes
+instead of `termios`, `QueryPerformanceCounter` instead of
+`CLOCK_MONOTONIC`. pthreads stay (winpthreads). Differences that show:
+
+- the repl editor reads ctrl-c as a `0x03` byte (processed input off, so
+  the stage rule works between turns); while a turn runs the console is
+  cooked again, so ctrl-c raises the signal and takes the orderly-stop
+  path like on linux.
+- `platform_init` at startup sets the console to utf-8 + VT escapes and
+  puts redirected std streams in binary mode, keeping the `\n`-only byte
+  contract on pipes and files.
+
 ## 3. input pipeline
 
 Byte level, in order, per chunk read from stdin:
@@ -309,8 +328,9 @@ fractional `llm_connect_timeout`/`llm_read_timeout` values are floored;
 - `required: true` connect failure -> fatal `connect_failed`; otherwise
   non-fatal and the conversation proceeds without those tools. A stdio child
   that dies mid-conversation fails its next call as `tool_failed`.
-- Spawn: `/bin/sh -c <command_line>` - the caller owns quoting per the
-  requirements. `ponytail:`
+- Spawn: `/bin/sh -c <command_line>` on posix, `%ComSpec% /c` on windows -
+  the caller owns quoting per the requirements (`call_shell_quote` picks
+  the dialect). `ponytail:`
   no shell-less spawn mode; add one if a server needs argv-precise control.
 
 ## 7. serialization and prefix cache
@@ -630,7 +650,7 @@ Sources: `src/main.c` (subcommands), `src/agent.c` (agent-as-tool),
 `src/engine.c` (state machine + turn loop), `src/jsonl.c` (input pipeline,
 validation), `src/wire_openai.c`, `src/wire_anthropic.c`, `src/sse.c`,
 `src/mcp.c`, `src/buf.c` (byte buffers, the sec.7 append-only buffer),
-`src/platform.c` (threads, spawn, signals),
+`src/platform.c` (threads, spawn, signals, the windows halves of both),
 `src/repl.c` (repl session loop, raw-mode line editor, display sink).
 Link flags: `-lcjson -lcurl`.
 

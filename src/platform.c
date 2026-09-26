@@ -1,17 +1,26 @@
-/* platform.c - threads, queues, spawn, signals, curl helpers (design sec.2). */
+/* platform.c - threads, queues, spawn, signals, curl helpers (design sec.2).
+   the _WIN32 halves keep the posix-shaped contracts of llmkit.h. */
 #include "llmkit.h"
 
 #include <curl/curl.h>
 #include <errno.h>
-#include <fcntl.h>
-#include <pthread.h>
 #include <signal.h>
 #include <stdlib.h>
 #include <string.h>
+
+#ifdef _WIN32
+#include <windows.h>
+#include <fcntl.h>
+#include <io.h>
+#include <process.h>
+#else
+#include <fcntl.h>
 #include <strings.h>
+#include <sys/ioctl.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#endif
 
 /* ---- signals ---- */
 
@@ -27,6 +36,11 @@ static void sigint_handler(int sig) {
 }
 
 void signals_init(void) {
+#ifdef _WIN32
+    /* the crt routes the console ctrl event to signal(); SIGPIPE does not
+       exist on windows - a write to a dead pipe is a plain error */
+    signal(SIGINT, sigint_handler);
+#else
     struct sigaction sa;
     memset(&sa, 0, sizeof sa);
     sa.sa_handler = sigint_handler;
@@ -34,12 +48,22 @@ void signals_init(void) {
     sa.sa_flags = 0; /* no SA_RESTART: blocking reads must wake up */
     sigaction(SIGINT, &sa, NULL);
     signal(SIGPIPE, SIG_IGN);
+#endif
 }
 
 double mono_now(void) {
+#ifdef _WIN32
+    /* QPC is monotonic and does not jump on sleep/resume */
+    static LARGE_INTEGER freq;
+    LARGE_INTEGER c;
+    if (!freq.QuadPart) QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&c);
+    return (double)c.QuadPart / (double)freq.QuadPart;
+#else
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+#endif
 }
 
 /* ---- queue: mutex + condvar, unbounded ---- */
@@ -158,6 +182,130 @@ int thread_start_detached(thread_fn fn, void *arg) {
 
 /* ---- spawn ---- */
 
+#ifdef _WIN32
+
+/* %ComSpec% (cmd.exe) /c <command_line>, stdin/stdout piped, stderr
+   passed through; only the three standard handles are inherited - the
+   handle-list attribute keeps other servers' pipes out of the child. */
+int spawn_shell(const char *command_line, spawn_t *out) {
+    out->hproc = NULL;
+    out->pid = -1;
+    out->to_fd = -1;
+    out->from_fd = -1;
+
+    SECURITY_ATTRIBUTES sa;
+    sa.nLength = sizeof sa;
+    sa.lpSecurityDescriptor = NULL;
+    sa.bInheritHandle = TRUE;
+    HANDLE in_r, in_w, out_r, out_w; /* child stdin, parent->child */
+    if (!CreatePipe(&in_r, &in_w, &sa, 0)) return -1;
+    if (!CreatePipe(&out_r, &out_w, &sa, 0)) {
+        CloseHandle(in_r);
+        CloseHandle(in_w);
+        return -1;
+    }
+    fflush(NULL);
+
+    const char *sh = getenv("ComSpec");
+    if (!sh || !*sh) sh = "cmd.exe";
+    wchar_t wsh[280], wcl[4096];
+    if (MultiByteToWideChar(CP_ACP, 0, sh, -1, wsh, 280) == 0 ||
+        MultiByteToWideChar(CP_UTF8, 0, command_line, -1, wcl,
+                            (int)(sizeof wcl / sizeof *wcl) - 300) == 0) {
+        CloseHandle(in_r); CloseHandle(in_w);
+        CloseHandle(out_r); CloseHandle(out_w);
+        return -1;
+    }
+    wchar_t cmd[4096];
+    /* cmd /c strips the first and last quote of the tail when it starts
+       with one (cmd /? rule 2): a leading-quoted command_line gets an
+       extra outer pair so the stripped quotes are the spare ones */
+    if (wcl[0] == L'"')
+        _snwprintf(cmd, 4096, L"\"%ls\" /c \"%ls\"", wsh, wcl);
+    else
+        _snwprintf(cmd, 4096, L"\"%ls\" /c %ls", wsh, wcl);
+
+    STARTUPINFOEXW si;
+    memset(&si, 0, sizeof si);
+    si.StartupInfo.cb = sizeof si;
+    si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    si.StartupInfo.hStdInput = in_r;
+    si.StartupInfo.hStdOutput = out_w;
+    HANDLE err = GetStdHandle(STD_ERROR_HANDLE);
+    si.StartupInfo.hStdError = err;
+
+    SIZE_T asz = 0;
+    InitializeProcThreadAttributeList(NULL, 1, 0, &asz);
+    si.lpAttributeList = HeapAlloc(GetProcessHeap(), 0, asz);
+    HANDLE inherit[3];
+    DWORD ninh = 2;
+    inherit[0] = in_r;
+    inherit[1] = out_w;
+    if (err != NULL && err != INVALID_HANDLE_VALUE) inherit[ninh++] = err;
+    BOOL ok = si.lpAttributeList &&
+              InitializeProcThreadAttributeList(si.lpAttributeList, 1, 0,
+                                                &asz) &&
+              UpdateProcThreadAttribute(
+                  si.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+                  inherit, ninh * sizeof(HANDLE), NULL, NULL);
+    PROCESS_INFORMATION pi;
+    memset(&pi, 0, sizeof pi);
+    if (ok)
+        ok = CreateProcessW(NULL, cmd, NULL, NULL, TRUE,
+                            EXTENDED_STARTUPINFO_PRESENT, NULL, NULL,
+                            &si.StartupInfo, &pi);
+    if (si.lpAttributeList) {
+        DeleteProcThreadAttributeList(si.lpAttributeList);
+        HeapFree(GetProcessHeap(), 0, si.lpAttributeList);
+    }
+    if (!ok) {
+        CloseHandle(in_r); CloseHandle(in_w);
+        CloseHandle(out_r); CloseHandle(out_w);
+        return -1;
+    }
+    CloseHandle(pi.hThread);
+    CloseHandle(in_r); /* child ends: owned by the child now */
+    CloseHandle(out_w);
+
+    out->to_fd = _open_osfhandle((intptr_t)in_w, _O_BINARY | _O_NOINHERIT);
+    out->from_fd = _open_osfhandle((intptr_t)out_r, _O_BINARY | _O_NOINHERIT);
+    if (out->to_fd < 0) CloseHandle(in_w);
+    if (out->from_fd < 0) CloseHandle(out_r);
+    if (out->to_fd < 0 || out->from_fd < 0) {
+        spawn_kill(out); /* closes whichever fd did materialize */
+        return -1;
+    }
+    out->hproc = pi.hProcess;
+    out->pid = (long)GetProcessId(pi.hProcess);
+    return 0;
+}
+
+/* terminate + reap + close; resets pid and fds so repeated calls are safe */
+void spawn_kill(spawn_t *s) {
+    if (s->hproc) {
+        TerminateProcess(s->hproc, 1);
+        WaitForSingleObject(s->hproc, INFINITE);
+        CloseHandle(s->hproc);
+        s->hproc = NULL;
+    }
+    if (s->to_fd >= 0) close(s->to_fd);
+    if (s->from_fd >= 0) close(s->from_fd);
+    s->pid = -1;
+    s->to_fd = -1;
+    s->from_fd = -1;
+}
+
+void spawn_wait(spawn_t *s) {
+    if (s->hproc) {
+        WaitForSingleObject(s->hproc, INFINITE);
+        CloseHandle(s->hproc);
+        s->hproc = NULL;
+    }
+    s->pid = -1;
+}
+
+#else /* posix */
+
 int spawn_shell(const char *command_line, spawn_t *out) {
     int in_pipe[2], out_pipe[2];
     if (pipe(in_pipe)) return -1;
@@ -203,6 +351,169 @@ void spawn_kill(spawn_t *s) {
     s->to_fd = -1;
     s->from_fd = -1;
 }
+
+void spawn_wait(spawn_t *s) {
+    if (s->pid > 0) {
+        waitpid(s->pid, NULL, 0);
+        s->pid = -1;
+    }
+}
+
+#endif
+
+/* ---- tty (repl editor) ---- */
+
+#ifdef _WIN32
+
+static HANDLE con_handle(int fd) {
+    return fd < 0 ? INVALID_HANDLE_VALUE : (HANDLE)_get_osfhandle(fd);
+}
+
+bool tty_raw_on(tty_raw_t *t, int fd) {
+    t->fd = fd;
+    t->on = false;
+    HANDLE h = con_handle(fd);
+    DWORD mode = 0;
+    if (h == INVALID_HANDLE_VALUE || !GetConsoleMode(h, &mode))
+        return false; /* not a console */
+    t->orig = mode;
+    /* byte mode: no line buffering, no echo, no ctrl-c cooking (0x03 is
+       read as a byte instead - the editor's stage rule); VT input makes
+       arrow keys arrive as the escape sequences the editor parses */
+    DWORD raw = mode & ~(DWORD)(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT |
+                                ENABLE_PROCESSED_INPUT);
+    if (!SetConsoleMode(h, raw | ENABLE_VIRTUAL_TERMINAL_INPUT))
+        if (!SetConsoleMode(h, raw))
+            return false;
+    t->on = true;
+    return true;
+}
+
+void tty_raw_off(tty_raw_t *t) {
+    if (!t->on) return;
+    SetConsoleMode(con_handle(t->fd), t->orig);
+    t->on = false;
+}
+
+int tty_read_byte(tty_raw_t *t, unsigned char *c) {
+    HANDLE h = con_handle(t->fd);
+    DWORD n = 0;
+    /* a read error ends input like EOF (same rule as the posix side) */
+    if (h == INVALID_HANDLE_VALUE || !ReadFile(h, c, 1, &n, NULL) || n == 0)
+        return 0;
+    if (*c == '\r') *c = '\n'; /* enter arrives as CR in byte mode */
+    return 1;
+}
+
+int tty_cols(FILE *out) {
+    CONSOLE_SCREEN_BUFFER_INFO ci;
+    HANDLE h = con_handle(fileno(out));
+    if (h == INVALID_HANDLE_VALUE || !GetConsoleScreenBufferInfo(h, &ci))
+        return 0;
+    return ci.srWindow.Right - ci.srWindow.Left + 1;
+}
+
+bool tty_vt_enabled(int fd) {
+    DWORD mode = 0;
+    HANDLE h = con_handle(fd);
+    return h != INVALID_HANDLE_VALUE && GetConsoleMode(h, &mode) &&
+           (mode & ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+}
+
+void msleep(int ms) { Sleep((DWORD)ms); }
+
+/* one-time process setup: utf-8 console, VT escapes on, byte-exact
+   pipes. the console codepage is process-wide and outlives us - the
+   standard price of utf-8 console output on windows. */
+void platform_init(void) {
+    DWORD mode = 0, dummy = 0;
+    HANDLE hout = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (GetConsoleMode(hout, &mode)) {
+        SetConsoleOutputCP(CP_UTF8);
+        SetConsoleCP(CP_UTF8);
+        SetConsoleMode(hout, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+    } else {
+        /* redirected stdout must stay byte-exact: no \n -> \r\n cooking */
+        _setmode(_fileno(stdout), _O_BINARY);
+    }
+    if (!GetConsoleMode(GetStdHandle(STD_INPUT_HANDLE), &dummy))
+        _setmode(_fileno(stdin), _O_BINARY);
+    if (!GetConsoleMode(GetStdHandle(STD_ERROR_HANDLE), &dummy))
+        _setmode(_fileno(stderr), _O_BINARY);
+}
+
+void self_exe(char *out, size_t sz, const char *argv0) {
+    DWORD n = GetModuleFileNameA(NULL, out, (DWORD)sz);
+    if (n > 0 && (size_t)n < sz) return;
+    snprintf(out, sz, "%s", argv0 ? argv0 : "llmkit");
+}
+
+#else /* posix */
+
+bool tty_raw_on(tty_raw_t *t, int fd) {
+    t->fd = fd;
+    t->on = false;
+    struct termios tm;
+    if (tcgetattr(fd, &tm) != 0) return false;
+    t->orig = tm;
+    tm.c_lflag &= ~(tcflag_t)(ICANON | ECHO); /* ISIG stays: ctrl-c is a signal */
+    tm.c_cc[VMIN] = 1;
+    tm.c_cc[VTIME] = 0;
+    if (tcsetattr(fd, TCSANOW, &tm) != 0) return false;
+    t->on = true;
+    return true;
+}
+
+void tty_raw_off(tty_raw_t *t) {
+    if (!t->on) return;
+    tcsetattr(t->fd, TCSANOW, &t->orig);
+    t->on = false;
+}
+
+int tty_read_byte(tty_raw_t *t, unsigned char *c) {
+    for (;;) {
+        ssize_t n = read(t->fd, c, 1);
+        if (n == 1) return 1;
+        if (n == 0) return 0; /* EOF */
+        if (errno == EINTR) {
+            if (g_stop_flag) return -1; /* SIGINT: the stage rule */
+            continue;
+        }
+        return 0; /* a read error ends input like EOF (ponytail) */
+    }
+}
+
+int tty_cols(FILE *out) {
+    int fd = fileno(out);
+    if (fd < 0) return 0;
+    struct winsize ws;
+    if (ioctl(fd, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0)
+        return ws.ws_col;
+    return 0;
+}
+
+bool tty_vt_enabled(int fd) {
+    (void)fd;
+    return true; /* the caller's own TERM check decides */
+}
+
+void msleep(int ms) {
+    struct timespec ts = { ms / 1000, (long)(ms % 1000) * 1000000L };
+    while (nanosleep(&ts, &ts) == -1 && errno == EINTR) {}
+}
+
+void platform_init(void) { /* nothing to arrange on posix */ }
+
+void self_exe(char *out, size_t sz, const char *argv0) {
+    ssize_t n = readlink("/proc/self/exe", out, sz - 1);
+    if (n > 0 && (size_t)n < sz - 1) {
+        out[n] = '\0';
+        return;
+    }
+    snprintf(out, sz, "%s", argv0 ? argv0 : "llmkit");
+}
+
+#endif
 
 /* ---- curl ---- */
 

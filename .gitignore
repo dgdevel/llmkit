@@ -1,4 +1,6 @@
 llmkit
+llmkit.exe
 test/selfcheck
+test/selfcheck.exe
 .*
 dist/

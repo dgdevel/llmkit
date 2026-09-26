@@ -287,13 +287,24 @@ int call_parse(int argc, char **argv, call_cfg_t *c, char *err, size_t errsz) {
 
 /* ================= record builders ================= */
 
+/* quote for the shell that spawn_shell runs (design sec.6): single
+   quotes on posix, doubled double quotes for windows cmd.exe */
 void call_shell_quote(buf_t *b, const char *s) {
+#ifdef _WIN32
+    buf_append_byte(b, '"');
+    for (const char *p = s; *p; p++) {
+        if (*p == '"') buf_append_str(b, "\"\"");
+        else buf_append_byte(b, *p);
+    }
+    buf_append_byte(b, '"');
+#else
     buf_append_byte(b, '\'');
     for (const char *p = s; *p; p++) {
         if (*p == '\'') buf_append_str(b, "'\\''");
         else buf_append_byte(b, *p);
     }
     buf_append_byte(b, '\'');
+#endif
 }
 
 static cJSON *text_record(const char *type, const char *text) {
@@ -606,15 +617,6 @@ static int read_stdin_prompt(char **out, char *err, size_t errsz) {
     }
     *out = buf_steal(&b, NULL);
     return 0;
-}
-
-void self_exe(char *out, size_t sz, const char *argv0) {
-    ssize_t n = readlink("/proc/self/exe", out, sz - 1);
-    if (n > 0 && (size_t)n < sz - 1) {
-        out[n] = '\0';
-        return;
-    }
-    snprintf(out, sz, "%s", argv0 ? argv0 : "llmkit");
 }
 
 static void call_usage(FILE *out) {

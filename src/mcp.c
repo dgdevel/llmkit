@@ -8,8 +8,10 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/types.h>
-#include <sys/wait.h>
 #include <unistd.h>
+#ifndef _WIN32
+#include <sys/wait.h>
+#endif
 
 #define CONNECT_TIMEOUT 10.0
 #define RPC_TIMEOUT 30.0
@@ -156,10 +158,7 @@ static void *stdio_reader_thread(void *arg) {
         if (jsonl_feed(&p, bbuf, (size_t)n) != 0) break;
     }
     jsonl_pusher_free(&p);
-    if (s->sp.pid > 0) {
-        waitpid(s->sp.pid, NULL, 0);
-        s->sp.pid = -1;
-    }
+    spawn_wait(&s->sp);
     s->dead = true;
     /* queue_close is this thread's last touch of s and s->q: server_free
        waits for it before freeing (kill + queue_wait_closed) */
@@ -419,7 +418,7 @@ static int server_connect(mcp_server_t *s, char *err, size_t errsz) {
         s->have_sse_th = true;
         thread_start_detached(sse_get_thread, s);
         double deadline = mono_now() + CONNECT_TIMEOUT;
-        while (!s->sse_ready && mono_now() < deadline) usleep(20000);
+        while (!s->sse_ready && mono_now() < deadline) msleep(20);
         if (!s->sse_ready) {
             snprintf(err, errsz,
                      "mcp server '%s' sent no endpoint event", s->name);

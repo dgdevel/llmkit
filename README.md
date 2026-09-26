@@ -108,6 +108,23 @@ make check    # builds and runs the selfcheck (no network needed)
 
 No build system beyond the plain Makefile.
 
+Windows builds need no local mingw: the `win` target of
+[tools/package.sh](tools/package.sh) builds in the
+`africanfuture/msys2-base:linux-latest` docker image (arch linux with the
+mingw-w64 cross toolchain). the image carries no libcurl or libcjson for
+the target, so both are pinned and cross-built from source there - libcurl
+static against schannel - leaving one fully static `llmkit.exe` in
+`dist/llmkit-<ver>-windows-x86_64.zip`, no dlls next to it:
+
+```sh
+tools/package.sh v1.2.3 win
+```
+
+The cross-build needs network access in the container (source tarballs).
+`make check` stays a linux affair for now (the selfcheck harness forks
+and runs python helpers); everything it covers except the harness itself
+is platform-shared code.
+
 ## behavior notes
 
 - Exit code 0 only when the conversation ended with a successful final

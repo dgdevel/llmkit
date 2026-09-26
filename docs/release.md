@@ -52,7 +52,7 @@ gh release edit v1.0.0 --notes-file /tmp/n.md
 ## distro packages only
 
 ```sh
-tools/package.sh v1.2.3            # all four targets
+tools/package.sh v1.2.3            # all five targets
 tools/package.sh v1.2.3 deb arch   # just these
 make packages TAG=v1.2.3           # same, via make
 ```
@@ -63,9 +63,11 @@ make packages TAG=v1.2.3           # same, via make
 | `rpm-fc` | `fedora:41` | `llmkit-1.2.3-1.fc41.x86_64.rpm` | fedora 41+ |
 | `rpm-el9` | `rockylinux:9` | `llmkit-1.2.3-1.el9.x86_64.rpm` | rhel / alma / rocky 9+ |
 | `arch` | `archlinux:base-devel` | `llmkit-1.2.3-1-x86_64.pkg.tar.zst` | arch, via `pacman -U` |
+| `win` | `africanfuture/msys2-base:linux-latest` | `llmkit-1.2.3-windows-x86_64.zip` | windows 10+ 64-bit |
 
 Install commands for users: `apt install ./llmkit_..._.deb`,
-`dnf install ./llmkit-..._.rpm`, `pacman -U llmkit-..._.pkg.tar.zst`.
+`dnf install ./llmkit-..._.rpm`, `pacman -U llmkit-..._.pkg.tar.zst`;
+the windows zip unzips in place - `llmkit.exe` carries everything it needs.
 
 Each target builds inside its own distro's container with that distro's
 own packaging tool (`dpkg-deb`, `rpmbuild`, `makepkg`), so the package
@@ -87,6 +89,13 @@ image in `tools/package.sh` (one variable per target) - e.g. building
   link the system `libcurl.so.4`, whose soname is stable across every
   target distro. `libcjson` is not packaged everywhere (el9), libcurl is.
   The normal `make` build still links the system libcjson.
+- **windows: fully static, built from source.** The cross container
+  (`africanfuture/msys2-base:linux-latest`) is arch linux with the
+  mingw-w64 toolchain and no target curl/cjson, so `tools/pkg/win.sh`
+  cross-builds a pinned libcurl (schannel, every optional third-party
+  dependency off: the `.a` needs only `ws2_32`/`crypt32` and friends) and
+  the pinned cjson, then links `llmkit.exe` fully static - no dlls, no
+  ca bundle (schannel uses the windows cert store), windows 10+.
 - **versioning.** Tag `v1.2.3` -> package versions `1.2.3-1` (deb/arch) and
   `1.2.3-1.<disttag>` (rpm). The release tarball keeps the leading `v`.
 - **fail fast.** A failed target aborts the whole run; rerun with the

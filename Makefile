@@ -44,8 +44,8 @@ clean:
 release:
 	@tools/release.sh "$(TAG)"
 
-# build distro packages (.deb/.rpm/.pkg.tar.zst) in docker; needs docker,
-# artifacts land in dist/. usage: make packages TAG=v1.2.3 [TGT="deb arch"]
+# build distro packages (.deb/.rpm/.pkg.tar.zst/.zip) in docker; needs
+# docker, artifacts land in dist/. usage: make packages TAG=v1.2.3 [TGT="deb arch"]
 packages:
 	@tools/package.sh "$(TAG)" $(TGT)
 
