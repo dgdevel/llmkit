@@ -32,7 +32,8 @@ examples/
     |-- call-mcp-proxy.sh         llmkit call with tools from --mcp-proxy
     |-- call-terminal-tool.sh     --terminal-tool ends it, exit 9, tool text
     |-- repl-minimal.sh           llmkit repl: the interactive chat
-    `-- repl-scripted.sh          a piped session, one turn per line
+    |-- repl-scripted.sh          a piped session, one turn per line
+    `-- mcp-repl.sh               a piped mcp-repl session over builtin-mcp
 ```
 
 ## prerequisites

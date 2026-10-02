@@ -20,6 +20,9 @@ static int usage(FILE *out) {
           "                         text on stdout\n"
           "  repl <flags>           interactive chat: type the turns, see\n"
           "                         thinking and tool calls as they happen\n"
+          "  mcp-repl <flags>       interactive tool console for one mcp\n"
+          "                         server: tab-completed calls, one\n"
+          "                         timing line each\n"
           "  help                   show this help\n"
           "  version                show the version\n",
           out);
@@ -59,6 +62,7 @@ int main(int argc, char **argv) {
     }
     if (!strcmp(cmd, "call")) return cmd_call(argc, argv);
     if (!strcmp(cmd, "repl")) return cmd_repl(argc, argv);
+    if (!strcmp(cmd, "mcp-repl")) return cmd_mcp_repl(argc, argv);
     if (!strcmp(cmd, "help")) return cmd_help();
     if (!strcmp(cmd, "version")) return cmd_version();
     fprintf(stderr, "llmkit: unknown command '%s'\n", cmd);

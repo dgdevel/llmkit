@@ -29,6 +29,8 @@ applies. Rules marked *(proposed)* are working desiderata, not yet frozen.
    - [cli surface](#cli-surface) - [--mcp-proxy](#--mcp-proxy) - [output and errors](#output-and-errors)
 12. [llmkit repl](#12-llmkit-repl)
    - [cli surface](#cli-surface-1) - [session model](#session-model) - [display](#display) - [interrupts and exit codes](#interrupts-and-exit-codes)
+13. [llmkit mcp-repl](#13-llmkit-mcp-repl)
+   - [cli surface](#cli-surface-2) - [session model](#session-model-1) - [call syntax](#call-syntax) - [display](#display-1) - [interrupts and exit codes](#interrupts-and-exit-codes-1)
 
 ## 1. cli conventions
 
@@ -1152,3 +1154,116 @@ records are `runner` territory), usage or token displays, a banner,
 styling override flags, and everything on `call`'s own not-offered list:
 inference-option flags beyond `--max-tokens`, environment-variable or
 config-file indirection, record/jsonl output.
+
+
+## 13. llmkit mcp-repl
+
+Seventh command: the interactive tool console for one mcp server. No
+model, no conversation: the command line names exactly one server, the
+session connects it, lists its tools and turns every submitted line into
+one direct `tools/call`. It is the tool-side counterpart of `repl` - a
+debugging and exploration front-end for a single server, model out of
+the loop.
+
+```
+llmkit mcp-repl (--stdio <command> | --http <url> | --sse <url>)
+                [--protocol <revision>] [--header <name=value>]...
+```
+
+### cli surface
+
+Same conventions as `call`'s parser: flags in any order, the value is
+the next argv token, no `--flag=value` form, no short forms, no
+abbreviation. Exactly one transport flag is required:
+
+- `--stdio <command>` - the full shell command line of the server,
+  caller-owned quoting; json-rpc on the child's stdio.
+- `--http <url>` / `--sse <url>` - the streamable http / legacy
+  http+sse transports, url used verbatim.
+- `--protocol <revision>` - the mcp revision, once; a revision the
+  client does not speak is a usage error (exit 1).
+- `--header <name>=<value>` - repeatable, one extra http header per
+  request to this server; a value without `=` shape is a usage error.
+
+Everything else is a usage error: two transport flags, a missing value,
+an unknown flag, a bare positional. Usage errors are stderr + exit 1,
+nothing connects.
+
+### session model
+
+- The flags compile to a one-entry `tools` record (the entry's
+  validation is the record's own); connecting is the mcp client's
+  connect flow, `tools/list` included. A failed connect renders its
+  `connect_failed` error line and exits 3. Nothing else runs.
+- The listing is the session's vocabulary, a snapshot: no re-listing
+  short of `tools` (which re-prints it) or a restart.
+- Then the loop: prompt, read one line, act, prompt again. One line is
+  one action - a call, one of the commands, or nothing (empty input is
+  ignored). No state carries between calls except the connection and
+  the input history.
+- A call that fails - unknown tool, syntax mistake, server error,
+  timeout, a died stdio child - renders its error and the session
+  continues. The console is a debugger: nothing a server does ends it.
+- `tools`, `help` and `quit`/`exit` are commands only while no listed
+  tool shadows the word; a server that lists `tools` owns the word.
+- Input discipline and editing are `repl`'s: the shared raw-mode line
+  editor (history recall, Ctrl-U, the two Ctrl-C stages), strict UTF-8,
+  NUL rejected (exit 2). A non-terminal stdin is the same session on a
+  plain line loop, one action per line.
+
+### call syntax
+
+- `name(json, json, ...)` - one call. `name` alone and `name()` are the
+  zero-argument form.
+- Arguments are json literals, comma-separated; strings, arrays and
+  objects may contain commas, brackets and quotes - the splitter is
+  literal-aware. Anything between the commas that is not one json value
+  is a syntax error line, not a call.
+- Literals bind positionally onto the tool's `inputSchema.properties`
+  in declaration order; a call with more literals than properties, or
+  missing a `required` property, is a syntax error line.
+- json has one number type: an integer literal is valid for a float
+  parameter (`add(1, 1)` - the schema says `float`, the value is a
+  number). Type mismatches past that are the server's error to report,
+  through the normal error rendering.
+- The tool name alphabet is the mcp one, `[A-Za-z0-9_-]+`.
+
+### display
+
+stdout is the console; stderr keeps the out-of-channel role. Rendering
+is append-only, no styling: this is a tool console, not a transcript.
+
+- At connect: the banner `Tools available:` then one line per tool,
+  `- name(type, type)` - the schema's json types (`number` printed
+  `float`, `integer` `int`, `boolean` `bool`, missing `any`), property
+  order.
+- The prompt is `> `; on a non-terminal stdin each submitted line
+  echoes as its own block instead.
+- A call's text content renders as-is (text blocks joined with
+  newline); an `isError` result renders as `! tool error: <text>`; no
+  text at all renders `structuredContent` as json; non-text content
+  blocks are counted in one `[n non-text content blocks]` note.
+- One timing line follows every call, also failed ones:
+  `[HH:MM:SS] <seconds>`, the wall clock of the completion and the
+  measured duration of the call.
+- Errors render as repl's `! <what>: <detail>` lines: `! syntax:` for
+  input mistakes, `! tool_failed:` for transport failures, `!
+  connect_failed:` at startup.
+- Tab completes tool names: the trailing name token extends to the
+  unique match (plus `(`), to the longest common prefix of several, or
+  lists the candidates below the line, prompt and line redrawn.
+
+### interrupts and exit codes
+
+`repl`'s two Ctrl-C stages and EOF rule: Ctrl-C with typed input clears
+the line, Ctrl-C at a clear prompt exits 8, Ctrl-D submits or ends the
+session. A SIGINT during a running call is honored at the next prompt
+(the call itself runs to its end - tools complete, the runner's rule).
+EOF and `quit`/`exit` exit 0; tool failures never influence the exit
+code. Connect failures exit 3, startup validation 2, usage 1.
+
+Deliberately not offered: connecting more than one server (the proxy
+composes), reconnects, prompt/resource/sampling server traffic beyond
+ignoring it, named-argument syntax (`name(a=1)` - positional plus json
+objects covers it), tool description display, and everything on
+`repl`'s own not-offered list that also applies here.

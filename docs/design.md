@@ -23,6 +23,7 @@ details in sec.5 and sec.6. Where this document picks a ceiling, it is marked
 13. [exit codes](#13-exit-codes)
 14. [build and packaging](#14-build-and-packaging)
 15. [testing](#15-testing)
+16. [mcp-repl](#16-mcp-repl)
 
 ## 1. technology choices
 
@@ -664,7 +665,9 @@ Sources: `src/main.c` (subcommands), `src/agent.c` (agent-as-tool),
 validation), `src/wire_openai.c`, `src/wire_anthropic.c`, `src/sse.c`,
 `src/mcp.c`, `src/buf.c` (byte buffers, the sec.7 append-only buffer),
 `src/platform.c` (threads, spawn, signals, the windows halves of both),
-`src/repl.c` (repl session loop, raw-mode line editor, display sink).
+`src/editor.c` (the shared line editor, plain reader, wall-clock stamp),
+`src/repl.c` (repl session loop, display sink),
+`src/mcprepl.c` (mcp-repl session, call syntax, console rendering).
 Link flags: `-lcjson -lcurl`.
 
 ## 15. testing
@@ -711,3 +714,55 @@ Link flags: `-lcjson -lcurl`.
 
 `ponytail:` no network integration tests in-tree; a `test/live.sh` hitting a
 real endpoint is added when the first endpoint bug shows up.
+
+## 16. mcp-repl
+
+Seventh entry point, third front-end, and the first one with no engine
+turns in it: `llmkit mcp-repl` is a tool console for one mcp server
+(requirements sec.13). One new `src/mcprepl.c`; the line editor, the
+non-tty reader and the wall-clock stamp moved out of `src/repl.c` into
+`src/editor.c` and gained exactly one extension, the tab completion
+hook. No new wire, mcp or loop code.
+
+- **connect** - the flags compile to a one-entry `tools` record
+  (`mcp_repl_build_tools`, `validate_tools` run on it like any other)
+  and go through `mcp_reconcile` on a bare engine whose sink renders
+  error records as `!`-lines: the connect flow, revision negotiation
+  and `tools/list` are sec.6's, byte for byte. The listing snapshot on
+  the server struct is the console's vocabulary. `keep_mcp` is
+  irrelevant (no turns run); `engine_free` at session end is the one
+  teardown, the stdio child dies there.
+- **call syntax** - `name(json, ...)`, split by a literal-aware scanner
+  (`mcp_repl_split`): strings copy with their escapes, containers copy
+  bracket-balanced with nested strings, commas and parens inside
+  literals never delimit; each top-level literal is then cJSON-parsed
+  (one parse per argument, no hand-rolled json). `mcp_repl_bind` maps
+  positionals onto `inputSchema.properties` in declaration order and
+  checks `required` - too many literals and missing required names are
+  input errors. Integers for float parameters pass through: json has
+  one number type, no coercion byte is needed.
+- **completion** - the editor's `on_tab` hook: the trailing
+  `[A-Za-z0-9_-]` token extends to the unique match (plus `(`), to the
+  longest common prefix of several, or lists the candidates below the
+  line - `editor_note` prints them and redraws prompt + line, the one
+  backward-drawing step the editor has. Completion stops at the first
+  `(`: argument editing offers nothing.
+- **timing** - one stamped line per call, `[HH:MM:SS] <seconds>` from
+  the shared `stamp_now` and the mono clock around `mcp_call_raw`,
+  rendered for failed calls too. Millisecond precision: tool calls are
+  short next to llm turns.
+- **results** - `mcp_call_raw` keeps the result tree whole (the text
+  mapping of `mcp_call` loses `structuredContent`): text blocks join
+  with newline, `isError` prefixes `! tool error: `, a textless result
+  prints `structuredContent` as json, non-text blocks are counted.
+- **session rules** - `repl`'s input discipline verbatim (the shared
+  editor, the two Ctrl-C stages, UTF-8/NUL hygiene, non-tty line loop
+  with echoed blocks), with the differences the missing model makes:
+  tool failures render and the session lives on, `tools`/`help`/
+  `quit` are commands unless a listed tool shadows the word, EOF and
+  `quit` exit 0. A SIGINT during a call lands at the next prompt - the
+  call runs to its end, the tools-complete rule.
+
+`ponytail:` no per-server timeout flag (the rpc default 30s applies), no
+re-list on `tools/list_changed` (restart the console), no pty harness in
+tree for the completion.

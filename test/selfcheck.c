@@ -2729,6 +2729,388 @@ static void test_repl(void) {
     }
 }
 
+/* ================= mcp-repl (design sec.16) ================= */
+
+/* the golden token of a call's timing line: the measured span normalized
+   away (stamped_line + "<n>.nnns") */
+static bool mr_timing_line(const char *p, size_t len) {
+    if (!stamped_line(p, len)) return false;
+    const char *rest = p + 11;
+    size_t rlen = len - 11;
+    if (rlen < 6 || rest[rlen - 1] != 's' || rest[rlen - 2] < '0' ||
+        rest[rlen - 2] > '9')
+        return false;
+    for (size_t i = 0; i < rlen - 1; i++)
+        if ((rest[i] < '0' || rest[i] > '9') && rest[i] != '.')
+            return false;
+    return true;
+}
+
+static char *mr_norm(const char *ob) {
+    buf_t b;
+    buf_init(&b);
+    const char *p = ob ? ob : "";
+    while (*p) {
+        const char *eol = strchr(p, '\n');
+        size_t len = eol ? (size_t)(eol - p) : strlen(p);
+        if (mr_timing_line(p, len)) {
+            buf_append_str(&b, "@t\n");
+        } else {
+            buf_append(&b, p, len + (eol ? 1 : 0));
+        }
+        p = eol ? eol + 1 : p + len;
+    }
+    return buf_steal(&b, NULL);
+}
+
+typedef struct mr_out {
+    char *ob;
+    int rc;
+} mr_out_t;
+
+static mr_out_t mr_session(const char *script, const char *transport) {
+    mr_out_t r = { NULL, 0 };
+    write_file("/tmp/llmkit-test-fake-mcp.py", FAKE_MCP_PY);
+    mcp_repl_cfg_t c;
+    memset(&c, 0, sizeof c);
+    c.type = MCP_STDIO;
+    c.target = (char *)transport;
+    int fd = pipe_feed(script, strlen(script));
+    check(fd >= 0, "mcp-repl: pipe feed");
+    char *ob = NULL;
+    size_t on = 0;
+    FILE *out = open_memstream(&ob, &on);
+    r.rc = mcp_repl_run(&c, fd, out);
+    fclose(out);
+    close(fd);
+    r.ob = ob;
+    return r;
+}
+
+static void test_mcp_repl(void) {
+    char err[256];
+
+    /* ---- command line vectors ---- */
+    {
+        mcp_repl_cfg_t c;
+        check(mcp_repl_parse(0, NULL, &c, err, sizeof err) == 1 &&
+                  strstr(err, "missing transport") != NULL,
+              "mcp-repl: no transport flag is a usage error");
+        char *av[] = {"--stdio", "x", "--http", "y"};
+        check(mcp_repl_parse(4, av, &c, err, sizeof err) == 1 &&
+                  strstr(err, "twice") != NULL,
+              "mcp-repl: two transport flags are a usage error");
+        char *av2[] = {"--stdio"};
+        check(mcp_repl_parse(1, av2, &c, err, sizeof err) == 1 &&
+                  strstr(err, "missing value") != NULL,
+              "mcp-repl: missing flag value is a usage error");
+        char *av3[] = {"--bogus"};
+        check(mcp_repl_parse(1, av3, &c, err, sizeof err) == 1 &&
+                  strstr(err, "unknown flag") != NULL,
+              "mcp-repl: unknown flag is a usage error");
+        char *av4[] = {"--protocol", "1999-01-01"};
+        check(mcp_repl_parse(2, av4, &c, err, sizeof err) == 1 &&
+                  strstr(err, "unsupported protocol") != NULL,
+              "mcp-repl: unsupported revision is a usage error");
+        char *av5[] = {"x"};
+        check(mcp_repl_parse(1, av5, &c, err, sizeof err) == 1 &&
+                  strstr(err, "unexpected extra argument") != NULL,
+              "mcp-repl: a bare positional is a usage error");
+        char *av6[] = {"--http", "http://x/mcp", "--header", "a=b",
+                       "--header", "c=d", "--protocol", "2025-06-18"};
+        check(mcp_repl_parse(8, av6, &c, err, sizeof err) == 0,
+              "mcp-repl: full flag set parses");
+        check(c.type == MCP_HTTP && c.nhdrs == 2, "mcp-repl: fields set");
+        cJSON *t = mcp_repl_build_tools(&c);
+        buf_t b;
+        buf_init(&b);
+        buf_append_tree(&b, t);
+        check_str(b.data ? b.data : "",
+                  "{\"type\":\"tools\",\"tools\":[{\"type\":\"http\","
+                  "\"name\":\"server\",\"url\":\"http://x/mcp\","
+                  "\"protocol\":\"2025-06-18\",\"headers\":"
+                  "{\"a\":\"b\",\"c\":\"d\"}}]}",
+                  "mcp-repl: the one-entry tools record");
+        buf_free(&b);
+        cJSON_Delete(t);
+        mcp_repl_cfg_free(&c);
+        char *av7[] = {"--stdio", "./calc 1 2"};
+        check(mcp_repl_parse(2, av7, &c, err, sizeof err) == 0,
+              "mcp-repl: stdio command line parses");
+        t = mcp_repl_build_tools(&c);
+        buf_init(&b);
+        buf_append_tree(&b, t);
+        check_str(b.data ? b.data : "",
+                  "{\"type\":\"tools\",\"tools\":[{\"type\":\"stdio\","
+                  "\"name\":\"server\",\"command_line\":\"./calc 1 2\"}]}",
+                  "mcp-repl: stdio record is command_line");
+        buf_free(&b);
+        cJSON_Delete(t);
+        mcp_repl_cfg_free(&c);
+    }
+
+    /* ---- signature rendering ---- */
+    {
+        cJSON *tool = cJSON_Parse(
+            "{\"name\":\"add\",\"inputSchema\":{\"type\":\"object\","
+            "\"properties\":{\"a\":{\"type\":\"number\"},"
+            "\"b\":{\"type\":\"number\"}},\"required\":[\"a\",\"b\"]}}");
+        buf_t b;
+        buf_init(&b);
+        mcp_repl_signature(tool, &b);
+        check_str(b.data ? b.data : "", "add(float, float)",
+                  "mcp-repl: number renders as float");
+        cJSON_Delete(tool);
+        tool = cJSON_Parse("{\"name\":\"boom\",\"inputSchema\":"
+                           "{\"type\":\"object\"}}");
+        buf_clear(&b);
+        mcp_repl_signature(tool, &b);
+        check_str(b.data ? b.data : "", "boom()",
+                  "mcp-repl: no properties renders empty");
+        cJSON_Delete(tool);
+        tool = cJSON_Parse(
+            "{\"name\":\"mix\",\"inputSchema\":{\"properties\":"
+            "{\"i\":{\"type\":\"integer\"},\"s\":{\"type\":\"string\"},"
+            "\"f\":{\"type\":\"number\"},\"o\":{\"type\":\"object\"},"
+            "\"a\":{\"type\":\"array\"},\"bo\":{\"type\":\"boolean\"},"
+            "\"x\":{}}}}");
+        buf_clear(&b);
+        mcp_repl_signature(tool, &b);
+        check_str(b.data ? b.data : "",
+                  "mix(int, string, float, object, array, bool, any)",
+                  "mcp-repl: the type words, declaration order");
+        cJSON_Delete(tool);
+        tool = cJSON_Parse("{\"name\":\"bare\"}");
+        buf_clear(&b);
+        mcp_repl_signature(tool, &b);
+        check_str(b.data ? b.data : "", "bare()",
+                  "mcp-repl: missing inputSchema renders empty");
+        cJSON_Delete(tool);
+        buf_free(&b);
+    }
+
+    /* ---- split: call syntax ---- */
+    {
+        char *name = NULL;
+        cJSON *vals = NULL;
+        char *e = mcp_repl_split("add(1, 2)", &name, &vals);
+        check(e == NULL, "split: add(1, 2) ok");
+        check_str(name ? name : "", "add", "split: name");
+        buf_t b;
+        buf_init(&b);
+        buf_append_tree(&b, vals);
+        check_str(b.data ? b.data : "", "[1,2]", "split: two literals");
+        free(e);
+        free(name);
+        cJSON_Delete(vals);
+
+        e = mcp_repl_split("boom", &name, &vals);
+        check(e == NULL, "split: bare name is a zero-arg call");
+        check(cJSON_GetArraySize(vals) == 0, "split: no literals");
+        free(name);
+        cJSON_Delete(vals);
+
+        e = mcp_repl_split("boom()", &name, &vals);
+        check(e == NULL, "split: empty parens are zero args");
+        free(name);
+        cJSON_Delete(vals);
+
+        e = mcp_repl_split("f(\"a, b\", {\"k\": [1, 2]}, 3)", &name, &vals);
+        buf_clear(&b);
+        buf_append_tree(&b, vals);
+        check(e == NULL &&
+                  !strcmp(b.data ? b.data : "", "[\"a, b\",{\"k\":[1,2]},3]"),
+              "split: strings, nested containers, commas inside");
+        free(name);
+        cJSON_Delete(vals);
+
+        e = mcp_repl_split("f(\"a\\\"q\\\"b\")", &name, &vals);
+        buf_clear(&b);
+        buf_append_tree(&b, vals);
+        check(e == NULL && !strcmp(b.data ? b.data : "",
+                                  "[\"a\\\"q\\\"b\"]"),
+              "split: escaped quote does not close the string");
+        free(name);
+        cJSON_Delete(vals);
+
+        e = mcp_repl_split("  add ( 1 , 2 ) ", &name, &vals);
+        check(e == NULL, "split: spaces around the tokens");
+        buf_clear(&b);
+        buf_append_tree(&b, vals);
+        check_str(b.data ? b.data : "", "[1,2]", "split: literals trimmed");
+        free(name);
+        cJSON_Delete(vals);
+        buf_free(&b);
+
+        struct {
+            const char *line;
+            const char *want;
+        } bad[] = {
+            {"(1)", "expected a tool call"},
+            {"add 1", "expected '('"},
+            {"add(1", "missing ')'"},
+            {"add(1,", "missing ')'"},
+            {"add(1,2) x", "unexpected text after"},
+            {"add(,1)", "is empty"},
+            {"add(1,,2)", "is empty"},
+            {"add(x)", "not a json literal"},
+            {"add(\"unterminated)", "unterminated string"},
+            {"add([1, 2)", "unbalanced brackets"},
+            {"add(}", "missing ')'"},
+        };
+        for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+            e = mcp_repl_split(bad[i].line, &name, &vals);
+            check(e != NULL && strstr(e, bad[i].want) != NULL,
+                  "split: error vector");
+            if (e && strstr(e, bad[i].want) == NULL)
+                fprintf(stderr, "  line '%s': got '%s' want '%s'\n",
+                        bad[i].line, e ? e : "(null)", bad[i].want);
+            free(e);
+            free(name);
+            name = NULL;
+            cJSON_Delete(vals);
+            vals = NULL;
+        }
+    }
+
+    /* ---- bind: positional to named ---- */
+    {
+        cJSON *tool = cJSON_Parse(
+            "{\"name\":\"add\",\"inputSchema\":{\"properties\":"
+            "{\"a\":{\"type\":\"number\"},\"b\":{\"type\":\"number\"}},"
+            "\"required\":[\"a\",\"b\"]}}");
+        cJSON *vals = cJSON_Parse("[1,2]");
+        cJSON *args = NULL;
+        char *e = mcp_repl_bind(tool, vals, &args);
+        buf_t b;
+        buf_init(&b);
+        buf_append_tree(&b, args);
+        check(e == NULL && !strcmp(b.data ? b.data : "", "{\"a\":1,\"b\":2}"),
+              "bind: positionals map to schema names");
+        free(e);
+        cJSON_Delete(args);
+        cJSON_Delete(vals);
+
+        vals = cJSON_Parse("[1]"); /* b is required */
+        args = NULL;
+        e = mcp_repl_bind(tool, vals, &args);
+        check(e != NULL && strstr(e, "'b'") != NULL,
+              "bind: missing required argument is an error");
+        free(e);
+        cJSON_Delete(args);
+        cJSON_Delete(vals);
+
+        vals = cJSON_Parse("[1,2,3]");
+        args = NULL;
+        e = mcp_repl_bind(tool, vals, &args);
+        check(e != NULL && strstr(e, "takes 2") != NULL,
+              "bind: too many arguments is an error");
+        free(e);
+        cJSON_Delete(args);
+        cJSON_Delete(vals);
+        cJSON_Delete(tool);
+
+        /* int literal for a float parameter: json has one number type */
+        tool = cJSON_Parse(
+            "{\"inputSchema\":{\"properties\":{\"a\":{\"type\":"
+            "\"number\"}}}}");
+        vals = cJSON_Parse("[2]");
+        args = NULL;
+        e = mcp_repl_bind(tool, vals, &args);
+        const cJSON *a = args
+            ? cJSON_GetObjectItemCaseSensitive(args, "a") : NULL;
+        check(e == NULL && cJSON_IsNumber(a),
+              "bind: an integer literal binds to a float parameter");
+        free(e);
+        cJSON_Delete(args);
+        cJSON_Delete(vals);
+        cJSON_Delete(tool);
+
+        /* no schema: no arguments accepted */
+        tool = cJSON_Parse("{\"name\":\"bare\"}");
+        vals = cJSON_Parse("[1]");
+        args = NULL;
+        e = mcp_repl_bind(tool, vals, &args);
+        check(e != NULL, "bind: schema-less tool takes no arguments");
+        free(e);
+        cJSON_Delete(args);
+        cJSON_Delete(vals);
+        vals = cJSON_Parse("[]");
+        args = NULL;
+        e = mcp_repl_bind(tool, vals, &args);
+        check(e == NULL, "bind: schema-less zero-arg call binds {}");
+        free(e);
+        cJSON_Delete(args);
+        cJSON_Delete(vals);
+        cJSON_Delete(tool);
+        buf_free(&b);
+    }
+
+    /* ---- scripted sessions against the fake server ---- */
+    {
+        mr_out_t r = mr_session("echo(\"hi\")\ntools\nhelp\nquit\n",
+                                "python3 /tmp/llmkit-test-fake-mcp.py");
+        check(r.rc == EXIT_OK, "mcp-repl: quit exits 0");
+        char *norm = mr_norm(r.ob);
+        buf_t want;
+        buf_init(&want);
+        buf_append_str(&want,
+                       "Tools available:\n"
+                       "- echo(string)\n"
+                       "- boom()\n"
+                       "echo(\"hi\")\n"
+                       "echo: hi\n"
+                       "@t\n"
+                       "tools\n"
+                       "Tools available:\n"
+                       "- echo(string)\n"
+                       "- boom()\n"
+                       "help\n"
+                       "lines:\n");
+        check(strncmp(norm, want.data, want.len) == 0,
+              "mcp-repl: banner, call, timing, re-list, help");
+        if (strncmp(norm, want.data, want.len) != 0)
+            fprintf(stderr, "  got:\n%s\n", norm);
+        buf_free(&want);
+        free(norm);
+        free(r.ob);
+    }
+    {
+        mr_out_t r = mr_session("boom()\nnope(1)\necho()\necho(1, 2)\n",
+                                "python3 /tmp/llmkit-test-fake-mcp.py");
+        check(r.rc == EXIT_OK, "mcp-repl: errors do not end the session");
+        char *norm = mr_norm(r.ob);
+        const char *lines[] = {
+            "! tool error: boom", "@t",
+            "! syntax: unknown tool 'nope'",
+            "! syntax: missing required argument 'text'",
+            "! syntax: 2 arguments, the tool takes 1",
+        };
+        const char *p = norm;
+        for (size_t i = 0; i < sizeof lines / sizeof lines[0]; i++) {
+            const char *hit = strstr(p, lines[i]);
+            check(hit != NULL, "mcp-repl: error line rendered");
+            if (hit) p = hit + strlen(lines[i]);
+        }
+        free(norm);
+        free(r.ob);
+    }
+    {
+        /* EOF ends with the last ending; a dead command line connects
+           nothing: exit 3 */
+        mr_out_t r = mr_session("echo(hi)\n",
+                                "python3 /tmp/llmkit-test-fake-mcp.py");
+        check(r.rc == EXIT_OK, "mcp-repl: EOF after a call exits 0");
+        free(r.ob);
+        r = mr_session("", "nonexistent-command-xyz");
+        check(r.rc == EXIT_CONNECT_FAILED,
+              "mcp-repl: connect failure exits 3");
+        check(strstr(r.ob ? r.ob : "", "connect_failed") != NULL,
+              "mcp-repl: connect failure renders its error line");
+        free(r.ob);
+    }
+}
+
 static void test_terminal_tools(void) {
     cap_t cap = { 0 };
     engine_t *e;
@@ -3154,6 +3536,8 @@ int main(void) {
     test_call();
     fprintf(stderr, "selfcheck: repl\n");
     test_repl();
+    fprintf(stderr, "selfcheck: mcp-repl\n");
+    test_mcp_repl();
     fprintf(stderr, "selfcheck: terminal tools\n");
     test_terminal_tools();
     fprintf(stderr, "%d checks, %d failures\n", checks, failures);

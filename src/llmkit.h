@@ -670,6 +670,84 @@ int call_compile(const call_cfg_t *c, engine_t *e, const char *exe_path);
 int call_run(const call_cfg_t *c, FILE *out, FILE *errf, const char *exe_path,
              wire_t *(*factory)(engine_t *));
 
+/* ================= editor.c ================= */
+
+/* line input results, shared by both interactive front-ends */
+enum {
+    ED_SUBMIT = 0, /* line ready in the editor buffer */
+    ED_EOF,        /* end of input: session ends */
+    ED_CLEAR,      /* Ctrl-C with typed input: discarded, prompt again */
+    ED_QUIT,       /* Ctrl-C at a clear prompt: session ends */
+    ED_BAD,        /* byte hygiene violation: invalid_record tier */
+};
+
+/* the raw-mode line editor: printable bytes append, backspace deletes,
+   Ctrl-U kills, up/down recall history, enter and Ctrl-D submit (Ctrl-D
+   on an empty buffer is EOF), the two Ctrl-C stages apply. Tab goes to
+   the completion hook when one is set. */
+typedef struct editor {
+    tty_raw_t raw; /* fd + raw-mode state (platform.c owns the mechanics) */
+    FILE *out;
+    buf_t line;
+    char **hist;
+    size_t nhist;
+    int hist_pos; /* -1: the live line */
+    const char *prompt; /* redrawn below a candidate listing */
+    void (*on_tab)(struct editor *ed, void *ctx);
+    void *tab_ctx;
+} editor_t;
+
+void editor_init(editor_t *ed, FILE *out, int in_fd, const char *prompt);
+void editor_free(editor_t *ed);
+int editor_line(editor_t *ed); /* ED_* */
+void editor_hist_push(editor_t *ed, const char *line);
+/* completion helpers, callable from on_tab: rewrite the line (erase and
+   re-echo) or print below it and redraw prompt + line */
+void editor_set_line(editor_t *ed, const char *s, size_t n);
+void editor_note(editor_t *ed, const char *text);
+
+/* the non-tty line reader: same results, same byte hygiene */
+typedef struct plain_reader {
+    int fd;
+    buf_t hold; /* bytes after the last \n of the previous chunk */
+} plain_reader_t;
+
+void plain_init(plain_reader_t *pr, int fd);
+void plain_free(plain_reader_t *pr);
+int plain_line(plain_reader_t *pr, buf_t *line); /* ED_* */
+
+/* "[HH:MM:SS] " wall-clock stamp of a display line; length written */
+size_t stamp_now(char *dst, size_t cap);
+
+/* ================= mcprepl.c ================= */
+
+/* parsed `llmkit mcp-repl` command line; the parser owns CLI shape only */
+typedef struct mcp_repl_cfg {
+    int type;      /* MCP_STDIO / MCP_HTTP / MCP_SSE, -1 absent */
+    char *target;  /* owned: command_line (stdio) or url (http/sse) */
+    char *protocol; /* owned, NULL = server default revision */
+    char **hdrs;   /* owned "name=value" strings, argv order */
+    size_t nhdrs;
+} mcp_repl_cfg_t;
+
+void mcp_repl_cfg_free(mcp_repl_cfg_t *c);
+/* 0 ok, 1 usage error (err filled, cfg freed) */
+int mcp_repl_parse(int argc, char **argv, mcp_repl_cfg_t *c, char *err,
+                   size_t errsz);
+/* the one-entry tools record of the session (validate_tools-legal) */
+cJSON *mcp_repl_build_tools(const mcp_repl_cfg_t *c);
+/* the tool's call signature: "add(float, float)" - schema json types,
+   number rendered as float */
+void mcp_repl_signature(const cJSON *tool, buf_t *out);
+/* "name(json, ...)" -> name (malloc'd) + positional literals (array);
+   bare name = zero arguments. NULL ok, else malloc'd message */
+char *mcp_repl_split(const char *line, char **name_out, cJSON **vals_out);
+/* positional literals onto the schema properties; NULL ok, else message */
+char *mcp_repl_bind(const cJSON *tool, const cJSON *vals, cJSON **args_out);
+/* run the console session: input lines from in_fd, rendering on out.
+   Returns the exit code. */
+int mcp_repl_run(const mcp_repl_cfg_t *c, int in_fd, FILE *out);
+
 /* ================= repl.c ================= */
 
 cJSON *repl_build_options(void); /* stream_interval 0 (requirements sec.12) */
@@ -686,6 +764,7 @@ int cmd_proxy(const char *config_path);
 int cmd_builtin(void);
 int cmd_call(int argc, char **argv);
 int cmd_repl(int argc, char **argv);
+int cmd_mcp_repl(int argc, char **argv);
 int cmd_help(void);
 int cmd_version(void);
 

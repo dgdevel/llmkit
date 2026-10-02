@@ -1,6 +1,6 @@
 # llmkit
 
-A single static-purpose executable for llm interaction from the shell and from other programs. One binary, six commands:
+A single static-purpose executable for llm interaction from the shell and from other programs. One binary, seven commands:
 
 | command | what it does |
 |---|---|
@@ -10,6 +10,7 @@ A single static-purpose executable for llm interaction from the shell and from o
 | `llmkit agent-as-tool <seed.jsonl>` | exposes one agent conversation as a single `invoke` tool on a stdio mcp interface |
 | `llmkit mcp-proxy <config.jsonl>` | exposes a curated view (rename, redescribe, hide) of upstream mcp servers on stdio |
 | `llmkit builtin-mcp` | serves the built-in generic-use mcp tools (web search/fetch, file list/search/read/create/edit) on stdio |
+| `llmkit mcp-repl <flags>` | the interactive tool console for one mcp server: tab-completed `name(args)` calls, one timing line each |
 
 Written in C11. Talks to any openai-compatible endpoint (chat completions and responses apis) and any anthropic-compatible endpoint. Tools are mcp servers: `stdio`, `http` (streamable http) and `sse` (legacy) transports, in all current protocol revisions up to `2026-07-28`.
 
@@ -34,6 +35,25 @@ The user asks simple arithmetic.
 ```
 
 Every separator line is stamped with the wall clock, and each turn that finishes its answer prints its timing: time to first token (prompt processing), thinking generation, response generation.
+
+On the tool side of the house there is `llmkit mcp-repl`: a repl dedicated to one mcp server, the tool-debugging front-end. No model in the loop - the command line names one server (`--stdio`, `--http`, `--sse`), the connection's `tools/list` becomes the vocabulary, and every line is one direct call:
+
+```sh
+$ llmkit mcp-repl --stdio './calculator-mcp'
+Tools available:
+- add(float, float)
+- subtract(float, float)
+- multiply(float, float)
+- divide(float, float)
+> add(1, 1)
+2
+[10:31:04] 0.004s
+> divide(1, 0)
+! tool error: division by zero
+[10:31:09] 0.003s
+```
+
+Arguments are json literals, bound positionally onto the tool's schema (`add(1, 1)` sends `{"a":1,"b":2}`; an integer literal is a json number, valid for a float parameter). Tab completes tool names from the listing, `[HH:MM:SS] <seconds>` follows every call, `tools` re-lists, `help` explains, `quit` or Ctrl-D ends (exit 0, Ctrl-C at a clear prompt exit 8). Tool errors, unknown tools and syntax mistakes render as `!`-lines and the session lives on.
 
 For one-shot use from the shell there is `llmkit call`: flags in, the answer as plain text on stdout, thinking omitted, no records to write -
 
@@ -91,6 +111,7 @@ Runnable examples for every command live in [examples/](examples/) - see [docs/r
 | `llmkit builtin-mcp` | none: the built-in mcp tools on stdio |
 | `llmkit call <flags>` | flags below, `--prompt` required |
 | `llmkit repl <flags>` | flags below, no `--prompt` (the turns are typed) |
+| `llmkit mcp-repl <flags>` | one transport flag below |
 | `llmkit help` | none: the usage text on stdout |
 | `llmkit version` | none: the version on stdout |
 
@@ -114,6 +135,17 @@ Runnable examples for every command live in [examples/](examples/) - see [docs/r
 - `--terminal-tool <server.tool>` - repeatable; marks tools terminal (the
   answer is the terminal tool's text, exit 9) - the server prefix must
   name a `--mcp-proxy` server of the same command line
+
+`mcp-repl` has its own three flags, exactly one transport required:
+
+- `--stdio <command>` - spawn the shell command line, json-rpc over the
+  child's stdio
+- `--http <url>` - streamable http transport
+- `--sse <url>` - the legacy http+sse transport
+- `--protocol <revision>` - the mcp revision to speak, default
+  `2025-11-25` (v1) or `2026-07-28` (v2)
+- `--header <name>=<value>` - extra http header on every request to this
+  server, repeatable
 
 ## Building
 

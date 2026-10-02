@@ -1,18 +1,14 @@
 /* repl.c - llmkit repl: the interactive chat front-end (design sec.12).
    call's compiler minus --prompt, one session loop over one engine, and
    the display sink: ascii separators, tty-gated bold and italic,
-   thinking and tool traffic rendered. Input is a program-owned raw-mode
-   line buffer on a tty - the two Ctrl-C stages and the typed echo lean
-   on it - or a plain line loop on anything else. */
+   thinking and tool traffic rendered. Input is the shared raw-mode line
+   editor of src/editor.c on a tty - the two Ctrl-C stages and the typed
+   echo lean on it - or its plain line loop on anything else. */
 #include "llmkit.h"
 
-#include <errno.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 #include <unistd.h>
-
-#define HIST_CAP 128 /* in-memory ring, arrow recall only (design sec.12) */
 
 /* ================= typography probe ================= */
 
@@ -70,19 +66,6 @@ static void rwr_str(repl_sink_t *s, const char *t) { rwr(s, t, strlen(t)); }
 
 static void ensure_nl(repl_sink_t *s) {
     if (s->wrote && !s->last_nl) rwr_str(s, "\n");
-}
-
-/* "[HH:MM:SS] " - the wall-clock stamp of a separator or the timing line.
-   localtime's static buffer is safe here: records reach the sink from
-   the engine run loop's thread only. Returns the length written. */
-static size_t stamp_now(char *dst, size_t cap) {
-    if (cap < 12) return 0;
-    time_t t = time(NULL);
-    struct tm *p = localtime(&t);
-    if (!p) return 0;
-    int n = snprintf(dst, cap, "[%02d:%02d:%02d] ", p->tm_hour, p->tm_min,
-                     p->tm_sec);
-    return n < 0 || (size_t)n >= cap ? 0 : (size_t)n;
 }
 
 static void draw_rule(repl_sink_t *s, char glyph) {
@@ -228,195 +211,8 @@ static void render_user_block(repl_sink_t *s, const char *text) {
 }
 
 /* ================= input: line results ================= */
-
-enum {
-    RLINE_SUBMIT = 0, /* line ready in the buffer */
-    RLINE_EOF,        /* end of input: session ends */
-    RLINE_CLEAR,      /* Ctrl-C with typed input: discarded, prompt again */
-    RLINE_QUIT,       /* Ctrl-C at a clear prompt: session ends, exit 8 */
-    RLINE_BAD,        /* byte hygiene violation: invalid_record tier */
-};
-
-/* ================= tty editor (raw mode) ================= */
-
-typedef struct editor {
-    tty_raw_t raw; /* fd + raw-mode state (platform.c owns the mechanics) */
-    FILE *out;
-    const style_t *st;
-    buf_t line;
-    char **hist;
-    size_t nhist;
-    int hist_pos; /* -1: the live line */
-} editor_t;
-
-static void ed_echo(editor_t *ed, const char *t, size_t n) {
-    if (!n) return;
-    /* best effort: a failing write surfaces through the sink later */
-    fwrite(t, 1, n, ed->out);
-    fflush(ed->out);
-}
-
-static void ed_erase(editor_t *ed, size_t n) {
-    for (size_t i = 0; i < n; i++) ed_echo(ed, "\b \b", 3);
-}
-
-static void hist_push(editor_t *ed, const char *line) {
-    if (!line || !*line) return;
-    char *d = strdup(line);
-    if (!d) return;
-    if (ed->nhist == HIST_CAP) {
-        free(ed->hist[0]);
-        memmove(ed->hist, ed->hist + 1, (HIST_CAP - 1) * sizeof(char *));
-        ed->nhist--;
-    }
-    char **h = realloc(ed->hist, (ed->nhist + 1) * sizeof(char *));
-    if (!h) {
-        free(d);
-        return;
-    }
-    ed->hist = h;
-    ed->hist[ed->nhist++] = d;
-}
-
-static void ed_set_line(editor_t *ed, const char *s, size_t n) {
-    ed_erase(ed, ed->line.len);
-    buf_clear(&ed->line);
-    buf_append(&ed->line, s, n);
-    ed_echo(ed, ed->line.data ? ed->line.data : "", ed->line.len);
-}
-
-static void ed_backspace(editor_t *ed) {
-    if (!ed->line.len) return;
-    size_t drop = 1;
-    while (ed->line.len - drop > 0 &&
-           (ed->line.data[ed->line.len - drop] & 0xc0) == 0x80)
-        drop++;
-    ed_erase(ed, drop);
-    ed->line.len -= drop;
-}
-
-/* the two Ctrl-C stages: typed input clears, a clear prompt quits
-   (requirements sec.12). Returns RLINE_CLEAR / RLINE_QUIT. */
-static int ed_sigint_stage(editor_t *ed) {
-    g_stop_flag = 0; /* consumed here */
-    if (ed->line.len) {
-        ed_erase(ed, ed->line.len);
-        buf_clear(&ed->line);
-        ed->hist_pos = -1;
-        return RLINE_CLEAR;
-    }
-    return RLINE_QUIT;
-}
-
-static int ed_line(editor_t *ed) {
-    buf_clear(&ed->line);
-    ed->hist_pos = -1;
-    for (;;) {
-        unsigned char c;
-        int r = tty_read_byte(&ed->raw, &c);
-        if (r < 0) return ed_sigint_stage(ed);
-        if (r == 0) return RLINE_EOF;
-        if (c == '\n') return RLINE_SUBMIT;
-        if (c == 0x03) /* windows byte-mode ctrl-c: the same stage rule */
-            return ed_sigint_stage(ed);
-        if (c == '\r' || c == 0) continue; /* hygiene: CR dropped */
-        if (c == 0x04) {                   /* Ctrl-D: submit / EOF on empty */
-            if (ed->line.len) return RLINE_SUBMIT;
-            return RLINE_EOF;
-        }
-        if (c == 0x15) { /* Ctrl-U: kill the line */
-            ed_erase(ed, ed->line.len);
-            buf_clear(&ed->line);
-            continue;
-        }
-        if (c == 0x7f || c == 0x08) {
-            ed_backspace(ed);
-            continue;
-        }
-        if (c == 0x1b) { /* escape: arrow history, the rest swallowed */
-            unsigned char s1, s2;
-            if (tty_read_byte(&ed->raw, &s1) != 1) continue;
-            if (s1 != '[') continue;
-            if (tty_read_byte(&ed->raw, &s2) != 1) continue;
-            if (s2 == 'A') { /* up: older, clamped at the oldest */
-                int next = ed->hist_pos < 0 ? (int)ed->nhist - 1
-                                            : ed->hist_pos - 1;
-                if (next < 0) continue;
-                ed->hist_pos = next;
-                ed_set_line(ed, ed->hist[next], strlen(ed->hist[next]));
-            } else if (s2 == 'B' && ed->hist_pos >= 0) { /* down */
-                if ((size_t)ed->hist_pos + 1 >= ed->nhist) {
-                    ed->hist_pos = -1; /* back to the live line */
-                    ed_set_line(ed, "", 0);
-                } else {
-                    ed->hist_pos++;
-                    ed_set_line(ed, ed->hist[ed->hist_pos],
-                                strlen(ed->hist[ed->hist_pos]));
-                }
-            }
-            continue;
-        }
-        buf_append_byte(&ed->line, (char)c);
-        ed_echo(ed, (const char *)&c, 1);
-    }
-}
-
-static void ed_free(editor_t *ed) {
-    tty_raw_off(&ed->raw);
-    buf_free(&ed->line);
-    for (size_t i = 0; i < ed->nhist; i++) free(ed->hist[i]);
-    free(ed->hist);
-}
-
-/* ================= non-tty line reader ================= */
-
-typedef struct plain_reader {
-    int fd;
-    buf_t hold; /* bytes after the last \n of the previous chunk */
-} plain_reader_t;
-
-static int plain_line(plain_reader_t *pr, buf_t *line) {
-    buf_clear(line);
-    for (;;) {
-        /* serve from the hold buffer first */
-        for (size_t i = 0; i < pr->hold.len; i++) {
-            if (pr->hold.data[i] == '\n') {
-                buf_append(line, pr->hold.data, i);
-                memmove(pr->hold.data, pr->hold.data + i + 1,
-                        pr->hold.len - i - 1);
-                pr->hold.len -= i + 1;
-                goto served;
-            }
-        }
-        buf_append(line, pr->hold.data, pr->hold.len);
-        pr->hold.len = 0;
-        char tmp[4096];
-        ssize_t n = read(pr->fd, tmp, sizeof tmp);
-        if (n < 0) {
-            if (errno == EINTR) {
-                if (g_stop_flag) { /* the stage rule, plain variant */
-                    g_stop_flag = 0;
-                    if (line->len) return RLINE_CLEAR;
-                    return RLINE_QUIT;
-                }
-                continue;
-            }
-            return RLINE_EOF;
-        }
-        if (n == 0) {
-            if (line->len) return RLINE_SUBMIT; /* held fragment at EOF */
-            return RLINE_EOF;
-        }
-        for (ssize_t i = 0; i < n; i++) {
-            char c = tmp[i];
-            if (c == 0) return RLINE_BAD; /* NUL rejected */
-            if (c == '\r') continue;      /* hygiene: CR dropped */
-            buf_append_byte(&pr->hold, c);
-        }
-    }
-served:
-    return RLINE_SUBMIT;
-}
+/* (ED_SUBMIT/ED_EOF/ED_CLEAR/ED_QUIT/ED_BAD live in llmkit.h: the editor
+   is shared with mcp-repl, src/editor.c) */
 
 /* ================= session ================= */
 
@@ -459,18 +255,11 @@ int repl_run(const call_cfg_t *c, int in_fd, FILE *out, const char *exe_path,
 
     tty = isatty(in_fd);
     editor_t ed;
-    memset(&ed, 0, sizeof ed);
     plain_reader_t pr;
-    memset(&pr, 0, sizeof pr);
-    if (tty) {
-        ed.out = out;
-        ed.st = &st;
-        buf_init(&ed.line);
-        tty_raw_on(&ed.raw, in_fd);
-    } else {
-        pr.fd = in_fd;
-        buf_init(&pr.hold);
-    }
+    if (tty)
+        editor_init(&ed, out, in_fd, "> ");
+    else
+        plain_init(&pr, in_fd);
 
     int last_ending = EXIT_OK; /* EOF before any input exits 0 */
     bool need_rule = true;     /* rule vs no-rule prompt redraws */
@@ -483,39 +272,39 @@ int repl_run(const call_cfg_t *c, int in_fd, FILE *out, const char *exe_path,
            fresh prompt the line is empty by construction, so it quits */
         if (g_stop_flag) {
             g_stop_flag = 0;
-            r = RLINE_QUIT;
+            r = ED_QUIT;
             goto handled;
         }
         if (tty) {
             if (need_rule) draw_rule(&sink, '=');
             rwr_str(&sink, "> ");
             rwr_str(&sink, st.bold); /* the typed line is the user block */
-            r = ed_line(&ed);
+            r = editor_line(&ed);
             rwr_str(&sink, st.reset);
             rwr_str(&sink, "\n");
         } else {
             r = plain_line(&pr, &line);
         }
     handled:
-        if (r == RLINE_QUIT) { /* Ctrl-C at a clear prompt: exit 8 */
+        if (r == ED_QUIT) { /* Ctrl-C at a clear prompt: exit 8 */
             rc = EXIT_INTERRUPTED;
             goto done;
         }
-        if (r == RLINE_EOF) { /* EOF: the last ending's code */
+        if (r == ED_EOF) { /* EOF: the last ending's code */
             rc = last_ending;
             goto done;
         }
-        if (r == RLINE_BAD) {
+        if (r == ED_BAD) {
             render_error_line(&sink, EC_INVALID_RECORD,
                               "NUL byte in input line");
             rc = EXIT_INVALID_RECORD;
             goto done;
         }
-        if (r == RLINE_CLEAR) { /* discarded input, fresh prompt line */
+        if (r == ED_CLEAR) { /* discarded input, fresh prompt line */
             need_rule = false;
             continue;
         }
-        /* RLINE_SUBMIT: the editor owns its buffer, the loop works on
+        /* ED_SUBMIT: the editor owns its buffer, the loop works on
            line - transfer before the shared checks */
         if (tty) {
             buf_clear(&line);
@@ -533,7 +322,7 @@ int repl_run(const call_cfg_t *c, int in_fd, FILE *out, const char *exe_path,
             goto done;
         }
         need_rule = true;
-        if (tty) hist_push(&ed, line.data);
+        if (tty) editor_hist_push(&ed, line.data);
 
         if (!tty) render_user_block(&sink, line.data);
 
@@ -575,8 +364,8 @@ int repl_run(const call_cfg_t *c, int in_fd, FILE *out, const char *exe_path,
 
 done:
     buf_free(&line);
-    if (tty) ed_free(&ed);
-    else buf_free(&pr.hold);
+    if (tty) editor_free(&ed);
+    else plain_free(&pr);
     engine_free(e); /* process teardown: the mcp children die here */
     if (sink.io_fail) rc = EXIT_OUT_OF_CHANNEL;
     return rc;
