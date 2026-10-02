@@ -581,15 +581,22 @@ int http_perform(http_req_t *r) {
 
     curl_easy_setopt(c, CURLOPT_URL, r->url);
     curl_easy_setopt(c, CURLOPT_NOSIGNAL, 1L);
-    curl_easy_setopt(c, CURLOPT_POST, 1L);
-    curl_easy_setopt(c, CURLOPT_POSTFIELDS, r->body);
-    curl_easy_setopt(c, CURLOPT_POSTFIELDSIZE, (long)r->body_len);
+    if (r->is_get) { /* builtin-mcp web tools: GET, redirects followed */
+        curl_easy_setopt(c, CURLOPT_HTTPGET, 1L);
+        curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 1L);
+        curl_easy_setopt(c, CURLOPT_MAXREDIRS, 10L);
+    } else {
+        curl_easy_setopt(c, CURLOPT_POST, 1L);
+        curl_easy_setopt(c, CURLOPT_POSTFIELDS, r->body);
+        curl_easy_setopt(c, CURLOPT_POSTFIELDSIZE, (long)r->body_len);
+    }
     curl_easy_setopt(c, CURLOPT_HTTPHEADER, r->hdrs);
     curl_easy_setopt(c, CURLOPT_HEADERFUNCTION, hdr_cb);
     curl_easy_setopt(c, CURLOPT_HEADERDATA, &aux);
     curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, write_cb);
     curl_easy_setopt(c, CURLOPT_WRITEDATA, &aux);
-    curl_easy_setopt(c, CURLOPT_USERAGENT, "llmkit/" LLMKIT_VERSION);
+    curl_easy_setopt(c, CURLOPT_USERAGENT,
+                     r->ua ? r->ua : "llmkit/" LLMKIT_VERSION);
     curl_easy_setopt(c, CURLOPT_ACCEPT_ENCODING, "");
 
     if (r->connect_to > 0)

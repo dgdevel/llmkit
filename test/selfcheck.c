@@ -1388,6 +1388,272 @@ static void test_rpc_loop(void) {
     buf_free(&io.out);
 }
 
+/* ================= 8b. builtin-mcp server ================= */
+
+/* one tools/call round trip through the stdio loop; returns the text
+   content of the reply (malloc'd) */
+static char *bc_call(const char *tool, const char *args_json, bool *is_err) {
+    char req[2048];
+    snprintf(req, sizeof req,
+             "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\","
+             "\"params\":{\"name\":\"%s\",\"arguments\":%s}}",
+             tool, args_json);
+    loop_io_t io = { 0 };
+    buf_init(&io.out);
+    io.in = req;
+    rpc_handler_t h = { builtin_handle, NULL };
+    rpc_serve(&h, loop_read, loop_write, &io);
+    cJSON *r = cJSON_Parse(io.out.data);
+    char *out = NULL;
+    if (r) {
+        const cJSON *res = cJSON_GetObjectItemCaseSensitive(r, "result");
+        if (!res) {
+            out = strdup("(rpc error)");
+        } else {
+            const cJSON *content =
+                cJSON_GetObjectItemCaseSensitive(res, "content");
+            const cJSON *blk = content ? content->child : NULL;
+            const cJSON *txt = blk
+                ? cJSON_GetObjectItemCaseSensitive(blk, "text") : NULL;
+            out = strdup(cJSON_IsString(txt) ? txt->valuestring : "");
+            if (is_err)
+                *is_err = cJSON_IsTrue(
+                    cJSON_GetObjectItemCaseSensitive(res, "isError"));
+        }
+        cJSON_Delete(r);
+    }
+    buf_free(&io.out);
+    return out ? out : strdup("(no reply)");
+}
+
+static void test_builtin(void) {
+    /* regex engine */
+    char err[128] = "";
+    check(builtin_regex_match("a", "./abc.txt", NULL, 0),
+          "builtin: unanchored match");
+    check(!builtin_regex_match("^abc", "./abc.txt", NULL, 0),
+          "builtin: ^ anchors at start");
+    check(builtin_regex_match("txt$", "./abc.txt", NULL, 0),
+          "builtin: $ anchors at end");
+    check(builtin_regex_match("b[0-9]+x", "ab123x", NULL, 0),
+          "builtin: class with range");
+    check(builtin_regex_match("foo|bar", "zzbarzz", NULL, 0),
+          "builtin: alternation");
+    check(builtin_regex_match("(ab)+c", "xxababcxx", NULL, 0),
+          "builtin: group quantifier");
+    check(!builtin_regex_match("a{3}", "aa", NULL, 0) &&
+              builtin_regex_match("a{2,3}", "aa", NULL, 0),
+          "builtin: counted repetition");
+    check(builtin_regex_match("\\d+\\.\\d+", "v1.5", NULL, 0),
+          "builtin: escaped digit class");
+    check(builtin_regex_match("", "anything", NULL, 0),
+          "builtin: empty pattern matches all");
+    snprintf(err, sizeof err, "%s", "");
+    check(!builtin_regex_match("[a-", "x", err, sizeof err) && err[0],
+          "builtin: invalid pattern reports error");
+    snprintf(err, sizeof err, "%s", "");
+    check(!builtin_regex_match("a**", "x", err, sizeof err) && err[0],
+          "builtin: nested quantifier rejected");
+    check(builtin_regex_match("plain", "a plain match", NULL, 0),
+          "builtin: literal substring");
+
+    /* tools/list: every tool present, descriptions empty */
+    {
+        loop_io_t io = { 0 };
+        buf_init(&io.out);
+        io.in = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}";
+        rpc_handler_t h = { builtin_handle, NULL };
+        rpc_serve(&h, loop_read, loop_write, &io);
+        cJSON *r = cJSON_Parse(io.out.data);
+        check(r != NULL, "builtin: tools/list replies");
+        const cJSON *tools = r
+            ? cJSON_GetObjectItemCaseSensitive(
+                  cJSON_GetObjectItemCaseSensitive(r, "result"), "tools")
+            : NULL;
+        check(cJSON_IsArray(tools) && cJSON_GetArraySize(tools) == 7,
+              "builtin: seven tools listed");
+        const char *want[7] = { "web_search",   "web_fetch",  "files_list",
+                                "files_search", "file_read",  "file_create",
+                                "file_edit" };
+        bool names_ok = true, descs_empty = true, args_empty = true;
+        if (cJSON_IsArray(tools))
+            for (int i = 0; i < 7; i++) {
+                const cJSON *t = cJSON_GetArrayItem(tools, i);
+                const cJSON *nm = cJSON_GetObjectItemCaseSensitive(t, "name");
+                if (!cJSON_IsString(nm) || strcmp(nm->valuestring, want[i]))
+                    names_ok = false;
+                const cJSON *d =
+                    cJSON_GetObjectItemCaseSensitive(t, "description");
+                if (!cJSON_IsString(d) || d->valuestring[0])
+                    descs_empty = false;
+                const cJSON *schema =
+                    cJSON_GetObjectItemCaseSensitive(t, "inputSchema");
+                const cJSON *props = cJSON_GetObjectItemCaseSensitive(
+                    schema, "properties");
+                if (!cJSON_IsObject(props)) args_empty = false;
+                for (const cJSON *p = props ? props->child : NULL; p;
+                     p = p->next) {
+                    const cJSON *pd =
+                        cJSON_GetObjectItemCaseSensitive(p, "description");
+                    if (!cJSON_IsString(pd) || pd->valuestring[0])
+                        args_empty = false;
+                }
+            }
+        check(names_ok, "builtin: tool names in order");
+        check(descs_empty, "builtin: tool descriptions all empty");
+        check(args_empty, "builtin: argument descriptions all empty");
+        cJSON_Delete(r);
+        buf_free(&io.out);
+    }
+
+    /* file tool lifecycle */
+    const char *notes = "/tmp/llmkit-test-builtin/notes.txt";
+    system("rm -rf /tmp/llmkit-test-builtin");
+    bool ie = false;
+    char *t = bc_call("file_create",
+                      "{\"path\":\"/tmp/llmkit-test-builtin/notes.txt\","
+                      "\"content\":\"alpha\\nbeta\\ngamma\\n\"}",
+                      &ie);
+    check(!ie && t && strstr(t, "wrote 17 bytes"), "builtin: file_create");
+    free(t);
+
+    t = bc_call("file_create",
+                "{\"path\":\"/tmp/llmkit-test-builtin/notes.txt\","
+                "\"content\":\"x\"}", &ie);
+    check(ie && t && strstr(t, "already exists"),
+          "builtin: file_create refuses to overwrite");
+    free(t);
+
+    t = bc_call("file_read",
+                "{\"path\":\"/tmp/llmkit-test-builtin/notes.txt\","
+                "\"lines_offset\":1,\"lines_length\":2}", &ie);
+    check_str(t, "beta\ngamma", "builtin: file_read slice");
+    free(t);
+
+    t = bc_call("file_read",
+                "{\"path\":\"/tmp/llmkit-test-builtin/notes.txt\","
+                "\"lines_offset\":9,\"lines_length\":1}", &ie);
+    check(ie && t && strstr(t, "beyond end of file"),
+          "builtin: file_read offset past end");
+    free(t);
+
+    /* edit: stated line 5, real line 2 (within tolerance 3), multi line
+       replacement keeps the new block's relative indentation */
+    t = bc_call("file_edit",
+                "{\"path\":\"/tmp/llmkit-test-builtin/notes.txt\","
+                "\"oldString\":\"beta\\n  gamma\",\"newString\":\"b:\\n  x\","
+                "\"line_number\":5}", &ie);
+    check(!ie && t && strstr(t, "replaced lines 2-3"),
+          "builtin: file_edit tolerance + span");
+    free(t);
+    t = bc_call("file_read",
+                "{\"path\":\"/tmp/llmkit-test-builtin/notes.txt\","
+                "\"lines_offset\":1,\"lines_length\":2}", &ie);
+    check_str(t, "b:\n  x", "builtin: file_edit kept relative indent");
+    free(t);
+
+    t = bc_call("file_edit",
+                "{\"path\":\"/tmp/llmkit-test-builtin/notes.txt\","
+                "\"oldString\":\"nowhere to be found\",\"newString\":\"x\","
+                "\"line_number\":1}", &ie);
+    check(ie && t && strstr(t, "not found"),
+          "builtin: file_edit no match is an error");
+    free(t);
+
+    /* crlf endings survive an edit */
+    write_file("/tmp/llmkit-test-builtin/crlf.txt",
+               "crlf one\r\ncrlf two\r\n");
+    t = bc_call("file_edit",
+                "{\"path\":\"/tmp/llmkit-test-builtin/crlf.txt\","
+                "\"oldString\":\"crlf two\",\"newString\":\"second\","
+                "\"line_number\":2}", &ie);
+    check(!ie && t && strstr(t, "replaced line 2"),
+          "builtin: file_edit in a crlf file");
+    free(t);
+    {
+        char got[128] = "";
+        FILE *cf = fopen("/tmp/llmkit-test-builtin/crlf.txt", "rb");
+        if (cf) {
+            size_t n = fread(got, 1, sizeof got - 1, cf);
+            got[n] = '\0';
+            fclose(cf);
+        }
+        check(!strcmp(got, "crlf one\r\nsecond\r\n"),
+              "builtin: crlf terminators preserved");
+    }
+
+    t = bc_call("files_list", "{\"path\":\"/tmp/llmkit-test-builtin\","
+                              "\"regex\":\"notes\"}", &ie);
+    check(!ie && t && !strncmp(t, "rw- ", 4) && strstr(t, " 3 lines ") &&
+              strstr(t, notes),
+          "builtin: files_list line format");
+    free(t);
+
+    t = bc_call("files_search", "{\"path\":\"/tmp/llmkit-test-builtin\","
+                                "\"regex\":\"alpha|x$\"}", &ie);
+    check(!ie && t && strstr(t, "notes.txt") &&
+              strstr(t, "Matching lines: 1, 3"),
+          "builtin: files_search reports matching line numbers");
+    free(t);
+
+    t = bc_call("files_list", "{\"path\":\"/tmp/llmkit-test-builtin\","
+                              "\"regex\":\"[a-\"}", &ie);
+    check(ie && t && strstr(t, "invalid regex"),
+          "builtin: bad regex is an error");
+    free(t);
+
+    /* duckduckgo parser on a canned results page */
+    {
+        const char *ddg =
+            "<html><body><div class=\"result results_links\">"
+            "<h2><a rel=\"nofollow\" class=\"result__a\" "
+            "href=\"//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fone"
+            "&amp;rut=abc\">Example One</a></h2>"
+            "<a class=\"result__snippet\" href=\"//r\">The <b>first</b> "
+            "snippet</a></div>"
+            "<div class=\"result\"><h2><a class=\"result__a\" "
+            "href=\"https://example.com/two\">Example Two</a></h2></div>"
+            "</body></html>";
+        char *out = builtin_ddg_results(ddg, strlen(ddg));
+        check_str(out,
+                  "URL: https://example.com/one\n"
+                  "Description: The first snippet\n"
+                  "\n"
+                  "URL: https://example.com/two\n"
+                  "Description: Example Two\n",
+                  "builtin: ddg parse, redirect unwrap, snippet pairing");
+        free(out);
+    }
+
+    /* readability + markdown conversion on a canned page */
+    {
+        const char *page =
+            "<html><head><title>Demo Page</title></head><body>"
+            "<nav>nav junk</nav>"
+            "<div id=\"content\" class=\"article\">"
+            "<h1>Head One</h1>"
+            "<p>Intro with a <a href=\"https://e.com/d\">dest</a> and "
+            "<strong>bold</strong> text.</p>"
+            "<ul><li>one</li><li>two</li></ul>"
+            "<pre><code>line1\n  line2</code></pre>"
+            "<table><tr><th>a</th><th>b</th></tr>"
+            "<tr><td>1</td><td>2</td></tr></table>"
+            "</div><div class=\"footer\">footer junk</div></body></html>";
+        char *md = builtin_html_to_markdown(page, strlen(page));
+        check(md && strstr(md, "# Demo Page") &&
+              strstr(md, "# Head One") &&
+              strstr(md, "[dest](https://e.com/d)") &&
+              strstr(md, "**bold**") &&
+              strstr(md, "- one") && strstr(md, "- two") &&
+              strstr(md, "```\nline1\n  line2\n```") &&
+              strstr(md, "| a | b |") && strstr(md, "| 1 | 2 |"),
+              "builtin: html to markdown structure");
+        check(md && !strstr(md, "nav junk") && !strstr(md, "footer junk"),
+              "builtin: chrome stripped");
+        free(md);
+    }
+}
+
 
 /* ================= 9. stream parity + agent (localhost fake endpoint) ===== */
 
@@ -2805,6 +3071,8 @@ int main(void) {
     test_exit_codes();
     fprintf(stderr, "selfcheck: rpc loop\n");
     test_rpc_loop();
+    fprintf(stderr, "selfcheck: builtin-mcp\n");
+    test_builtin();
     fprintf(stderr, "selfcheck: mcp stdio client\n");
     test_mcp_stdio();
     fprintf(stderr, "selfcheck: mcp proxy\n");

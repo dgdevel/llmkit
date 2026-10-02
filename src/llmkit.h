@@ -196,6 +196,10 @@ typedef struct http_req {
     /* timeouts, seconds; <=0 means unset. whole-second options are floored */
     double connect_to, read_to, total_to;
     CURLcode curl_res; /* set when transport error */
+    /* GET mode: no POST (no body sent), redirects followed (builtin-mcp
+       web tools); the mcp transports always POST */
+    bool is_get;
+    const char *ua; /* user agent override, NULL = llmkit default */
 } http_req_t;
 
 /* 0 = 2xx, 1 = non-2xx (body captured), -1 = transport error */
@@ -609,6 +613,24 @@ int proxy_resolve_and_build(proxy_state_t *p); /* 0 ok, -1 fatal */
 int proxy_handle(void *ctx, const char *method, cJSON *params, cJSON *id,
                  cJSON **result_out, char **errmsg_out);
 
+/* ================= builtin internals (shared with the selfcheck) ======== */
+
+/* byte-oriented regex engine the builtin file tools use (subset: literals,
+   '.', classes, '^', '$', '|', '()', * + ? {n,m} greedy, \d \w \s and
+   negations, escaped metachars; unanchored search semantics). false on
+   invalid pattern (err filled) or no match. */
+bool builtin_regex_match(const char *pattern, const char *text,
+                         char *err, size_t errsz);
+/* readability-style reduction of an html page plus conversion to markdown;
+   returns a malloc'd string ("" on parse failure, never NULL) */
+char *builtin_html_to_markdown(const char *html, size_t n);
+/* duckduckgo html results page -> "URL:/Description:" blocks; malloc'd */
+char *builtin_ddg_results(const char *html, size_t n);
+/* the json-rpc method handler of `llmkit builtin-mcp` (selfcheck); ctx is
+   ignored */
+int builtin_handle(void *ctx, const char *method, cJSON *params, cJSON *id,
+                   cJSON **result_out, char **errmsg_out);
+
 /* ================= call.c ================= */
 
 /* parsed `llmkit call` command line; the parser owns CLI shape only
@@ -660,6 +682,7 @@ int repl_run(const call_cfg_t *c, int in_fd, FILE *out, const char *exe_path,
 int cmd_runner(void);
 int cmd_agent(const char *seed_path);
 int cmd_proxy(const char *config_path);
+int cmd_builtin(void);
 int cmd_call(int argc, char **argv);
 int cmd_repl(int argc, char **argv);
 int cmd_help(void);

@@ -1,6 +1,6 @@
 # llmkit
 
-A single static-purpose executable for llm interaction from the shell and from other programs. One binary, five commands:
+A single static-purpose executable for llm interaction from the shell and from other programs. One binary, six commands:
 
 | command | what it does |
 |---|---|
@@ -9,6 +9,7 @@ A single static-purpose executable for llm interaction from the shell and from o
 | `llmkit runner` | runs an llm conversation: jsonl records on stdin, jsonl records on stdout |
 | `llmkit agent-as-tool <seed.jsonl>` | exposes one agent conversation as a single `invoke` tool on a stdio mcp interface |
 | `llmkit mcp-proxy <config.jsonl>` | exposes a curated view (rename, redescribe, hide) of upstream mcp servers on stdio |
+| `llmkit builtin-mcp` | serves the built-in generic-use mcp tools (web search/fetch, file list/search/read/create/edit) on stdio |
 
 Written in C11. Talks to any openai-compatible endpoint (chat completions and responses apis) and any anthropic-compatible endpoint. Tools are mcp servers: `stdio`, `http` (streamable http) and `sse` (legacy) transports, in all current protocol revisions up to `2026-07-28`.
 
@@ -65,6 +66,14 @@ Tools: add a `tools` record before the `user` record -
 
 `llmkit call --mcp-proxy cfg.jsonl --terminal-tool fs.confirm` marks tools the same way from the command line; the answer is then the tool's text. `llmkit agent-as-tool` seeds honor the attribute too: the `invoke` reply is the terminal tool's answer.
 
+No external tool server at hand? `llmkit builtin-mcp` is one: seven generic-use tools (web search and fetch, file list/search/read/create/edit) served from the same binary, with every tool and argument description starting empty and editable in one block at the top of `src/builtin.c`:
+
+```json
+{"type":"tools","tools":[{"type":"stdio","name":"builtin","command_line":"llmkit builtin-mcp"}]}
+```
+
+See [docs/builtin-mcp.md](docs/builtin-mcp.md) for the tool contracts, response formats and the description editing spot.
+
 Runnable examples for every command live in [examples/](examples/) - see [docs/records.md](docs/records.md) for the minimal and complete form of each record.
 
 ## Command Line Reference
@@ -76,6 +85,7 @@ Runnable examples for every command live in [examples/](examples/) - see [docs/r
 | `llmkit runner` | none: jsonl records on stdin, jsonl records on stdout |
 | `llmkit agent-as-tool <seed.jsonl>` | the seed file |
 | `llmkit mcp-proxy <config.jsonl>` | the config file |
+| `llmkit builtin-mcp` | none: the built-in mcp tools on stdio |
 | `llmkit call <flags>` | flags below, `--prompt` required |
 | `llmkit repl <flags>` | flags below, no `--prompt` (the turns are typed) |
 | `llmkit help` | none: the usage text on stdout |

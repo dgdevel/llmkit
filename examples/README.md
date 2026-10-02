@@ -24,6 +24,7 @@ examples/
     |-- runner-steer.sh           steering: flush while a turn is in flight
     |-- agent-as-tool.sh          raw json-rpc over the stdio mcp interface
     |-- mcp-proxy.sh              raw json-rpc over the stdio mcp interface
+    |-- builtin-mcp.sh            raw json-rpc with the built-in mcp tools
     |-- call-minimal.sh           llmkit call: one prompt, plain text answer
     |-- call-prompt-stdin.sh      llmkit call with the prompt piped on stdin
     |-- call-anthropic.sh         llmkit call against the real anthropic api
@@ -53,9 +54,12 @@ in place).
 
 `mcp-proxy.sh` spawns `npx -y @modelcontextprotocol/server-filesystem /tmp`
 as its upstream server, so it needs node/npx (first run downloads the
-package). It never talks to an llm endpoint. `call-mcp-proxy.sh` and
-`call-terminal-tool.sh` spawn the same upstream through `--mcp-proxy` and
-additionally need the llm endpoint. The `repl-*.sh` scripts need the llm
+package). It never talks to an llm endpoint. `builtin-mcp.sh` drives the
+built-in tool server the same raw way: no dependencies, it writes a small
+`builtin-example.txt` in the working directory (and its `web_fetch` /
+`web_search` tools want network access when called). `call-mcp-proxy.sh`
+and `call-terminal-tool.sh` spawn the same upstream through `--mcp-proxy`
+and additionally need the llm endpoint. The `repl-*.sh` scripts need the llm
 endpoint; `repl-minimal.sh` wants an interactive terminal (the styled chat),
 while `repl-scripted.sh` pipes its turns and shows the plain non-tty
 rendering.

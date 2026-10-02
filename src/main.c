@@ -14,6 +14,8 @@ static int usage(FILE *out) {
           "                         tool on stdio\n"
           "  mcp-proxy <config>     expose a curated view of upstream mcp\n"
           "                         servers on stdio\n"
+          "  builtin-mcp            serve the built-in generic-use mcp\n"
+          "                         tools on stdio\n"
           "  call <flags>           one prompt in, one answer out: plain\n"
           "                         text on stdout\n"
           "  repl <flags>           interactive chat: type the turns, see\n"
@@ -50,6 +52,10 @@ int main(int argc, char **argv) {
     if (!strcmp(cmd, "mcp-proxy")) {
         if (argc != 3) return usage(stderr);
         return cmd_proxy(argv[2]);
+    }
+    if (!strcmp(cmd, "builtin-mcp")) {
+        if (argc != 2) return usage(stderr);
+        return cmd_builtin();
     }
     if (!strcmp(cmd, "call")) return cmd_call(argc, argv);
     if (!strcmp(cmd, "repl")) return cmd_repl(argc, argv);
