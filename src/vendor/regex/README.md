@@ -11,11 +11,17 @@ uses the libc one). Pinned, unmodified snapshot of openbsd `src`:
 - license: BSD-3 (Regents of the University of California / Henry Spencer,
   headers kept in each file)
 
-Compiled through `src/win_regex.c`, which `#include`s the .c files under
-`#ifdef _WIN32` and provides the three openbsd-libc bits mingw lacks
-(`reallocarray`, `strlcpy`, `_POSIX2_RE_DUP_MAX`) and the `-I` that makes
-their `<regex.h>` resolve to the vendored header comes from
-`tools/pkg/win.sh`. POSIX builds never compile anything here: plain `make`
+Compiled as four translation units of the windows build. The Makefile
+detects the mingw compiler target (`-dumpmachine`, so the cross build of
+`tools/pkg/win.sh` and a native msys2 `make` both qualify), adds the
+four .c files to the build and force-includes `src/win_regex_glue.h`
+(`-include`) into every unit: it provides the openbsd-libc bits mingw
+lacks (`reallocarray`, `strlcpy`, `_POSIX2_RE_DUP_MAX`) plus the
+`__BEGIN_DECLS`/`__END_DECLS` pair the vendored `<regex.h>` takes from
+openbsd's `<sys/cdefs.h>`. Separate units are not optional: `regex2.h`
+is a private header with no include guard and anonymous-struct typedefs,
+so it can be included once per unit only - an amalgamated single unit
+cannot compile. POSIX builds never compile anything here: plain `make`
 on linux/mac links the system regex.
 
 Differences to know about when patterns come from users or llms:

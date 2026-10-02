@@ -265,13 +265,16 @@ static char *push_literal(buf_t *lit, cJSON *vals, size_t argpos) {
     size_t b = 0, e = lit->len;
     while (b < e && lit->data[b] == ' ') b++;
     while (e > b && lit->data[e - 1] == ' ') e--;
-    if (b == e) return syn_err("argument %zu is empty", argpos);
+    if (b == e)
+        return syn_err("argument %lu is empty",
+                       (unsigned long)argpos);
     char save = lit->data[e];
     lit->data[e] = '\0';
     cJSON *v = cJSON_Parse(lit->data + b);
     lit->data[e] = save;
     if (!v)
-        return syn_err("argument %zu is not a json literal", argpos);
+        return syn_err("argument %lu is not a json literal",
+                       (unsigned long)argpos);
     cJSON_AddItemToArray(vals, v);
     return NULL;
 }
@@ -284,12 +287,13 @@ static char *scan_string(const char **pp, buf_t *lit, size_t argpos) {
     for (;;) {
         char sc = *p;
         if (sc == '\0' || sc == '\n')
-            return syn_err("unterminated string in argument %zu", argpos);
+            return syn_err("unterminated string in argument %lu",
+                           (unsigned long)argpos);
         buf_append_byte(lit, *p++);
         if (sc == '\\') {
             if (*p == '\0' || *p == '\n')
-                return syn_err("unterminated string in argument %zu",
-                               argpos);
+                return syn_err("unterminated string in argument %lu",
+                               (unsigned long)argpos);
             buf_append_byte(lit, *p++);
         } else if (sc == '"') {
             *pp = p;
@@ -306,7 +310,8 @@ static char *scan_container(const char **pp, buf_t *lit, size_t argpos) {
     do {
         char ic = *p;
         if (ic == '\0' || ic == '\n')
-            return syn_err("unbalanced brackets in argument %zu", argpos);
+            return syn_err("unbalanced brackets in argument %lu",
+                           (unsigned long)argpos);
         if (ic == '"') {
             char *e = scan_string(&p, lit, argpos);
             if (e) return e;
@@ -422,7 +427,8 @@ char *mcp_repl_bind(const cJSON *tool, const cJSON *vals, cJSON **args_out) {
     size_t nprops = cJSON_IsObject(props) ? cJSON_GetArraySize(props) : 0;
     size_t nvals = cJSON_IsArray(vals) ? cJSON_GetArraySize(vals) : 0;
     if (nvals > nprops) {
-        return syn_err("%zu arguments, the tool takes %zu", nvals, nprops);
+        return syn_err("%lu arguments, the tool takes %lu",
+                       (unsigned long)nvals, (unsigned long)nprops);
     }
     cJSON *args = cJSON_CreateObject();
     const cJSON *v = vals ? vals->child : NULL;

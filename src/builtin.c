@@ -33,8 +33,9 @@
 
 /* posix regcomp for the file tool patterns. mingw ships no <regex.h>:
    there the vendored openbsd implementation is compiled in (src/
-   vendor/regex, pulled in by src/win_regex.c) and this include reaches
-   its header through the -I that tools/pkg/win.sh adds. */
+   vendor/regex, added by the Makefile's mingw detection, its libc shims
+   force-included from src/win_regex_glue.h) and this include reaches
+   its header directly. */
 #ifdef _WIN32
 #include "vendor/regex/regex.h"
 #else

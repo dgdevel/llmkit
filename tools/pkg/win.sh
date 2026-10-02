@@ -64,9 +64,10 @@ CC="$cc" AR="$trip-ar" sh tools/pkg/cjson.sh
 # ---- build -------------------------------------------------------------------
 rm -f llmkit llmkit.exe test/selfcheck test/selfcheck.exe  # no make clean: must not wipe dist/
 # curl's static needs: ws2_32 (winsock), crypt32+secur32 (schannel/sspi),
-# bcrypt, advapi32, iphlpapi (if_nametoindex); -Isrc/vendor/regex makes
-# <regex.h> resolve to the vendored openbsd header, mingw ships none
-make "VERSION=$VER" CC="$cc" "EXTRA_CFLAGS=-static -D__USE_MINGW_ANSI_STDIO=1 -DCURL_STATICLIB -I/tmp/curlwin/include -I/tmp/cj/include -Isrc/vendor/regex" "LDLIBS=/tmp/curlwin/lib/libcurl.a /tmp/cj/libcjson.a -lws2_32 -lcrypt32 -lsecur32 -lbcrypt -ladvapi32 -liphlpapi -lwinpthread"
+# bcrypt, advapi32, iphlpapi (if_nametoindex). the vendored openbsd regex
+# (mingw ships no <regex.h>) is detected from CC and pulled in by the
+# Makefile itself: its own translation units, glue force-included
+make "VERSION=$VER" CC="$cc" "EXTRA_CFLAGS=-static -D__USE_MINGW_ANSI_STDIO=1 -DCURL_STATICLIB -I/tmp/curlwin/include -I/tmp/cj/include" "LDLIBS=/tmp/curlwin/lib/libcurl.a /tmp/cj/libcjson.a -lws2_32 -lcrypt32 -lsecur32 -lbcrypt -ladvapi32 -liphlpapi -lwinpthread"
 exe=llmkit.exe
 [ -f "$exe" ] || exe=llmkit
 # a PE binary does not run on the linux host - the stamp check survives

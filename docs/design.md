@@ -668,7 +668,12 @@ validation), `src/wire_openai.c`, `src/wire_anthropic.c`, `src/sse.c`,
 `src/editor.c` (the shared line editor, plain reader, wall-clock stamp),
 `src/repl.c` (repl session loop, display sink),
 `src/mcprepl.c` (mcp-repl session, call syntax, console rendering).
-Link flags: `-lcjson -lcurl`.
+The windows build adds the vendored openbsd regex (mingw ships no
+`<regex.h>`): the Makefile detects the mingw compiler target, compiles
+`src/vendor/regex/*.c` as their own translation units (`regex2.h` is a
+private header with no include guard - one amalgamated unit cannot
+compile) and force-includes `src/win_regex_glue.h` into every unit for
+the openbsd-libc bits mingw lacks. Link flags: `-lcjson -lcurl`.
 
 ## 15. testing
 

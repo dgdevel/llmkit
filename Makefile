@@ -14,10 +14,23 @@ endif
 
 SRC  = src/buf.c src/sse.c src/platform.c src/jsonl.c src/wire_openai.c \
        src/wire_anthropic.c src/engine.c src/mcp.c src/agent.c src/proxy.c \
-       src/builtin.c src/call.c src/editor.c src/repl.c src/mcprepl.c \
-       src/win_regex.c
+       src/builtin.c src/call.c src/editor.c src/repl.c src/mcprepl.c
 MAIN = src/main.c
 TEST = test/selfcheck.c
+
+# the vendored openbsd regex (src/vendor/regex): windows only - mingw-w64
+# ships no <regex.h>, posix links the libc one. detected from the compiler
+# target, so the cross build (tools/pkg/win.sh) and a native msys2 make
+# get it alike. the sources are separate translation units (regex2.h has
+# no include guard - one amalgamated unit cannot compile) and cannot be
+# modified, so their libc shims are force-included per unit from
+# src/win_regex_glue.h.
+host := $(shell $(CC) -dumpmachine 2>/dev/null)
+ifneq (,$(findstring mingw,$(host)))
+SRC += src/vendor/regex/regcomp.c src/vendor/regex/regexec.c \
+       src/vendor/regex/regerror.c src/vendor/regex/regfree.c
+CFLAGS += -Isrc/vendor/regex -include src/win_regex_glue.h
+endif
 
 all: llmkit
 
