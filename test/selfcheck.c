@@ -1446,14 +1446,23 @@ static void test_builtin(void) {
           "builtin: counted repetition");
     check(builtin_regex_match("\\d+\\.\\d+", "v1.5", NULL, 0),
           "builtin: escaped digit class");
+    check(builtin_regex_match("\\w+=\\w+", "k=v", NULL, 0),
+          "builtin: escaped word class");
+    check(builtin_regex_match("(?:ab)+c", "xxababcxx", NULL, 0),
+          "builtin: non-capturing group");
+    check(builtin_regex_match("[[:alpha:]]{3}", "x abc y", NULL, 0),
+          "builtin: posix bracket class");
+    check(!builtin_regex_match("^[^0-9]*$", "a1", NULL, 0) &&
+              builtin_regex_match("^[^0-9]*$", "ab", NULL, 0),
+          "builtin: negated class");
     check(builtin_regex_match("", "anything", NULL, 0),
           "builtin: empty pattern matches all");
     snprintf(err, sizeof err, "%s", "");
     check(!builtin_regex_match("[a-", "x", err, sizeof err) && err[0],
           "builtin: invalid pattern reports error");
     snprintf(err, sizeof err, "%s", "");
-    check(!builtin_regex_match("a**", "x", err, sizeof err) && err[0],
-          "builtin: nested quantifier rejected");
+    check(!builtin_regex_match("a(", "x", err, sizeof err) && err[0],
+          "builtin: unbalanced parenthesis rejected");
     check(builtin_regex_match("plain", "a plain match", NULL, 0),
           "builtin: literal substring");
 

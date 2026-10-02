@@ -615,10 +615,11 @@ int proxy_handle(void *ctx, const char *method, cJSON *params, cJSON *id,
 
 /* ================= builtin internals (shared with the selfcheck) ======== */
 
-/* byte-oriented regex engine the builtin file tools use (subset: literals,
-   '.', classes, '^', '$', '|', '()', * + ? {n,m} greedy, \d \w \s and
-   negations, escaped metachars; unanchored search semantics). false on
-   invalid pattern (err filled) or no match. */
+/* posix ere match the builtin file tools use (libc regcomp; the windows
+   build compiles the vendored openbsd one). \d \w \s and negations,
+   \n \t \r \f \v and (?:...) groups are translated to plain ere;
+   unanchored search semantics. false on invalid pattern (err filled)
+   or no match. */
 bool builtin_regex_match(const char *pattern, const char *text,
                          char *err, size_t errsz);
 /* readability-style reduction of an html page plus conversion to markdown;

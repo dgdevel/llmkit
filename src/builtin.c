@@ -31,6 +31,16 @@
 #define BM_LSTAT lstat
 #endif
 
+/* posix regcomp for the file tool patterns. mingw ships no <regex.h>:
+   there the vendored openbsd implementation is compiled in (src/
+   vendor/regex, pulled in by src/win_regex.c) and this include reaches
+   its header through the -I that tools/pkg/win.sh adds. */
+#ifdef _WIN32
+#include "vendor/regex/regex.h"
+#else
+#include <regex.h>
+#endif
+
 /* ===================================================================== */
 /* ============== DESCRIPTIONS - the one place to edit them ============= */
 /*                                                                       */
@@ -297,609 +307,144 @@ static void pct_decode(buf_t *out, const char *s, size_t n) {
     }
 }
 
-/* ================= regex engine ================= */
-/* byte-oriented backtracking matcher. supported: literals, '.', [...] with
-   ranges and negation, '^', '$', '|', '(...)' and '(?:...)', greedy
-   '*', '+', '?', '{n}', '{n,}', '{n,m}', the classes \d \w \s and their
-   negations, and escaped metacharacters. search semantics: a match
-   anywhere in the subject counts. no backreferences, no lookahead, no
-   case folding. a step budget keeps pathological patterns from hanging
-   the server (they report no match instead). */
+/* ================= regex (posix ere + \d\w\s sugar) ================= */
+/* the file tools match posix ere via the libc regcomp (the windows build
+   compiles openbsd's implementation, vendored in src/vendor/regex). the
+   sugar \d \w \s, their negations and the escapes \n \t \r \f \v are
+   translated below into plain ere so the semantics stay byte-oriented
+   whatever the locale, and (?:...) becomes (...) because ere has no
+   non-capturing groups. no step budget: a pathological pattern can be
+   slow, accepted. */
 
-enum {
-    RX_CHAR, RX_ANY, RX_CLASS, RX_BOL, RX_EOL, RX_JMP, RX_SPLIT, RX_MATCH
-};
+static const char RX_WS[] = " \t\r\n\f\v";
 
-typedef struct rins {
-    int op;
-    unsigned char ch;
-    int cls; /* RX_CLASS: index into rx_t classes */
-    int a, b; /* jump targets */
-} rins_t;
-
-typedef struct rxclass {
-    unsigned char bits[32];
-    bool neg;
-} rxclass_t;
-
-typedef struct rx {
-    rins_t *prog;
-    size_t n, cap;
-    rxclass_t *cls;
-    size_t ncls, capcls;
-} rx_t;
-
-enum { A_EMPTY, A_CHAR, A_CLASS, A_ANY, A_BOL, A_EOL, A_CAT, A_ALT, A_REP };
-
-typedef struct anode {
-    int t;
-    unsigned char ch; /* A_CHAR */
-    int cls;          /* A_CLASS */
-    struct anode *l, *r;
-    long lo, hi; /* A_REP: hi = -1 means open ended */
-} anode_t;
-
-typedef struct rxp {
-    const char *p;
-    rx_t *rx;
-    anode_t *arena;
-    size_t narena, caparena;
-    char err[96];
-    bool failed;
-} rxp_t;
-
-static void cls_set(rxclass_t *c, unsigned char ch) {
-    c->bits[ch >> 3] |= (unsigned char)(1u << (ch & 7));
-}
-
-static bool cls_has(const rxclass_t *c, unsigned char ch) {
-    bool in = (c->bits[ch >> 3] >> (ch & 7)) & 1;
-    return c->neg ? !in : in;
-}
-
-static void cls_range(rxclass_t *c, unsigned lo, unsigned hi) {
-    for (unsigned k = lo; k <= hi; k++) cls_set(c, (unsigned char)k);
-}
-
-static int rx_emit(rx_t *rx, int op) {
-    if (rx->n == rx->cap) {
-        rx->cap = rx->cap ? rx->cap * 2 : 64;
-        rx->prog = realloc(rx->prog, rx->cap * sizeof *rx->prog);
-    }
-    rins_t *in = &rx->prog[rx->n];
-    memset(in, 0, sizeof *in);
-    in->op = op;
-    return (int)rx->n++;
-}
-
-static int rx_addclass(rx_t *rx, rxclass_t *c) {
-    if (rx->ncls == rx->capcls) {
-        rx->capcls = rx->capcls ? rx->capcls * 2 : 8;
-        rx->cls = realloc(rx->cls, rx->capcls * sizeof *rx->cls);
-    }
-    rx->cls[rx->ncls] = *c;
-    return (int)rx->ncls++;
-}
-
-static anode_t *an_new(rxp_t *x, int t) {
-    if (x->narena == x->caparena) {
-        x->caparena = x->caparena ? x->caparena * 2 : 32;
-        x->arena = realloc(x->arena, x->caparena * sizeof *x->arena);
-    }
-    anode_t *a = &x->arena[x->narena++];
-    memset(a, 0, sizeof *a);
-    a->t = t;
-    return a;
-}
-
-static anode_t *p_alt(rxp_t *x);
-static anode_t *p_rep(rxp_t *x);
-
-static anode_t *p_cat(rxp_t *x) {
-    anode_t *res = NULL;
-    while (*x->p && *x->p != '|' && *x->p != ')') {
-        anode_t *a = p_rep(x);
-        if (!a) return NULL;
-        if (res) {
-            anode_t *c = an_new(x, A_CAT);
-            c->l = res;
-            c->r = a;
-            res = c;
-        } else {
-            res = a;
-        }
-    }
-    return res ? res : an_new(x, A_EMPTY);
-}
-
-/* '{' quantifier; x->p points at '{'. restores position when invalid */
-static bool parse_braces(rxp_t *x, long *lo, long *hi) {
-    const char *p = x->p + 1;
-    if (!isdigit((unsigned char)*p)) return false;
-    long n = 0;
-    while (isdigit((unsigned char)*p)) {
-        n = n * 10 + (*p - '0');
-        if (n > 1000) return false;
-        p++;
-    }
-    if (*p == '}') {
-        *lo = *hi = n;
-        x->p = p + 1;
-        return true;
-    }
-    if (*p != ',') return false;
-    p++;
-    if (*p == '}') {
-        *lo = n;
-        *hi = -1;
-        x->p = p + 1;
-        return true;
-    }
-    if (!isdigit((unsigned char)*p)) return false;
-    long m = 0;
-    while (isdigit((unsigned char)*p)) {
-        m = m * 10 + (*p - '0');
-        if (m > 1000) return false;
-        p++;
-    }
-    if (*p != '}' || m < n) return false;
-    *lo = n;
-    *hi = m;
-    x->p = p + 1;
-    return true;
-}
-
-static anode_t *p_rep(rxp_t *x) {
-    anode_t *a = NULL;
-    /* atom */
-    char c = *x->p;
-    if (c == '(') {
-        x->p++;
-        if (x->p[0] == '?' && x->p[1] == ':') x->p += 2; /* non-capturing */
-        else if (x->p[0] == '?') {
-            snprintf(x->err, sizeof x->err, "unsupported group syntax");
-            x->failed = true;
-            return NULL;
-        }
-        a = p_alt(x);
-        if (!a) return NULL;
-        if (*x->p != ')') {
-            snprintf(x->err, sizeof x->err, "unbalanced parenthesis");
-            x->failed = true;
-            return NULL;
-        }
-        x->p++;
-    } else if (c == '[') {
-        x->p++;
-        rxclass_t cl;
-        memset(&cl, 0, sizeof cl);
-        if (*x->p == '^') {
-            cl.neg = true;
-            x->p++;
-        }
-        bool first = true;
-        for (;;) {
-            if (!*x->p) {
-                snprintf(x->err, sizeof x->err, "unterminated character class");
-                x->failed = true;
-                return NULL;
+/* translate the sugar into ere; returns a malloc'd pattern. class
+   members are buffered so that ']' members can be re-emitted first:
+   []...] is the only posix-portable spelling of a class containing ']'
+   (glibc accepts \], posix does not). */
+static char *rx_ere(const char *pat) {
+    buf_t b;
+    buf_init(&b);
+    bool in_cls = false, first = false, neg = false;
+    buf_t head, cls; /* ']' members / the rest, in order */
+    buf_init(&head);
+    buf_init(&cls);
+    for (const char *p = pat; *p; p++) {
+        char c = *p;
+        if (!in_cls) {
+            if (c == '[') {
+                in_cls = true;
+                first = true;
+                neg = false;
+                buf_clear(&head);
+                buf_clear(&cls);
+                continue; /* emitted when the class closes */
+            } else if (c == '(' && p[1] == '?' && p[2] == ':') {
+                buf_append_byte(&b, '(');
+                p += 2;
+                continue;
+            } else if (c == '\\' && p[1]) {
+                char e = p[1];
+                if (e == 'd') buf_append_str(&b, "[0-9]");
+                else if (e == 'D') buf_append_str(&b, "[^0-9]");
+                else if (e == 'w') buf_append_str(&b, "[A-Za-z0-9_]");
+                else if (e == 'W') buf_append_str(&b, "[^A-Za-z0-9_]");
+                else if (e == 's') buf_appendf(&b, "[%s]", RX_WS);
+                else if (e == 'S') buf_appendf(&b, "[^%s]", RX_WS);
+                else if (e == 'n') buf_append_byte(&b, '\n');
+                else if (e == 't') buf_append_byte(&b, '\t');
+                else if (e == 'r') buf_append_byte(&b, '\r');
+                else if (e == 'f') buf_append_byte(&b, '\f');
+                else if (e == 'v') buf_append_byte(&b, '\v');
+                else buf_appendf(&b, "\\%c", e); /* escaped metachar */
+                p++;
+                continue;
             }
-            unsigned char ch = (unsigned char)*x->p;
-            if (ch == ']' && !first) {
-                x->p++;
-                break;
-            }
-            first = false;
-            unsigned lo;
-            if (ch == '\\') {
-                x->p++;
-                char e = *x->p;
-                if (!e) {
-                    snprintf(x->err, sizeof x->err, "dangling escape");
-                    x->failed = true;
-                    return NULL;
-                }
-                x->p++;
-                if (e == 'd') { cls_range(&cl, '0', '9'); lo = 256; }
-                else if (e == 'w') {
-                    cls_range(&cl, 'a', 'z');
-                    cls_range(&cl, 'A', 'Z');
-                    cls_range(&cl, '0', '9');
-                    cls_set(&cl, '_');
-                    lo = 256;
-                } else if (e == 's') {
-                    cls_set(&cl, ' ');
-                    cls_set(&cl, '\t');
-                    cls_set(&cl, '\r');
-                    cls_set(&cl, '\n');
-                    cls_set(&cl, '\f');
-                    cls_set(&cl, '\v');
-                    lo = 256;
-                } else {
-                    lo = (unsigned char)e;
-                    cls_set(&cl, (unsigned char)e);
-                }
-            } else {
-                lo = ch;
-                cls_set(&cl, ch);
-                x->p++;
-            }
-            if (lo != 256 && x->p[0] == '-' && x->p[1] && x->p[1] != ']') {
-                x->p++;
-                unsigned hi2;
-                if (*x->p == '\\') {
-                    x->p++;
-                    char e = *x->p++;
-                    if (!e || isalnum((unsigned char)e)) {
-                        snprintf(x->err, sizeof x->err,
-                                 "invalid range endpoint");
-                        x->failed = true;
-                        return NULL;
-                    }
-                    hi2 = (unsigned char)e;
-                } else {
-                    hi2 = (unsigned char)*x->p++;
-                }
-                if (hi2 < lo) {
-                    snprintf(x->err, sizeof x->err, "invalid range");
-                    x->failed = true;
-                    return NULL;
-                }
-                cls_range(&cl, lo, hi2);
-            }
-        }
-        anode_t *n = an_new(x, A_CLASS);
-        n->cls = rx_addclass(x->rx, &cl);
-        a = n;
-    } else if (c == '.') {
-        x->p++;
-        a = an_new(x, A_ANY);
-    } else if (c == '^') {
-        x->p++;
-        a = an_new(x, A_BOL);
-    } else if (c == '$') {
-        x->p++;
-        a = an_new(x, A_EOL);
-    } else if (c == '\\') {
-        x->p++;
-        char e = *x->p;
-        if (!e) {
-            snprintf(x->err, sizeof x->err, "dangling escape");
-            x->failed = true;
-            return NULL;
-        }
-        x->p++;
-        if (e == 'd' || e == 'w' || e == 's' || e == 'D' || e == 'W' ||
-            e == 'S') {
-            rxclass_t cl;
-            memset(&cl, 0, sizeof cl);
-            if (e == 'd' || e == 'D') cls_range(&cl, '0', '9');
-            else if (e == 'w' || e == 'W') {
-                cls_range(&cl, 'a', 'z');
-                cls_range(&cl, 'A', 'Z');
-                cls_range(&cl, '0', '9');
-                cls_set(&cl, '_');
-            } else {
-                cls_set(&cl, ' ');
-                cls_set(&cl, '\t');
-                cls_set(&cl, '\r');
-                cls_set(&cl, '\n');
-                cls_set(&cl, '\f');
-                cls_set(&cl, '\v');
-            }
-            cl.neg = e == 'D' || e == 'W' || e == 'S';
-            anode_t *n = an_new(x, A_CLASS);
-            n->cls = rx_addclass(x->rx, &cl);
-            a = n;
-        } else if (e == 'n' || e == 't' || e == 'r' || e == 'f' || e == 'v') {
-            anode_t *n = an_new(x, A_CHAR);
-            n->ch = (unsigned char)(e == 'n'   ? '\n'
-                                    : e == 't' ? '\t'
-                                    : e == 'r' ? '\r'
-                                    : e == 'f' ? '\f'
-                                               : '\v');
-            a = n;
-        } else if (isalnum((unsigned char)e)) {
-            snprintf(x->err, sizeof x->err, "unknown escape '\\%c'", e);
-            x->failed = true;
-            return NULL;
-        } else {
-            anode_t *n = an_new(x, A_CHAR);
-            n->ch = (unsigned char)e;
-            a = n;
-        }
-    } else if (c == '*' || c == '+' || c == '?') {
-        snprintf(x->err, sizeof x->err, "quantifier without operand");
-        x->failed = true;
-        return NULL;
-    } else {
-        x->p++;
-        anode_t *n = an_new(x, A_CHAR);
-        n->ch = (unsigned char)c;
-        a = n;
-    }
-
-    /* quantifiers */
-    for (;;) {
-        char q = *x->p;
-        if (q != '*' && q != '+' && q != '?' && q != '{') break;
-        if (q == '{') {
-            long lo, hi;
-            if (!parse_braces(x, &lo, &hi)) break; /* literal '{' */
-            if (a->t == A_REP) {
-                snprintf(x->err, sizeof x->err, "nested quantifier");
-                x->failed = true;
-                return NULL;
-            }
-            anode_t *r = an_new(x, A_REP);
-            r->l = a;
-            r->lo = lo;
-            r->hi = hi;
-            a = r;
+            buf_append_byte(&b, c);
             continue;
         }
-        x->p++;
-        if (a->t == A_REP) {
-            snprintf(x->err, sizeof x->err, "nested quantifier");
-            x->failed = true;
-            return NULL;
+        /* inside [...]: posix [[:alpha:]] classes pass through untouched */
+        if (c == '[' && p[1] == ':') {
+            const char *e = strstr(p + 2, ":]");
+            if (e) {
+                buf_append(&cls, p, (size_t)(e - p) + 2);
+                p = e + 1;
+                first = false;
+                continue;
+            }
         }
-        anode_t *r = an_new(x, A_REP);
-        r->l = a;
-        if (q == '*') {
-            r->lo = 0;
-            r->hi = -1;
-        } else if (q == '+') {
-            r->lo = 1;
-            r->hi = -1;
+        if (c == ']' && !first) { /* close the class */
+            buf_append_byte(&b, '[');
+            if (neg) buf_append_byte(&b, '^');
+            buf_append(&b, head.data ? head.data : "", head.len);
+            buf_append(&b, cls.data ? cls.data : "", cls.len);
+            buf_append_byte(&b, ']');
+            in_cls = false;
+        } else if (c == '\\' && p[1]) {
+            char e = *++p;
+            if (e == 'd') buf_append_str(&cls, "0-9");
+            else if (e == 'w') buf_append_str(&cls, "A-Za-z0-9_");
+            else if (e == 's') buf_append_str(&cls, RX_WS);
+            else if (e == ']') buf_append_byte(&head, ']');
+            else if (e == '\\' || e == '^' || e == '-')
+                buf_appendf(&cls, "\\%c", e);
+            else buf_append_byte(&cls, (unsigned char)e); /* plain member */
+            first = false;
+        } else if (c == '^' && first && !neg) {
+            neg = true; /* ']' right after stays a literal member */
         } else {
-            r->lo = 0;
-            r->hi = 1;
+            if (c == ']') buf_append_byte(&head, ']'); /* []...] */
+            else buf_append_byte(&cls, c);
+            first = false;
         }
-        a = r;
     }
-    return a;
+    if (in_cls) { /* unterminated class: emit the parts, regcomp reports */
+        buf_append_byte(&b, '[');
+        if (neg) buf_append_byte(&b, '^');
+        buf_append(&b, head.data ? head.data : "", head.len);
+        buf_append(&b, cls.data ? cls.data : "", cls.len);
+    }
+    buf_free(&head);
+    buf_free(&cls);
+    if (!b.len) buf_append_str(&b, ".*"); /* empty pattern matches all */
+    return buf_steal(&b, NULL);
 }
 
-static anode_t *p_alt(rxp_t *x) {
-    anode_t *a = p_cat(x);
-    if (!a) return NULL;
-    if (*x->p != '|') return a;
-    x->p++;
-    anode_t *b = p_alt(x);
-    if (!b) return NULL;
-    anode_t *al = an_new(x, A_ALT);
-    al->l = a;
-    al->r = b;
-    return al;
+/* compile a pattern for the file tools; false + err on invalid syntax */
+static bool rx_compile(regex_t *rx, const char *pattern, char *err,
+                       size_t errsz) {
+    char *ere = rx_ere(pattern);
+    int rc = regcomp(rx, ere, REG_EXTENDED | REG_NOSUB);
+    if (rc) {
+        char rxe[128];
+        regerror(rc, rx, rxe, sizeof rxe);
+        snprintf(err, errsz, "invalid regex: %s", rxe);
+    }
+    free(ere);
+    return rc == 0;
 }
 
-static void emit_node(rxp_t *x, anode_t *a) {
-    rx_t *rx = x->rx;
-    if (rx->n > 20000) {
-        if (!x->failed) {
-            snprintf(x->err, sizeof x->err, "pattern too large");
-            x->failed = true;
-        }
-        return;
-    }
-    switch (a->t) {
-    case A_EMPTY:
-        break;
-    case A_CHAR: {
-        int i = rx_emit(rx, RX_CHAR);
-        rx->prog[i].ch = a->ch;
-        break;
-    }
-    case A_CLASS: {
-        int i = rx_emit(rx, RX_CLASS);
-        rx->prog[i].cls = a->cls;
-        break;
-    }
-    case A_ANY:
-        rx_emit(rx, RX_ANY);
-        break;
-    case A_BOL:
-        rx_emit(rx, RX_BOL);
-        break;
-    case A_EOL:
-        rx_emit(rx, RX_EOL);
-        break;
-    case A_CAT:
-        emit_node(x, a->l);
-        emit_node(x, a->r);
-        break;
-    case A_ALT: {
-        int sp = rx_emit(rx, RX_SPLIT);
-        emit_node(x, a->l);
-        int jm = rx_emit(rx, RX_JMP);
-        rx->prog[sp].a = sp + 1;
-        rx->prog[sp].b = (int)rx->n;
-        emit_node(x, a->r);
-        rx->prog[jm].a = (int)rx->n;
-        break;
-    }
-    case A_REP: {
-        if (a->l->t == A_EMPTY && (a->hi < 0 || a->hi > 1)) {
-            /* infinite loop on empty body: treat as plain empty */
-            break;
-        }
-        if (a->lo == 0 && a->hi == 1) {
-            int sp = rx_emit(rx, RX_SPLIT);
-            rx->prog[sp].a = sp + 1;
-            emit_node(x, a->l);
-            rx->prog[sp].b = (int)rx->n;
-        } else if (a->lo == 0 && a->hi < 0) {
-            int sp = rx_emit(rx, RX_SPLIT);
-            rx->prog[sp].a = sp + 1;
-            emit_node(x, a->l);
-            int jm = rx_emit(rx, RX_JMP);
-            rx->prog[jm].a = sp;
-            rx->prog[sp].b = (int)rx->n;
-        } else if (a->lo == 1 && a->hi < 0) {
-            int start = (int)rx->n;
-            emit_node(x, a->l);
-            int sp = rx_emit(rx, RX_SPLIT);
-            rx->prog[sp].a = start;
-            rx->prog[sp].b = (int)rx->n;
-        } else if (a->hi < 0) { /* {n,} */
-            for (long k = 0; k + 1 < a->lo && !x->failed; k++)
-                emit_node(x, a->l);
-            int start = (int)rx->n;
-            emit_node(x, a->l);
-            int sp = rx_emit(rx, RX_SPLIT);
-            rx->prog[sp].a = start;
-            rx->prog[sp].b = (int)rx->n;
-        } else {
-            for (long k = 0; k < a->lo && !x->failed; k++)
-                emit_node(x, a->l);
-            for (long k = a->lo; k < a->hi && !x->failed; k++) {
-                int sp = rx_emit(rx, RX_SPLIT);
-                rx->prog[sp].a = sp + 1;
-                emit_node(x, a->l);
-                rx->prog[sp].b = (int)rx->n;
-            }
-        }
-        break;
-    }
-    }
-}
-
-static bool rx_compile(rx_t *rx, const char *pattern, char *err, size_t errsz) {
-    memset(rx, 0, sizeof *rx);
-    rxp_t x;
-    memset(&x, 0, sizeof x);
-    x.p = pattern;
-    x.rx = rx;
-    anode_t *ast = p_alt(&x);
-    if (!ast || x.failed || *x.p) {
-        snprintf(err, errsz, "invalid regex: %s",
-                 x.failed ? x.err : "unexpected character");
-        free(x.arena);
-        free(rx->prog);
-        free(rx->cls);
-        memset(rx, 0, sizeof *rx);
-        return false;
-    }
-    emit_node(&x, ast);
-    rx_emit(rx, RX_MATCH);
-    free(x.arena);
-    if (x.failed || !rx->prog) {
-        snprintf(err, errsz, "invalid regex: %s",
-                 x.failed ? x.err : "out of memory");
-        free(rx->prog);
-        free(rx->cls);
-        memset(rx, 0, sizeof *rx);
-        return false;
-    }
-    return true;
-}
-
-static void rx_free(rx_t *rx) {
-    free(rx->prog);
-    free(rx->cls);
-    memset(rx, 0, sizeof *rx);
-}
-
-static bool rx_match(const rx_t *rx, const char *s, size_t len) {
-    if (!rx->prog) return false;
-    typedef struct {
-        int pc;
-        size_t pos;
-    } frame_t;
-    size_t cap = 256;
-    frame_t *stk = malloc(cap * sizeof *stk);
-    if (!stk) return false;
-    long steps = 0;
-    bool found = false;
-    for (size_t start = 0; start <= len && !found; start++) {
-        int pc = 0;
-        size_t pos = start, sp = 0;
-        for (;;) {
-            if (++steps > 2000000) goto out; /* complexity budget */
-            const rins_t *in = &rx->prog[pc];
-            bool ok = true;
-            switch (in->op) {
-            case RX_MATCH:
-                found = true;
-                goto out;
-            case RX_CHAR:
-                ok = pos < len && (unsigned char)s[pos] == in->ch;
-                if (ok) {
-                    pc++;
-                    pos++;
-                }
-                break;
-            case RX_ANY:
-                ok = pos < len && s[pos] != '\n';
-                if (ok) {
-                    pc++;
-                    pos++;
-                }
-                break;
-            case RX_CLASS:
-                ok = pos < len && cls_has(&rx->cls[in->cls],
-                                          (unsigned char)s[pos]);
-                if (ok) {
-                    pc++;
-                    pos++;
-                }
-                break;
-            case RX_BOL:
-                ok = pos == 0;
-                if (ok) pc++;
-                break;
-            case RX_EOL:
-                ok = pos == len;
-                if (ok) pc++;
-                break;
-            case RX_JMP:
-                pc = in->a;
-                break;
-            case RX_SPLIT:
-                if (sp == cap) {
-                    cap *= 2;
-                    frame_t *ns = realloc(stk, cap * sizeof *ns);
-                    if (!ns) goto out;
-                    stk = ns;
-                }
-                stk[sp].pc = in->b;
-                stk[sp].pos = pos;
-                sp++;
-                pc = in->a;
-                break;
-            default:
-                ok = false;
-                break;
-            }
-            if (!ok) {
-                if (sp == 0) break; /* dead end: next start position */
-                frame_t f = stk[--sp];
-                pc = f.pc;
-                pos = f.pos;
-            }
-        }
-        /* a leading '^' can only match at start 0 */
-        if (rx->prog[0].op == RX_BOL) break;
-    }
-out:
-    free(stk);
-    return found;
+/* regexec wants a nul-terminated subject: match a byte range */
+static bool rx_match(const regex_t *rx, const char *s, size_t n) {
+    char *z = malloc(n + 1);
+    if (!z) return false;
+    memcpy(z, s, n);
+    z[n] = '\0';
+    bool m = regexec(rx, z, 0, NULL, 0) == 0;
+    free(z);
+    return m;
 }
 
 bool builtin_regex_match(const char *pattern, const char *text, char *err,
                          size_t errsz) {
     if (err && errsz) err[0] = '\0';
-    rx_t rx;
-    char e2[128];
-    if (!rx_compile(&rx, pattern, e2, sizeof e2)) {
-        if (err && errsz) snprintf(err, errsz, "%s", e2);
-        return false;
-    }
+    regex_t rx;
+    if (!rx_compile(&rx, pattern, err, errsz)) return false;
     bool m = rx_match(&rx, text, strlen(text));
-    rx_free(&rx);
+    regfree(&rx);
     return m;
 }
+
 
 /* ================= filesystem helpers ================= */
 
@@ -995,7 +540,7 @@ static int cmp_names(const void *a, const void *b) {
 
 typedef struct walk_ctx {
     buf_t *out;
-    rx_t rx;      /* compiled pattern */
+    regex_t rx;   /* compiled pattern */
     bool content; /* files_search: pattern matches content lines */
 } walk_ctx_t;
 
@@ -1919,107 +1464,6 @@ char *builtin_html_to_markdown(const char *html, size_t n) {
 
 /* ================= duckduckgo results parsing ================= */
 
-static bool scan_next_tag(const char *s, size_t n, size_t *io, char *tag,
-                          size_t tagsz, char **cls, char **href) {
-    size_t i = *io;
-    while (i < n) {
-        if (s[i] != '<') {
-            i++;
-            continue;
-        }
-        if (i + 1 >= n || !isalpha((unsigned char)s[i + 1])) {
-            i++;
-            continue;
-        }
-        if (i + 3 < n && !strncmp(s + i, "<!--", 4)) {
-            const char *e = strstr(s + i + 4, "-->");
-            if (!e) {
-                *io = n;
-                return false;
-            }
-            i = (size_t)(e - s) + 3;
-            continue;
-        }
-        /* parse the tag */
-        size_t j = i + 1, nl = 0;
-        while (j < n && (isalnum((unsigned char)s[j]) || s[j] == '-') &&
-               nl + 1 < tagsz)
-            tag[nl++] = (char)tolower((unsigned char)s[j++]);
-        tag[nl] = '\0';
-        *cls = NULL;
-        *href = NULL;
-        for (;;) {
-            while (j < n && is_ws(s[j])) j++;
-            if (j >= n) break;
-            if (s[j] == '>') {
-                j++;
-                break;
-            }
-            if (s[j] == '/') {
-                j++;
-                continue;
-            }
-            char an[16];
-            size_t al = 0;
-            while (j < n && !is_ws(s[j]) && s[j] != '=' && s[j] != '>' &&
-                   s[j] != '/' && al + 1 < sizeof an)
-                an[al++] = (char)tolower((unsigned char)s[j++]);
-            an[al] = '\0';
-            if (al && s[j] == '=') {
-                j++;
-                while (j < n && is_ws(s[j])) j++;
-                char q = 0;
-                if (j < n && (s[j] == '"' || s[j] == '\'')) q = s[j++];
-                size_t vs = j;
-                while (j < n && (q ? s[j] != q : (!is_ws(s[j]) && s[j] != '>')))
-                    j++;
-                buf_t vb;
-                buf_init(&vb);
-                ent_decode(&vb, s + vs, j - vs);
-                if (q && j < n) j++;
-                char *val = buf_steal(&vb, NULL);
-                if (!strcmp(an, "class") && !*cls) {
-                    free(*cls);
-                    *cls = val;
-                } else if (!strcmp(an, "href") && !*href) {
-                    free(*href);
-                    *href = val;
-                } else
-                    free(val);
-            }
-        }
-        *io = j;
-        return true;
-    }
-    *io = n;
-    return false;
-}
-
-/* inner text of the element opened at s..open_end, up to its close tag */
-static char *tag_inner_text(const char *s, size_t n, size_t open_end,
-                            const char *tag) {
-    size_t cl = ci_find_close(s, open_end, n, tag);
-    size_t end = cl == (size_t)-1 ? n : cl;
-    buf_t raw, out;
-    buf_init(&raw);
-    buf_init(&out);
-    for (size_t i = open_end; i < end;) {
-        if (s[i] == '<') {
-            const char *e = memchr(s + i, '>', end - i);
-            if (!e) break;
-            if (end - i >= 3 && !strncasecmp(s + i, "<br", 3))
-                buf_append_byte(&raw, ' ');
-            i = (size_t)(e - s) + 1;
-        } else {
-            buf_append_byte(&raw, s[i++]);
-        }
-    }
-    ent_decode(&out, raw.data ? raw.data : "", raw.len);
-    buf_free(&raw);
-    collapse_ws(&out);
-    return buf_steal(&out, NULL);
-}
-
 /* normalize a result href: unwrap the duckduckgo redirect, absolutize */
 static char *ddg_url(const char *href) {
     if (!href) return NULL;
@@ -2040,75 +1484,68 @@ static char *ddg_url(const char *href) {
     return buf_steal(&out, NULL);
 }
 
+/* walk the parsed page in document order: an element whose class holds
+   result__a opens a pending result (its text is the title), the next
+   result__snippet element completes it (its text is the description);
+   a new result__a flushes the pending one with the title alone. the
+   d.all array is in document order, which is the pairing order. */
 char *builtin_ddg_results(const char *html, size_t n) {
-    char *s = malloc(n + 1);
-    if (!s) return strdup("");
-    memcpy(s, html, n);
-    s[n] = '\0';
-    size_t len = 0;
-    while (len < n && s[len]) len++;
-
+    hdom_t d;
+    dom_parse(&d, html, n);
     buf_t out;
     buf_init(&out);
-    size_t i = 0;
-    char tag[12], *cls, *href;
     size_t results = 0;
     char *pending_url = NULL, *pending_title = NULL;
-    while (results < 25 && scan_next_tag(s, len, &i, tag, sizeof tag, &cls,
-                                         &href)) {
-        bool is_link = ci_contains(cls, "result__a");
-        bool is_snip = ci_contains(cls, "result__snippet");
-        if (!is_link && !is_snip) {
-            free(cls);
-            free(href);
-            continue;
-        }
-        char *text = tag_inner_text(s, len, i, tag);
+    for (size_t i = 0; i < d.n && results < 25; i++) {
+        hnode_t *e = d.all[i];
+        if (e->text) continue;
+        bool is_link = ci_contains(e->cls, "result__a");
+        bool is_snip = ci_contains(e->cls, "result__snippet");
+        if (!is_link && !is_snip) continue;
+        buf_t t;
+        buf_init(&t);
+        long budget = 1 << 20;
+        node_text(e, &t, &budget);
+        collapse_ws(&t);
+        char *text = buf_steal(&t, NULL);
         if (is_link) {
-            /* flush any pending result without snippet */
-            if (pending_url) {
+            if (pending_url) { /* flush the pending result without snippet */
                 if (results) buf_append_byte(&out, '\n');
                 buf_appendf(&out, "URL: %s\nDescription: %s\n", pending_url,
                             pending_title ? pending_title : "");
                 results++;
                 free(pending_url);
                 free(pending_title);
-                pending_url = NULL;
-                pending_title = NULL;
             }
-            pending_url = ddg_url(href);
+            pending_url = ddg_url(e->href);
             pending_title = text;
+        } else if (pending_url) {
+            if (results) buf_append_byte(&out, '\n');
+            buf_appendf(&out, "URL: %s\nDescription: %s\n", pending_url,
+                        text && text[0] ? text
+                                        : (pending_title ? pending_title
+                                                         : ""));
+            results++;
+            free(pending_url);
+            free(pending_title);
+            pending_url = NULL;
+            pending_title = NULL;
+            free(text);
         } else {
-            if (pending_url) {
-                if (results) buf_append_byte(&out, '\n');
-                buf_appendf(&out, "URL: %s\nDescription: %s\n", pending_url,
-                            text && text[0] ? text
-                                            : (pending_title ? pending_title
-                                                             : ""));
-                results++;
-                free(pending_url);
-                free(pending_title);
-                pending_url = NULL;
-                pending_title = NULL;
-                free(text);
-            } else {
-                free(text);
-            }
+            free(text); /* snippet without a preceding result */
         }
-        free(cls);
-        free(href);
     }
     if (pending_url && results < 25) {
         if (results) buf_append_byte(&out, '\n');
         buf_appendf(&out, "URL: %s\nDescription: %s\n", pending_url,
                     pending_title ? pending_title : "");
-        results++;
         free(pending_url);
         free(pending_title);
     }
-    free(s);
+    dom_free(&d);
     return buf_steal(&out, NULL);
 }
+
 
 /* ================= web fetch helpers ================= */
 
@@ -2119,20 +1556,26 @@ static const char *BROWSER_UA =
 static bool valid_http_url(const char *u) {
     size_t n = strlen(u);
     if (!n || n > 2048) return false;
-    bool https = !strncasecmp(u, "https://", 8);
-    bool http = !strncasecmp(u, "http://", 7);
-    if (!https && !http) return false;
-    const char *rest = u + (https ? 8 : 7);
-    const char *hostend = rest;
-    while (*hostend && *hostend != '/' && *hostend != '?' && *hostend != '#' &&
-           *hostend != ':')
-        hostend++;
-    if (hostend == rest) return false;
     for (const char *p = u; *p; p++) {
         unsigned char c = (unsigned char)*p;
         if (c < 0x21 || c == 0x7f) return false;
     }
-    return true;
+    /* structure (http/https scheme, nonempty host) via libcurl's parser */
+    CURLU *h = curl_url();
+    bool ok = h && curl_url_set(h, CURLUPART_URL, u, 0) == CURLUE_OK;
+    if (ok) {
+        char *scheme = NULL, *host = NULL;
+        ok = curl_url_get(h, CURLUPART_SCHEME, &scheme, 0) == CURLUE_OK &&
+             scheme && (!strcasecmp(scheme, "http") ||
+                        !strcasecmp(scheme, "https"));
+        if (ok)
+            ok = curl_url_get(h, CURLUPART_HOST, &host, 0) == CURLUE_OK &&
+                 host && host[0];
+        curl_free(scheme);
+        curl_free(host);
+    }
+    curl_url_cleanup(h);
+    return ok;
 }
 
 /* GET a url; returns the body (malloc'd, *len_out set) or NULL with err */
@@ -2331,7 +1774,10 @@ static void tool_web_fetch(const cJSON *args, buf_t *out, bool *is_error) {
     }
 }
 
-static void tool_files_list(const cJSON *args, buf_t *out, bool *is_error) {
+/* shared body of files_list (pattern matches paths) and files_search
+   (pattern matches line content) */
+static void tool_files(const cJSON *args, buf_t *out, bool *is_error,
+                       bool content) {
     const char *path = NULL, *regex = NULL;
     if (!need_str(args, "path", &path, out) ||
         !need_str(args, "regex", &regex, out)) {
@@ -2345,17 +1791,17 @@ static void tool_files_list(const cJSON *args, buf_t *out, bool *is_error) {
         return;
     }
     char err[192] = "";
-    rx_t rx;
+    regex_t rx;
     if (!rx_compile(&rx, regex, err, sizeof err)) {
         buf_clear(out);
         buf_appendf(out, "%s", err);
         *is_error = true;
         return;
     }
-    walk_ctx_t w = { out, rx, false };
+    walk_ctx_t w = { out, rx, content };
     char werr[256] = "";
     bool ok = walk_start(&w, path, werr, sizeof werr);
-    rx_free(&rx);
+    regfree(&rx);
     if (!ok) {
         buf_clear(out);
         buf_appendf(out, "%s", werr);
@@ -2363,36 +1809,12 @@ static void tool_files_list(const cJSON *args, buf_t *out, bool *is_error) {
     }
 }
 
-static void tool_files_search(const cJSON *args, buf_t *out, bool *is_error) {
-    const char *path = NULL, *regex = NULL;
-    if (!need_str(args, "path", &path, out) ||
-        !need_str(args, "regex", &regex, out)) {
-        *is_error = true;
-        return;
-    }
-    if (!strlen(path)) {
-        buf_clear(out);
-        buf_append_str(out, "path must not be empty");
-        *is_error = true;
-        return;
-    }
-    char err[192] = "";
-    rx_t rx;
-    if (!rx_compile(&rx, regex, err, sizeof err)) {
-        buf_clear(out);
-        buf_appendf(out, "%s", err);
-        *is_error = true;
-        return;
-    }
-    walk_ctx_t w = { out, rx, true };
-    char werr[256] = "";
-    bool ok = walk_start(&w, path, werr, sizeof werr);
-    rx_free(&rx);
-    if (!ok) {
-        buf_clear(out);
-        buf_appendf(out, "%s", werr);
-        *is_error = true;
-    }
+static void tool_files_list(const cJSON *a, buf_t *o, bool *e) {
+    tool_files(a, o, e, false);
+}
+
+static void tool_files_search(const cJSON *a, buf_t *o, bool *e) {
+    tool_files(a, o, e, true);
 }
 
 static void tool_file_read(const cJSON *args, buf_t *out, bool *is_error) {
@@ -2676,7 +2098,6 @@ static void tool_file_edit(const cJSON *args, buf_t *out, bool *is_error) {
         long long idx;
         if (line_number > 0) {
             long long d = order[ci];
-            if (d < -3) break;
             idx = line_number - 1 + d;
         } else {
             idx = (long long)ci;

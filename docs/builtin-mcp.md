@@ -132,10 +132,12 @@ first replaced line. Line endings are preserved (`\n` and `\r\n`).
 
 ## Regex flavor
 
-`files_list` / `files_search` use a small byte-oriented engine:
-literals, `.`, character classes with ranges and negation, `^`, `$`,
-alternation `|`, groups `(...)` / `(?:...)`, greedy `*`, `+`, `?`,
-`{n}`, `{n,}`, `{n,m}`, and the classes `\d \w \s` with negations.
-Matching is case-sensitive and unanchored (a match anywhere in the
-subject counts). No backreferences or lookahead; a step budget keeps
-pathological patterns from hanging the server (they answer no match).
+`files_list` / `files_search` patterns are posix extended regular
+expressions, matched with the libc `regcomp` (the windows build compiles
+openbsd's implementation, vendored in `src/vendor/regex/`). As sugar,
+`\d`, `\w`, `\s` and their negations and the escapes `\n \t \r \f \v`
+are translated to plain ere classes, and `(?:...)` groups become
+ordinary groups. Matching is case-sensitive and unanchored (a match
+anywhere in the subject counts). No backreferences or lookahead, and no
+step budget: a pathological pattern can be slow. `{n,m}` bounds are
+capped at 255 on windows (the libc limit there).
