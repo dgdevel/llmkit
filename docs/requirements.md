@@ -1056,7 +1056,14 @@ redrawn.
   block's single separator. The glyphs, the width rule (fixed or
   terminal width) and any per-line prefix glyphs are design decisions;
   pure ascii is required (the repo's ascii-only rule), box drawing
-  unicode is out.
+  unicode is out. Each separator line carries the local wall-clock
+  timestamp of the moment it was drawn.
+- Timing line: a turn whose response block completed ends with one
+  unstyled line of the turn's measured spans - time to first token
+  since the request (prompt processing), accumulated thinking
+  generation time, accumulated response generation time; time spent
+  executing tools is excluded. A turn that ends any other way
+  (interrupted, fatal, terminal tool) renders no timing line.
 - Typography: bold and italic apply per the table above, only when the
   output terminal reports support for the attribute; each attribute
   degrades to unstyled on its own - a pipe, or a terminal without
@@ -1082,19 +1089,20 @@ Illustrative rendering of one exchange (the glyphs, width and prefix
 choices are design; bold and italic apply only on a capable terminal):
 
 ```
-============================================================
+[10:31:04] ====================================================
 list the files in /tmp                        <- bold
-------------------------------------------------------------
+[10:31:04] --------------------------------------------------
 The user wants a directory listing; the fs server offers
 list_directory, i will call it.               <- italic
-------------------------------------------------------------
+[10:31:06] --------------------------------------------------
 fs.list_directory {"path":"/tmp"}             <- bold
-------------------------------------------------------------
+[10:31:06] --------------------------------------------------
 file1.txt
 file2.log                                     <- bold
-------------------------------------------------------------
+[10:31:07] --------------------------------------------------
 The /tmp directory holds two files: file1.txt and
 file2.log.                                     <- plain
+[10:31:08] first token 0.84s | thinking 1.92s | response 0.71s
 ```
 
 ### interrupts and exit codes

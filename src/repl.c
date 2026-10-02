@@ -9,6 +9,7 @@
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #define HIST_CAP 128 /* in-memory ring, arrow recall only (design sec.12) */
@@ -47,6 +48,15 @@ typedef struct repl_sink {
     bool last_nl;    /* last written byte was \n */
     int cur;         /* open streamed block: R_THINKING/R_RESPONSE, -1 none */
     bool sep_pending;/* a block opened, its rule not yet drawn (lazy) */
+    /* per-turn timing, the mono clock taken at sink depth: reset by the
+       session loop before each engine_run */
+    double t_turn;   /* the request clock: prompt processing counts here */
+    double t_first;  /* first streamed token of the turn, 0 until it lands */
+    double t_think;  /* open thinking generation segment, 0 when closed */
+    double t_resp;   /* open response generation segment, 0 when closed */
+    double think_s;  /* thinking generation, accumulated over all blocks */
+    double resp_s;   /* response generation, accumulated over all blocks */
+    bool resp_done;  /* a response block completed this turn */
 } repl_sink_t;
 
 static void rwr(repl_sink_t *s, const char *t, size_t n) {
@@ -62,13 +72,28 @@ static void ensure_nl(repl_sink_t *s) {
     if (s->wrote && !s->last_nl) rwr_str(s, "\n");
 }
 
+/* "[HH:MM:SS] " - the wall-clock stamp of a separator or the timing line.
+   localtime's static buffer is safe here: records reach the sink from
+   the engine run loop's thread only. Returns the length written. */
+static size_t stamp_now(char *dst, size_t cap) {
+    if (cap < 12) return 0;
+    time_t t = time(NULL);
+    struct tm *p = localtime(&t);
+    if (!p) return 0;
+    int n = snprintf(dst, cap, "[%02d:%02d:%02d] ", p->tm_hour, p->tm_min,
+                     p->tm_sec);
+    return n < 0 || (size_t)n >= cap ? 0 : (size_t)n;
+}
+
 static void draw_rule(repl_sink_t *s, char glyph) {
     ensure_nl(s);
     int w = tty_cols(s->out);
     if (w <= 0) w = 80;
     char line[512];
     if (w > (int)sizeof line - 2) w = (int)sizeof line - 2;
-    memset(line, glyph, (size_t)w);
+    size_t tsl = stamp_now(line, sizeof line);
+    if ((int)tsl > w) tsl = (size_t)w; /* pathological width: stamp only */
+    memset(line + tsl, glyph, (size_t)w - tsl);
     line[w] = '\n';
     rwr(s, line, (size_t)w + 1);
 }
@@ -100,6 +125,33 @@ static void render_error_line(repl_sink_t *s, const char *code,
     rwr_str(s, "\n");
 }
 
+/* the turn's timing spans, reset by the session loop at turn start */
+static void timing_reset(repl_sink_t *s) {
+    s->t_turn = mono_now();
+    s->t_first = 0;
+    s->t_think = 0;
+    s->t_resp = 0;
+    s->think_s = 0;
+    s->resp_s = 0;
+    s->resp_done = false;
+}
+
+/* the turn's timing line, drawn when the response block completed: wall
+   clock of the completion, then the three spans - first token since the
+   request (prompt processing), thinking generation and response
+   generation, tool rounds excluded, accumulated over every block */
+static void render_timing(repl_sink_t *s) {
+    char ts[32] = "", line[192];
+    stamp_now(ts, sizeof ts);
+    int n = snprintf(line, sizeof line,
+                     "%sfirst token %.2fs | thinking %.2fs | response %.2fs\n",
+                     ts, s->t_first ? s->t_first - s->t_turn : 0.0, s->think_s,
+                     s->resp_s);
+    if (n <= 0) return;
+    ensure_nl(s);
+    rwr(s, line, (size_t)n >= sizeof line ? sizeof line - 1 : (size_t)n);
+}
+
 static void repl_sink_fn(void *ctx, cJSON *rec) {
     repl_sink_t *s = ctx;
     int k = rec_classify(rec);
@@ -112,8 +164,30 @@ static void repl_sink_fn(void *ctx, cJSON *rec) {
             s->sep_pending = true;
             s->cur = k;
         }
+        if (tx && *tx) { /* a token landed: open its generation segment */
+            double now = mono_now();
+            if (!s->t_first) s->t_first = now;
+            if (k == R_THINKING) {
+                if (!s->t_think) s->t_think = now;
+            } else if (!s->t_resp) {
+                s->t_resp = now;
+            }
+        }
         styled(s, k == R_THINKING ? s->st->italic : "", tx);
         if (!rec_bool(rec, "partial", false)) {
+            double now = mono_now(); /* the block closed its segment */
+            if (k == R_THINKING) {
+                if (s->t_think) {
+                    s->think_s += now - s->t_think;
+                    s->t_think = 0;
+                }
+            } else {
+                if (s->t_resp) {
+                    s->resp_s += now - s->t_resp;
+                    s->t_resp = 0;
+                }
+                s->resp_done = true;
+            }
             ensure_nl(s); /* per-block trailing newline, call's rule */
             s->cur = -1;
         }
@@ -483,11 +557,13 @@ int repl_run(const call_cfg_t *c, int in_fd, FILE *out, const char *exe_path,
            stop signal instead of queueing a 0x03 byte for the next line */
         if (tty) tty_raw_off(&ed.raw);
 #endif
+        timing_reset(&sink);
         rc = engine_start(e);
         if (rc == 0) rc = engine_run(e);
 #ifdef _WIN32
         if (tty) tty_raw_on(&ed.raw, in_fd);
 #endif
+        if (sink.resp_done) render_timing(&sink); /* response completed */
         last_ending = rc;
         if (rc == EXIT_INTERRUPTED) {
             g_stop_flag = 0; /* consumed: the session continues */

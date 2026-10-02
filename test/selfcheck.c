@@ -2315,8 +2315,54 @@ static int pipe_feed(const char *data, size_t n) {
 }
 
 static void golden_rule(buf_t *b, char glyph) {
-    for (int i = 0; i < 80; i++) buf_append_byte(b, glyph);
-    buf_append_byte(b, '\n');
+    /* the golden token of a stamped rule: the live line carries the
+       wall clock and re-measures its width, both normalized away */
+    buf_append_str(b, glyph == '=' ? "@=\n" : "@-\n");
+}
+
+/* the golden token of the timing line: measured spans, normalized away */
+static void golden_timing(buf_t *b) { buf_append_str(b, "@t\n"); }
+
+/* the live rendering's "[HH:MM:SS] " line prefix */
+static bool stamped_line(const char *p, size_t len) {
+    if (len < 12 || p[0] != '[' || p[9] != ']' || p[10] != ' ') return false;
+    for (int i = 1; i <= 8; i++) {
+        if (i == 3 || i == 6) {
+            if (p[i] != ':') return false;
+        } else if (p[i] < '0' || p[i] > '9') {
+            return false;
+        }
+    }
+    return true;
+}
+
+/* rewrite the nondeterministic display lines of a repl session - the
+   stamped rules and the timing line - into the golden tokens, so the
+   goldens stay byte-exact against the rendering contract */
+static char *repl_norm(const char *ob) {
+    buf_t b;
+    buf_init(&b);
+    const char *p = ob ? ob : "";
+    while (*p) {
+        const char *eol = strchr(p, '\n');
+        size_t len = eol ? (size_t)(eol - p) : strlen(p);
+        if (stamped_line(p, len)) {
+            const char *rest = p + 11;
+            size_t rlen = len - 11;
+            char g = rlen ? rest[0] : 0;
+            bool rule = rlen > 0 && (g == '=' || g == '-');
+            for (size_t i = 1; i < rlen && rule; i++)
+                if (rest[i] != g) rule = false;
+            if (rule) golden_rule(&b, g);
+            else if (rlen > 12 && !memcmp(rest, "first token ", 12))
+                golden_timing(&b);
+            else buf_append(&b, p, len + (eol ? 1 : 0));
+        } else {
+            buf_append(&b, p, len + (eol ? 1 : 0));
+        }
+        p = eol ? eol + 1 : p + len;
+    }
+    return buf_steal(&b, NULL);
 }
 
 /* a minimal cfg: openai, no key/model, anthropic needs max_tokens */
@@ -2430,14 +2476,18 @@ static void test_repl(void) {
         buf_append_str(&want, "think\n");
         golden_rule(&want, '-');
         buf_append_str(&want, "Hello\n");
+        golden_timing(&want); /* the response completed: spans line */
         golden_rule(&want, '=');
         buf_append_str(&want, "again\n");
         golden_rule(&want, '-');
         buf_append_str(&want, "think\n");
         golden_rule(&want, '-');
         buf_append_str(&want, "Hello\n");
+        golden_timing(&want);
         check(r.rc == EXIT_OK, "repl: clean session exits 0 at EOF");
-        check_str(r.ob, want.data, "repl: user block, thinking, answer");
+        char *norm = repl_norm(r.ob);
+        check_str(norm, want.data, "repl: user block, thinking, answer");
+        free(norm);
         check(strchr(r.ob, '\033') == NULL,
               "repl: off-tty styling fallback: no escape sequences");
         buf_free(&want);
@@ -2476,8 +2526,11 @@ static void test_repl(void) {
         buf_append_str(&want, "tool out\n");
         golden_rule(&want, '-');
         buf_append_str(&want, "done\n");
+        golden_timing(&want); /* once per turn, after the last block */
         check(r.rc == EXIT_OK, "repl: tool session exits 0");
-        check_str(r.ob, want.data, "repl: tool call and response blocks");
+        char *norm = repl_norm(r.ob);
+        check_str(norm, want.data, "repl: tool call and response blocks");
+        free(norm);
         buf_free(&want);
         repl_session_free(&r);
         call_cfg_free(&c);
@@ -2502,15 +2555,17 @@ static void test_repl(void) {
         check(strstr(r.ob, "one") != NULL && strstr(r.ob, "two") != NULL,
               "repl: two turns ran");
         {
-            char heavy[82];
-            memset(heavy, '=', 80);
-            heavy[80] = '\n';
-            heavy[81] = '\0';
-            int rules = 0;
-            for (const char *q = r.ob; (q = strstr(q, heavy)) != NULL; q++)
+            /* two user blocks, one timing line per completed turn */
+            char *norm = repl_norm(r.ob);
+            int rules = 0, timings = 0;
+            for (const char *q = norm; (q = strstr(q, "@=\n")) != NULL; q++)
                 rules++;
+            for (const char *q = norm; (q = strstr(q, "@t\n")) != NULL; q++)
+                timings++;
             check(rules == 2,
                   "repl: the empty line ran no turn (two user blocks)");
+            check(timings == 2, "repl: one timing line per turn");
+            free(norm);
         }
         repl_session_free(&r);
         call_cfg_free(&c);
@@ -2541,10 +2596,13 @@ static void test_repl(void) {
         buf_append_str(&want, "again\n");
         golden_rule(&want, '-');
         buf_append_str(&want, "ok\n");
+        golden_timing(&want); /* no timing on the interrupted turn */
         check(r.rc == EXIT_OK,
               "repl: interrupt then continue: EOF exits with the last "
               "ending");
-        check_str(r.ob, want.data, "repl: interrupted turn then continuation");
+        char *norm = repl_norm(r.ob);
+        check_str(norm, want.data, "repl: interrupted turn then continuation");
+        free(norm);
         buf_free(&want);
         repl_session_free(&r);
         call_cfg_free(&c);

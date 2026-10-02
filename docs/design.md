@@ -595,7 +595,20 @@ No new wire, mcp or loop code.
 - **separators and prompt** - heavy rule `=`, light rule `-`, `>` prompt
   glyph; rule width is `TIOCGWINSZ` of stdout when it is a tty, else 80,
   read at draw time - rendering stays append only, rules never redraw.
+  Every rule line opens with the local wall-clock stamp of the moment it
+  was drawn, `[HH:MM:SS] `, the glyphs filling the width that remains.
   Error lines: `! <code>: <message>`, unstyled.
+- **timing line** - one unstyled line after a turn whose response block
+  completed, stamped like a rule:
+  `[HH:MM:SS] first token <s> | thinking <s> | response <s>`. The spans
+  come from the mono clock taken at sink depth, reset by the session
+  loop before each `engine_run`: first token is the first streamed
+  thinking or response text of the turn minus the request clock (prompt
+  processing), thinking and response are the generation segments - each
+  opens at a block's first token and closes at the block-close record,
+  accumulated across every round of the turn, tool execution excluded.
+  A turn ending any other way (interrupted, fatal, terminal tool)
+  renders no timing line.
 - **sink** - `call`'s discipline, one `fwrite` + `fflush` per record, with
   the block framing: a separator opens each block - the first record of
   its kind since the last block closed, and only when its text is

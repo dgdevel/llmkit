@@ -22,15 +22,18 @@ The whole exchange renders as it happens - thinking italic, tool calls and their
 
 ```sh
 $ llmkit repl --openai http://localhost:11434/v1 --model llama3.1
-================================================================================
+[10:31:04] =====================================================================
 > hello, what is 2+2?
---------------------------------------------------------------------------------
+[10:31:04] ---------------------------------------------------------------------
 The user asks simple arithmetic.
---------------------------------------------------------------------------------
+[10:31:05] ---------------------------------------------------------------------
 2 + 2 equals 4.
-================================================================================
+[10:31:05] first token 0.31s | thinking 0.87s | response 0.22s
+[10:31:09] =====================================================================
 >
 ```
+
+Every separator line is stamped with the wall clock, and each turn that finishes its answer prints its timing: time to first token (prompt processing), thinking generation, response generation.
 
 For one-shot use from the shell there is `llmkit call`: flags in, the answer as plain text on stdout, thinking omitted, no records to write -
 
