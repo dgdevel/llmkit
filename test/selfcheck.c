@@ -1091,9 +1091,9 @@ static const char *FAKE_MCP_PY =
     "    elif method == 'tools/list':\n"
     "        print(json.dumps({'jsonrpc':'2.0','id':rid,'result':{'tools':"
     "[{'name':'echo','description':'echo text','inputSchema':{'type':"
-    "'object','properties':{'text':{'type':'string'}},'required':"
-    "['text']}},{'name':'boom','inputSchema':{'type':'object'}}]}}), "
-    "flush=True)\n"
+    "'object','properties':{'text':{'type':'string','description':"
+    "'the text to echo back'}},'required':['text']}},{'name':'boom',"
+    "'inputSchema':{'type':'object'}}]}}), flush=True)\n"
     "    elif method == 'tools/call':\n"
     "        a = m['params'].get('arguments',{})\n"
     "        if m['params']['name'] == 'echo':\n"
@@ -2915,23 +2915,26 @@ static void test_mcp_repl(void) {
         mcp_repl_cfg_free(&c);
     }
 
-    /* ---- signature rendering ---- */
+    /* ---- record rendering ---- */
     {
         cJSON *tool = cJSON_Parse(
-            "{\"name\":\"add\",\"inputSchema\":{\"type\":\"object\","
-            "\"properties\":{\"a\":{\"type\":\"number\"},"
+            "{\"name\":\"add\",\"description\":\"sum two numbers\","
+            "\"inputSchema\":{\"type\":\"object\",\"properties\":"
+            "{\"a\":{\"type\":\"number\",\"description\":\"first addend\"},"
             "\"b\":{\"type\":\"number\"}},\"required\":[\"a\",\"b\"]}}");
         buf_t b;
         buf_init(&b);
-        mcp_repl_signature(tool, &b);
-        check_str(b.data ? b.data : "", "add(float, float)",
-                  "mcp-repl: number renders as float");
+        mcp_repl_record(tool, &b);
+        check_str(b.data ? b.data : "",
+                  "add(float a, float b): sum two numbers\n"
+                  "- float a: first addend\n",
+                  "mcp-repl: record carries names and descriptions");
         cJSON_Delete(tool);
         tool = cJSON_Parse("{\"name\":\"boom\",\"inputSchema\":"
                            "{\"type\":\"object\"}}");
         buf_clear(&b);
-        mcp_repl_signature(tool, &b);
-        check_str(b.data ? b.data : "", "boom()",
+        mcp_repl_record(tool, &b);
+        check_str(b.data ? b.data : "", "boom()\n",
                   "mcp-repl: no properties renders empty");
         cJSON_Delete(tool);
         tool = cJSON_Parse(
@@ -2941,15 +2944,16 @@ static void test_mcp_repl(void) {
             "\"a\":{\"type\":\"array\"},\"bo\":{\"type\":\"boolean\"},"
             "\"x\":{}}}}");
         buf_clear(&b);
-        mcp_repl_signature(tool, &b);
+        mcp_repl_record(tool, &b);
         check_str(b.data ? b.data : "",
-                  "mix(int, string, float, object, array, bool, any)",
+                  "mix(int i, string s, float f, object o, array a, "
+                  "bool bo, any x)\n",
                   "mcp-repl: the type words, declaration order");
         cJSON_Delete(tool);
         tool = cJSON_Parse("{\"name\":\"bare\"}");
         buf_clear(&b);
-        mcp_repl_signature(tool, &b);
-        check_str(b.data ? b.data : "", "bare()",
+        mcp_repl_record(tool, &b);
+        check_str(b.data ? b.data : "", "bare()\n",
                   "mcp-repl: missing inputSchema renders empty");
         cJSON_Delete(tool);
         buf_free(&b);
@@ -3122,15 +3126,17 @@ static void test_mcp_repl(void) {
         buf_init(&want);
         buf_append_str(&want,
                        "Tools available:\n"
-                       "- echo(string)\n"
-                       "- boom()\n"
+                       "echo(string text): echo text\n"
+                       "- string text: the text to echo back\n"
+                       "boom()\n"
                        "echo(\"hi\")\n"
                        "echo: hi\n"
                        "@t\n"
                        "tools\n"
                        "Tools available:\n"
-                       "- echo(string)\n"
-                       "- boom()\n"
+                       "echo(string text): echo text\n"
+                       "- string text: the text to echo back\n"
+                       "boom()\n"
                        "help\n"
                        "lines:\n");
         check(strncmp(norm, want.data, want.len) == 0,

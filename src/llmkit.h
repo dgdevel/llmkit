@@ -739,9 +739,11 @@ int mcp_repl_parse(int argc, char **argv, mcp_repl_cfg_t *c, char *err,
                    size_t errsz);
 /* the one-entry tools record of the session (validate_tools-legal) */
 cJSON *mcp_repl_build_tools(const mcp_repl_cfg_t *c);
-/* the tool's call signature: "add(float, float)" - schema json types,
-   number rendered as float */
-void mcp_repl_signature(const cJSON *tool, buf_t *out);
+/* the tool's listing record, newline-terminated: the header line
+   "add(float a, float b): sum" then one "- float a: first addend"
+   line per described argument - schema json types, number rendered
+   as float */
+void mcp_repl_record(const cJSON *tool, buf_t *out);
 /* "name(json, ...)" -> name (malloc'd) + positional literals (array);
    bare name = zero arguments. NULL ok, else malloc'd message */
 char *mcp_repl_split(const char *line, char **name_out, cJSON **vals_out);

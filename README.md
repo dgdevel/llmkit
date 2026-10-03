@@ -41,10 +41,11 @@ On the tool side of the house there is `llmkit mcp-repl`: a repl dedicated to on
 ```sh
 $ llmkit mcp-repl --stdio './calculator-mcp'
 Tools available:
-- add(float, float)
-- subtract(float, float)
-- multiply(float, float)
-- divide(float, float)
+add(float a, float b): add two numbers
+subtract(float a, float b): subtract b from a
+multiply(float a, float b): multiply two numbers
+divide(float a, float b): divide a by b
+- float b: must not be zero
 > add(1, 1)
 2
 [10:31:04] 0.004s

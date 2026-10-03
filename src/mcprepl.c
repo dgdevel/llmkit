@@ -1,10 +1,12 @@
 /* mcprepl.c - llmkit mcp-repl: an interactive tool console for one mcp
    server (design sec.16). No llm and no engine turns: one server connects
    through the mcp client (a one-entry tools record through mcp_reconcile),
-   its tools/list becomes the console's vocabulary - a call-signature line
-   per tool, tab completion over the names - and every submitted line is
-   one tools/call: name(json, json, ...), positional arguments bound onto
-   the tool's inputSchema. One timing line follows every call. */
+   its tools/list becomes the console's vocabulary - one record per tool
+   (the call signature with argument names, the tool's description, one
+   detail line per described argument), tab completion over the names -
+   and every submitted line is one tools/call: name(json, json, ...),
+   positional arguments bound onto the tool's inputSchema. One timing
+   line follows every call. */
 #include "llmkit.h"
 
 #include <stdarg.h>
@@ -186,7 +188,7 @@ cJSON *mcp_repl_build_tools(const mcp_repl_cfg_t *c) {
     return t;
 }
 
-/* ================= listing: call signatures ================= */
+/* ================= listing: tool records ================= */
 
 /* the schema's json type as the console writes it: json has one number
    type, a float parameter takes an integer literal unchanged */
@@ -202,22 +204,50 @@ static const char *sig_type(const cJSON *prop) {
     return t; /* unknown type words pass through verbatim */
 }
 
-void mcp_repl_signature(const cJSON *tool, buf_t *out) {
-    const char *nm = rec_str(tool, "name");
-    buf_append_str(out, nm ? nm : "?");
-    buf_append_byte(out, '(');
+/* "type name": one schema property as the record's argument word */
+static void sig_arg(buf_t *out, const cJSON *p) {
+    buf_append_str(out, sig_type(p));
+    if (p->string) {
+        buf_append_byte(out, ' ');
+        buf_append_str(out, p->string);
+    }
+}
+
+/* one tool as a record: the header line is the call signature with the
+   argument names plus the tool's description, then one detail line per
+   described argument (the header already named the rest) */
+void mcp_repl_record(const cJSON *tool, buf_t *out) {
     const cJSON *sch =
         cJSON_GetObjectItemCaseSensitive(tool, "inputSchema");
     const cJSON *props = sch
         ? cJSON_GetObjectItemCaseSensitive(sch, "properties") : NULL;
+    const char *nm = rec_str(tool, "name");
+    buf_append_str(out, nm ? nm : "?");
+    buf_append_byte(out, '(');
     bool first = true;
     if (cJSON_IsObject(props))
         for (const cJSON *p = props->child; p; p = p->next) {
             if (!first) buf_append_str(out, ", ");
             first = false;
-            buf_append_str(out, sig_type(p));
+            sig_arg(out, p);
         }
     buf_append_byte(out, ')');
+    const char *desc = rec_str(tool, "description");
+    if (desc && *desc) {
+        buf_append_str(out, ": ");
+        buf_append_str(out, desc);
+    }
+    buf_append_byte(out, '\n');
+    if (cJSON_IsObject(props))
+        for (const cJSON *p = props->child; p; p = p->next) {
+            const char *d = rec_str(p, "description");
+            if (!d || !*d) continue;
+            buf_append_str(out, "- ");
+            sig_arg(out, p);
+            buf_append_str(out, ": ");
+            buf_append_str(out, d);
+            buf_append_byte(out, '\n');
+        }
 }
 
 static const cJSON *tool_find(const cJSON *tools, const char *name) {
@@ -230,16 +260,14 @@ static const cJSON *tool_find(const cJSON *tools, const char *name) {
 
 static void list_tools(mr_out_t *o, const cJSON *tools) {
     mrwr_str(o, "Tools available:\n");
-    buf_t sig;
-    buf_init(&sig);
+    buf_t rec;
+    buf_init(&rec);
     for (const cJSON *t = tools ? tools->child : NULL; t; t = t->next) {
-        buf_clear(&sig);
-        mrwr_str(o, "- ");
-        mcp_repl_signature(t, &sig);
-        mrwr(o, sig.data ? sig.data : "", sig.len);
-        mrwr_str(o, "\n");
+        buf_clear(&rec);
+        mcp_repl_record(t, &rec);
+        mrwr(o, rec.data ? rec.data : "", rec.len);
     }
-    buf_free(&sig);
+    buf_free(&rec);
 }
 
 /* ================= call syntax ================= */

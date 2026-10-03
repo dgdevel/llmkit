@@ -1240,10 +1240,14 @@ nothing connects.
 stdout is the console; stderr keeps the out-of-channel role. Rendering
 is append-only, no styling: this is a tool console, not a transcript.
 
-- At connect: the banner `Tools available:` then one line per tool,
-  `- name(type, type)` - the schema's json types (`number` printed
-  `float`, `integer` `int`, `boolean` `bool`, missing `any`), property
-  order.
+- At connect: the banner `Tools available:` then one record per tool.
+  The record's header line is `name(type arg, type arg): description` -
+  the call signature with the argument names, plus the tool's
+  description when it has one - followed by one `- type arg:
+  description` line per described argument (an argument without a
+  description has no detail line; the header named it already). Types
+  are the schema's json types (`number` printed `float`, `integer`
+  `int`, `boolean` `bool`, missing `any`), property order.
 - The prompt is `> `; on a non-terminal stdin each submitted line
   echoes as its own block instead.
 - A call's text content renders as-is (text blocks joined with
