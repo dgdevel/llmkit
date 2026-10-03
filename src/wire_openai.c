@@ -79,18 +79,24 @@ static void oai_user_msg(owire_t *w, const trec_t *u) {
     buf_free(&txt);
 }
 
-static void oai_system_msg(owire_t *w, const cJSON *system) {
-    /* only called on a fresh rebuild: becomes messages[0] */
+/* join a system record's text blocks with \n (the system twin of
+   jsonl.c's user_text_join) */
+static void system_text(buf_t *txt, const cJSON *system) {
     const cJSON *content = cJSON_GetObjectItemCaseSensitive(system, "content");
-    buf_t txt;
-    buf_init(&txt);
     if (cJSON_IsArray(content))
         for (const cJSON *b = content->child; b; b = b->next) {
             const cJSON *tx = cJSON_GetObjectItemCaseSensitive(b, "text");
             if (!cJSON_IsString(tx)) continue;
-            if (txt.len) buf_append_byte(&txt, '\n');
-            buf_append_str(&txt, tx->valuestring);
+            if (txt->len) buf_append_byte(txt, '\n');
+            buf_append_str(txt, tx->valuestring);
         }
+}
+
+static void oai_system_msg(owire_t *w, const cJSON *system) {
+    /* only called on a fresh rebuild: becomes messages[0] */
+    buf_t txt;
+    buf_init(&txt);
+    system_text(&txt, system);
     buf_append_str(&w->msgbuf, "{\"role\":\"system\",\"content\":");
     buf_append_jstr(&w->msgbuf, txt.data ? txt.data : "");
     buf_append_byte(&w->msgbuf, '}');
@@ -346,17 +352,9 @@ static bool build_body(owire_t *w, engine_t *e) {
         buf_append_byte(b, ',');
     }
     if (w->proto == PROTO_RESPONSES && e->system) {
-        const cJSON *content =
-            cJSON_GetObjectItemCaseSensitive(e->system, "content");
         buf_t txt;
         buf_init(&txt);
-        if (cJSON_IsArray(content))
-            for (const cJSON *bl = content->child; bl; bl = bl->next) {
-                const cJSON *tx = cJSON_GetObjectItemCaseSensitive(bl, "text");
-                if (!cJSON_IsString(tx)) continue;
-                if (txt.len) buf_append_byte(&txt, '\n');
-                buf_append_str(&txt, tx->valuestring);
-            }
+        system_text(&txt, e->system);
         buf_append_str(b, "\"instructions\":");
         buf_append_jstr(b, txt.data ? txt.data : "");
         buf_append_byte(b, ',');

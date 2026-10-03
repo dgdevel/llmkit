@@ -164,8 +164,6 @@ void engine_emit_record(engine_t *e, cJSON *rec) {
     e->emit(e->emit_ctx, rec); /* sink consumes the record */
 }
 
-void engine_ingest_only(engine_t *e, cJSON *rec) { tlist_ingest(&e->tr, rec); }
-
 static void engine_emit_error(engine_t *e, const char *code, const char *msg,
                               bool fatal) {
     e->emit(e->emit_ctx, rec_error(code, msg, fatal));

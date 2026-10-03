@@ -43,44 +43,11 @@
 #endif
 
 /* ===================================================================== */
-/* ============== DESCRIPTIONS - the one place to edit them ============= */
-/*                                                                       */
-/* Every tool description and every argument description of the builtin  */
-/* server is one of the strings below. They all start empty (""); fill   */
-/* or tweak them freely. An empty string is sent as an empty             */
-/* description, a nonempty one verbatim.                                 */
+/* ==== DESCRIPTIONS - the desc column of the tool tables below is ===== */
+/* ==== the one place to edit them. Every description starts empty  ==== */
+/* ==== (""): an empty string is sent as an empty description, a    ==== */
+/* ==== nonempty one verbatim.                                      ==== */
 /* ===================================================================== */
-
-/* ---- web_search ---- */
-static const char DESC_web_search[] = "";
-static const char DESC_web_search_keywords[] = "";
-/* ---- web_fetch ---- */
-static const char DESC_web_fetch[] = "";
-static const char DESC_web_fetch_url[] = "";
-/* ---- files_list ---- */
-static const char DESC_files_list[] = "";
-static const char DESC_files_list_path[] = "";
-static const char DESC_files_list_regex[] = "";
-/* ---- files_search ---- */
-static const char DESC_files_search[] = "";
-static const char DESC_files_search_path[] = "";
-static const char DESC_files_search_regex[] = "";
-/* ---- file_read ---- */
-static const char DESC_file_read[] = "";
-static const char DESC_file_read_path[] = "";
-static const char DESC_file_read_lines_offset[] = "";
-static const char DESC_file_read_lines_length[] = "";
-/* ---- file_create ---- */
-static const char DESC_file_create[] = "";
-static const char DESC_file_create_path[] = "";
-static const char DESC_file_create_content[] = "";
-static const char DESC_file_create_overwrite[] = "";
-/* ---- file_edit ---- */
-static const char DESC_file_edit[] = "";
-static const char DESC_file_edit_path[] = "";
-static const char DESC_file_edit_oldString[] = "";
-static const char DESC_file_edit_newString[] = "";
-static const char DESC_file_edit_line_number[] = "";
 
 /* ================= tool table ================= */
 
@@ -99,44 +66,44 @@ typedef struct tool_def {
 } tool_def_t;
 
 static const arg_def_t ARGS_web_search[] = {
-    {"keywords", "string", DESC_web_search_keywords, true},
+    {"keywords", "string", "", true},
 };
 static const arg_def_t ARGS_web_fetch[] = {
-    {"url", "string", DESC_web_fetch_url, true},
+    {"url", "string", "", true},
 };
 static const arg_def_t ARGS_files_list[] = {
-    {"path", "string", DESC_files_list_path, true},
-    {"regex", "string", DESC_files_list_regex, true},
+    {"path", "string", "", true},
+    {"regex", "string", "", true},
 };
 static const arg_def_t ARGS_files_search[] = {
-    {"path", "string", DESC_files_search_path, true},
-    {"regex", "string", DESC_files_search_regex, true},
+    {"path", "string", "", true},
+    {"regex", "string", "", true},
 };
 static const arg_def_t ARGS_file_read[] = {
-    {"path", "string", DESC_file_read_path, true},
-    {"lines_offset", "integer", DESC_file_read_lines_offset, true},
-    {"lines_length", "integer", DESC_file_read_lines_length, true},
+    {"path", "string", "", true},
+    {"lines_offset", "integer", "", true},
+    {"lines_length", "integer", "", true},
 };
 static const arg_def_t ARGS_file_create[] = {
-    {"path", "string", DESC_file_create_path, true},
-    {"content", "string", DESC_file_create_content, true},
-    {"overwrite", "boolean", DESC_file_create_overwrite, false},
+    {"path", "string", "", true},
+    {"content", "string", "", true},
+    {"overwrite", "boolean", "", false},
 };
 static const arg_def_t ARGS_file_edit[] = {
-    {"path", "string", DESC_file_edit_path, true},
-    {"oldString", "string", DESC_file_edit_oldString, true},
-    {"newString", "string", DESC_file_edit_newString, true},
-    {"line_number", "integer", DESC_file_edit_line_number, true},
+    {"path", "string", "", true},
+    {"oldString", "string", "", true},
+    {"newString", "string", "", true},
+    {"line_number", "integer", "", true},
 };
 
 static const tool_def_t TOOLS[] = {
-    {"web_search", DESC_web_search, ARGS_web_search, 1},
-    {"web_fetch", DESC_web_fetch, ARGS_web_fetch, 1},
-    {"files_list", DESC_files_list, ARGS_files_list, 2},
-    {"files_search", DESC_files_search, ARGS_files_search, 2},
-    {"file_read", DESC_file_read, ARGS_file_read, 3},
-    {"file_create", DESC_file_create, ARGS_file_create, 3},
-    {"file_edit", DESC_file_edit, ARGS_file_edit, 4},
+    {"web_search", "", ARGS_web_search, 1},
+    {"web_fetch", "", ARGS_web_fetch, 1},
+    {"files_list", "", ARGS_files_list, 2},
+    {"files_search", "", ARGS_files_search, 2},
+    {"file_read", "", ARGS_file_read, 3},
+    {"file_create", "", ARGS_file_create, 3},
+    {"file_edit", "", ARGS_file_edit, 4},
 };
 enum { TOOLS_N = sizeof TOOLS / sizeof TOOLS[0] };
 
@@ -2254,19 +2221,7 @@ int builtin_handle(void *ctx, const char *method, cJSON *params, cJSON *id,
     (void)ctx;
     (void)id;
     if (!strcmp(method, "initialize")) {
-        cJSON *res = cJSON_CreateObject();
-        const char *pr = rec_str(params, "protocolVersion");
-        const char *use =
-            (pr && mcp_protocol_supported(pr)) ? pr : "2025-11-25";
-        cJSON_AddStringToObject(res, "protocolVersion", use);
-        cJSON *caps = cJSON_CreateObject();
-        cJSON_AddItemToObject(caps, "tools", cJSON_CreateObject());
-        cJSON_AddItemToObject(res, "capabilities", caps);
-        cJSON *si = cJSON_CreateObject();
-        cJSON_AddStringToObject(si, "name", "llmkit-builtin-mcp");
-        cJSON_AddStringToObject(si, "version", LLMKIT_VERSION);
-        cJSON_AddItemToObject(res, "serverInfo", si);
-        *result_out = res;
+        *result_out = rpc_initialize_result(params, "llmkit-builtin-mcp");
         return 0;
     }
     if (!strcmp(method, "notifications/initialized") || !strcmp(method, "ping"))

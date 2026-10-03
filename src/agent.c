@@ -284,19 +284,7 @@ static int agent_handle(void *ctx, const char *method, cJSON *params,
     (void)id;
     (void)errmsg_out;
     if (!strcmp(method, "initialize")) {
-        cJSON *res = cJSON_CreateObject();
-        const char *pr = rec_str(params, "protocolVersion");
-        const char *use =
-            (pr && mcp_protocol_supported(pr)) ? pr : "2025-11-25";
-        cJSON_AddStringToObject(res, "protocolVersion", use);
-        cJSON *caps = cJSON_CreateObject();
-        cJSON_AddItemToObject(caps, "tools", cJSON_CreateObject());
-        cJSON_AddItemToObject(res, "capabilities", caps);
-        cJSON *si = cJSON_CreateObject();
-        cJSON_AddStringToObject(si, "name", "llmkit-agent-as-tool");
-        cJSON_AddStringToObject(si, "version", LLMKIT_VERSION);
-        cJSON_AddItemToObject(res, "serverInfo", si);
-        *result_out = res;
+        *result_out = rpc_initialize_result(params, "llmkit-agent-as-tool");
         return 0;
     }
     if (!strcmp(method, "notifications/initialized") ||

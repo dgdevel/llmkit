@@ -464,7 +464,6 @@ struct engine {
 engine_t *engine_new(emit_fn emit, void *ctx);
 void engine_free(engine_t *e);
 void engine_emit_record(engine_t *e, cJSON *rec); /* sink + ingest */
-void engine_ingest_only(engine_t *e, cJSON *rec); /* ingest, no sink */
 void engine_apply_config_record(engine_t *e, cJSON *tree); /* llm/options/system/tools snapshot */
 int engine_input_record(engine_t *e, cJSON *tree); /* reading-state dispatch:
                                                       0 ok, 1 start now, 2 fatal(rec emitted) */
@@ -567,6 +566,8 @@ typedef int (*rpc_read_fn)(void *ctx, char *buf, size_t bufsz);
 typedef void (*rpc_write_fn)(void *ctx, const char *line, size_t n);
 void rpc_serve(rpc_handler_t *h, rpc_read_fn rd, rpc_write_fn wr, void *io_ctx);
 int rpc_serve_stdio(rpc_handler_t *h);
+/* the initialize reply tree every stdio server handler sends */
+cJSON *rpc_initialize_result(const cJSON *params, const char *server_name);
 
 /* transcript truncation (agent rollback) */
 void tlist_truncate(tlist_t *l, size_t n);

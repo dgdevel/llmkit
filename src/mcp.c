@@ -732,6 +732,25 @@ int mcp_call(mcp_mgr_t *m, const char *tool, cJSON *args, buf_t *text_out,
 
 /* ================= json-rpc stdio server loop ================= */
 
+/* the initialize reply every stdio server handler (agent, proxy,
+   builtin) sends: echo the requested revision when supported, else the
+   default; empty tools capabilities; the caller's server name */
+cJSON *rpc_initialize_result(const cJSON *params, const char *server_name) {
+    cJSON *res = cJSON_CreateObject();
+    const char *pr = rec_str(params, "protocolVersion");
+    const char *use =
+        (pr && mcp_protocol_supported(pr)) ? pr : "2025-11-25";
+    cJSON_AddStringToObject(res, "protocolVersion", use);
+    cJSON *caps = cJSON_CreateObject();
+    cJSON_AddItemToObject(caps, "tools", cJSON_CreateObject());
+    cJSON_AddItemToObject(res, "capabilities", caps);
+    cJSON *si = cJSON_CreateObject();
+    cJSON_AddStringToObject(si, "name", server_name);
+    cJSON_AddStringToObject(si, "version", LLMKIT_VERSION);
+    cJSON_AddItemToObject(res, "serverInfo", si);
+    return res;
+}
+
 typedef struct serve_ctx {
     rpc_handler_t *h;
     rpc_write_fn wr;
