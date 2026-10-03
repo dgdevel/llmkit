@@ -15,6 +15,7 @@ void call_cfg_free(call_cfg_t *c) {
     free(c->api_base);
     free(c->key);
     free(c->model);
+    free(c->reasoning_effort);
     free(c->system);
     free(c->prompt);
     for (size_t i = 0; i < c->nhdrs; i++) {
@@ -101,7 +102,8 @@ int call_parse_ex(int argc, char **argv, call_cfg_t *c, char *err,
     c->protocol = -1;
     c->max_tokens = -1;
     bool have_base = false, have_key = false, have_model = false,
-         have_system = false, have_prompt = false, have_mt = false;
+         have_system = false, have_prompt = false, have_mt = false,
+         have_effort = false;
 
     for (int i = 0; i < argc; i++) {
         const char *a = argv[i];
@@ -115,6 +117,7 @@ int call_parse_ex(int argc, char **argv, call_cfg_t *c, char *err,
                           : !strcmp(a, "--openai")      ? PROTO_OPENAI
                                                          : PROTO_RESPONSES;
         } else if (!strcmp(a, "--key") || !strcmp(a, "--model") ||
+                   !strcmp(a, "--reasoning-effort") ||
                    !strcmp(a, "--max-tokens") ||
                    !strcmp(a, "--system-prompt") ||
                    (with_prompt && !strcmp(a, "--prompt")) ||
@@ -139,6 +142,16 @@ int call_parse_ex(int argc, char **argv, call_cfg_t *c, char *err,
                 }
                 have_model = true;
                 c->model = strdup(v);
+            } else if (!strcmp(a, "--reasoning-effort")) {
+                if (have_effort) {
+                    usage_err(err, errsz, "--reasoning-effort given twice");
+                    goto fail;
+                }
+                /* the value is not constrained: providers differ in what
+                   they accept, violations surface as the endpoint's own
+                   api_error (requirements sec.4) */
+                have_effort = true;
+                c->reasoning_effort = strdup(v);
             } else if (!strcmp(a, "--max-tokens")) {
                 if (have_mt) {
                     usage_err(err, errsz, "--max-tokens given twice");
@@ -329,9 +342,13 @@ cJSON *call_build_llm(const call_cfg_t *c) {
     cJSON_AddStringToObject(t, "api_base", c->api_base);
     if (c->key) cJSON_AddStringToObject(t, "api_key", c->key);
     if (c->model) cJSON_AddStringToObject(t, "model", c->model);
-    if (c->max_tokens > 0) {
+    if (c->max_tokens > 0 || c->reasoning_effort) {
         cJSON *io = cJSON_AddObjectToObject(t, "inference_options");
-        cJSON_AddNumberToObject(io, "max_tokens", (double)c->max_tokens);
+        if (c->max_tokens > 0)
+            cJSON_AddNumberToObject(io, "max_tokens", (double)c->max_tokens);
+        if (c->reasoning_effort)
+            cJSON_AddStringToObject(io, "reasoning_effort",
+                                     c->reasoning_effort);
     }
     if (c->nhdrs) {
         cJSON *h = cJSON_AddObjectToObject(t, "headers");
@@ -461,7 +478,8 @@ static int compile_fail(engine_t *e, char *msg /* malloc'd or NULL */,
 
 int call_compile(const call_cfg_t *c, engine_t *e, const char *exe_path) {
     if (!utf8_check_str(c->api_base) || !utf8_check_str(c->key) ||
-        !utf8_check_str(c->model) || !utf8_check_str(c->system)) {
+        !utf8_check_str(c->model) || !utf8_check_str(c->reasoning_effort) ||
+        !utf8_check_str(c->system)) {
         engine_emit_record(e, rec_error(EC_INVALID_RECORD,
                                         "invalid UTF-8 in a flag value",
                                         true));
@@ -624,8 +642,9 @@ static void call_usage(FILE *out) {
           "<api_base>\n"
           "                [--key <token>] [--model <name>] "
           "[--max-tokens <n>]\n"
-          "                [--system-prompt <text>] "
-          "[--header <name=value>]...\n"
+          "                [--reasoning-effort <value>] "
+          "[--system-prompt <text>]\n"
+          "                [--header <name=value>]...\n"
           "                [--mcp-proxy <config>]... "
           "[--terminal-tool <name.tool>]...\n"
           "                --prompt <text|->\n",

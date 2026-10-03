@@ -641,6 +641,8 @@ typedef struct call_cfg {
     int protocol;                    /* PROTO_* */
     char *api_base;                  /* owned */
     char *key, *model, *system, *prompt; /* owned, NULL = absent */
+    char *reasoning_effort;          /* owned, NULL = absent; value not
+                                        constrained (providers differ) */
     long max_tokens;                 /* -1 absent, >0 sent */
     char **hdr_names, **hdr_values;  /* owned, parallel arrays */
     size_t nhdrs;

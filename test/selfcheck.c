@@ -2066,6 +2066,47 @@ static void test_call(void) {
         call_cfg_free(&c);
     }
 
+    /* --reasoning-effort: beside --max-tokens, and alone */
+    {
+        char *av[] = {"--openai", "http://x", "--max-tokens", "512",
+                      "--reasoning-effort", "high", "--prompt", "p"};
+        check(call_parse((int)(sizeof av / sizeof av[0]), av, &c, err,
+                         sizeof err) == 0,
+              "call: effort vector parses");
+        cJSON *llm = call_build_llm(&c);
+        buf_init(&b);
+        buf_append_tree(&b, llm);
+        cJSON_Delete(llm);
+        check_str(b.data,
+                  "{\"type\":\"llm\",\"endpoint_protocol\":\"openai\","
+                  "\"api_base\":\"http://x\",\"inference_options\":"
+                  "{\"max_tokens\":512,\"reasoning_effort\":\"high\"}}",
+                  "call: effort serializes beside max_tokens");
+        buf_free(&b);
+        call_cfg_free(&c);
+    }
+    {
+        /* the value is not constrained: providers differ in what they
+           accept, any string compiles (requirements sec.4) */
+        char *av[] = {"--openai-responses", "http://x",
+                      "--reasoning-effort", "banana-42", "--prompt", "p"};
+        check(call_parse((int)(sizeof av / sizeof av[0]), av, &c, err,
+                         sizeof err) == 0,
+              "call: unconstrained effort value parses");
+        cJSON *llm = call_build_llm(&c);
+        buf_init(&b);
+        buf_append_tree(&b, llm);
+        cJSON_Delete(llm);
+        check_str(b.data,
+                  "{\"type\":\"llm\",\"endpoint_protocol\":"
+                  "\"openai_responses\",\"api_base\":\"http://x\","
+                  "\"inference_options\":"
+                  "{\"reasoning_effort\":\"banana-42\"}}",
+                  "call: effort alone creates inference_options");
+        buf_free(&b);
+        call_cfg_free(&c);
+    }
+
     /* shell quoting */
     buf_init(&b);
     call_shell_quote(&b, "/opt/llm kit's/bin");
@@ -2141,6 +2182,14 @@ static void test_call(void) {
                        "--prompt", "p"};
         check(call_parse(5, e12, &c, err, sizeof err) == 1,
               "call: --max-tokens wants a positive integer");
+        char *e13[] = {"--openai", "http://x", "--reasoning-effort",
+                       "--prompt", "p"};
+        check(call_parse(5, e13, &c, err, sizeof err) == 1,
+              "call: missing --reasoning-effort value");
+        char *e14[] = {"--openai", "http://x", "--reasoning-effort", "low",
+                       "--reasoning-effort", "high", "--prompt", "p"};
+        check(call_parse(8, e14, &c, err, sizeof err) == 1,
+              "call: --reasoning-effort given twice");
     }
 
     /* record tier: validation fires before anything runs */
@@ -2173,6 +2222,23 @@ static void test_call(void) {
         FILE *er = open_memstream(&eb, &en);
         check(call_run(&c, out, er, "/x", NULL) == EXIT_INVALID_RECORD,
               "call: invalid UTF-8 in a flag is invalid_record");
+        fclose(out);
+        fclose(er);
+        free(ob);
+        free(eb);
+        call_cfg_free(&c);
+    }
+    {
+        char *av[] = {"--openai", "http://x", "--reasoning-effort", "\xff",
+                      "--prompt", "p"};
+        check(call_parse((int)(sizeof av / sizeof av[0]), av, &c, err, sizeof err) == 0,
+              "call: bad-utf8 effort vector parses");
+        char *ob = NULL, *eb = NULL;
+        size_t on = 0, en = 0;
+        FILE *out = open_memstream(&ob, &on);
+        FILE *er = open_memstream(&eb, &en);
+        check(call_run(&c, out, er, "/x", NULL) == EXIT_INVALID_RECORD,
+              "call: invalid UTF-8 in --reasoning-effort is invalid_record");
         fclose(out);
         fclose(er);
         free(ob);

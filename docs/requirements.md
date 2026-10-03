@@ -852,6 +852,7 @@ Everything in this section is *(proposed)*.
 ```
 llmkit call (--anthropic | --openai | --openai-responses) <api_base>
             [--key <token>] [--model <name>] [--max-tokens <n>]
+            [--reasoning-effort <value>]
             [--system-prompt <text>]
             [--header <name=value>]... [--mcp-proxy <config>]...
             [--terminal-tool <name.tool>]...
@@ -868,7 +869,8 @@ Arguments may come in any order; `<api_base>` is the only positional.
 | `<api_base>` | exactly one | positional; carried to the `llm` record verbatim, same append rules, no normalization |
 | `--key <token>` | 0-1 | carried to `api_key`; the token stays visible in the process list for the life of the process, no alternative channel is offered in this version |
 | `--model <name>` | 0-1 | carried to `model`; absent means the field is not sent, llama.cpp style endpoints work without it |
-| `--max-tokens <n>` | 0-1 | compiles to `inference_options.max_tokens`; the one inference knob, born of necessity - anthropic rejects a request without `max_tokens` (see [inference options](#4-inference-options)), so the front-end needs the one escape; absent means the field is not sent; a value that is not a positive integer is a usage error |
+| `--max-tokens <n>` | 0-1 | compiles to `inference_options.max_tokens`; born of necessity - anthropic rejects a request without `max_tokens` (see [inference options](#4-inference-options)), so the front-end needs the one escape; absent means the field is not sent; a value that is not a positive integer is a usage error |
+| `--reasoning-effort <value>` | 0-1 | compiles to `inference_options.reasoning_effort`; the value is not constrained - providers differ in what they accept (`high`, `medium`, `low`, numbers, provider-specific words), so an unsupported value surfaces as the endpoint's own `api_error`, not a usage error; under anthropic the option is silently not sent (see [inference options](#4-inference-options)); given twice is a usage error |
 | `--system-prompt <text>` | 0-1 | compiles to one `system` record; absent compiles to no `system` record at all - an absent record and an empty text are different on the wire and the absent one is meant |
 | `--header <name>=<value>` | 0-n | compiles to `headers` entries; a later `--header` with the same name replaces the earlier one; a missing `=` or an empty name is a usage error |
 | `--mcp-proxy <config>` | 0-n | one stdio mcp server per flag, see [below](#--mcp-proxy) |
@@ -883,8 +885,10 @@ are usage errors: message on stderr, exit 1, nothing connects or runs.
 ### compiled record stream
 
 The command line compiles to, in order: one `llm` record - carrying
-`inference_options.max_tokens` when `--max-tokens` is given - the optional
-`system` record, the optional `tools` record, one `user` record.
+`inference_options.max_tokens` when `--max-tokens` is given and
+`inference_options.reasoning_effort` when `--reasoning-effort` is given -
+the optional `system` record, the optional `tools` record, one `user`
+record.
 `--terminal-tool` entries append to the `terminal_tools` list of the
 matching server entry of that `tools` record, in argv order. From there
 the conversation is the runner's, unchanged: same loop (tool rounds run to
@@ -959,9 +963,10 @@ Each `--mcp-proxy <config>` compiles to one stdio server entry of a single
   reader closed the pipe) is the out-of-channel exit 1.
 
 Deliberately not offered: multi-turn conversation, inference-option flags
-beyond `--max-tokens`, `options` knobs, environment-variable or
-config-file indirection for any flag, record/jsonl output. The escape hatch
-is composition - the same call as `llmkit runner` with hand-written records.
+beyond `--max-tokens` and `--reasoning-effort`, `options` knobs,
+environment-variable or config-file indirection for any flag, record/jsonl
+output. The escape hatch is composition - the same call as `llmkit runner`
+with hand-written records.
 
 ## 12. llmkit repl
 
@@ -977,6 +982,7 @@ terminal provides them. Everything in this section is *(proposed)*.
 ```
 llmkit repl (--anthropic | --openai | --openai-responses) <api_base>
             [--key <token>] [--model <name>] [--max-tokens <n>]
+            [--reasoning-effort <value>]
             [--system-prompt <text>]
             [--header <name=value>]... [--mcp-proxy <config>]...
             [--terminal-tool <name.tool>]...
@@ -987,16 +993,17 @@ llmkit repl (--anthropic | --openai | --openai-responses) <api_base>
 Every flag of [llmkit call](#11-llmkit-call) keeps its meaning, count,
 repeat rules, usage-error catalog and two error tiers: the protocol
 selector, the `<api_base>` positional, `--key`, `--model`, `--max-tokens`,
-`--system-prompt`, `--header`, `--mcp-proxy`, `--terminal-tool`. One flag
-does not exist here: `--prompt`. Given to `repl` it is an unknown flag -
-usage error, message on stderr, exit 1, nothing connects or runs. The
-prompt channel is the terminal itself.
+`--reasoning-effort`, `--system-prompt`, `--header`, `--mcp-proxy`,
+`--terminal-tool`. One flag does not exist here: `--prompt`. Given to
+`repl` it is an unknown flag - usage error, message on stderr, exit 1,
+nothing connects or runs. The prompt channel is the terminal itself.
 
 ### session model
 
 - The command line compiles to the same leading records `call` compiles -
   one `llm` record (carrying `inference_options.max_tokens` when
-  `--max-tokens` is given), the optional `system` record, the optional
+  `--max-tokens` is given, `inference_options.reasoning_effort` when
+  `--reasoning-effort` is given), the optional `system` record, the optional
   `tools` record with `--terminal-tool` entries folded - plus one record
   `call` does not compile: an `options` record setting `stream_interval`
   to 0. Display latency is the point of a chat front-end: every streamed

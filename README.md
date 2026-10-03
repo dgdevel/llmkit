@@ -123,7 +123,11 @@ Runnable examples for every command live in [examples/](examples/) - see [docs/r
   (e.g. `http://localhost:11434/v1`)
 - `--key <token>` - the api key, once
 - `--model <name>` - the model name, once
-- `--max-tokens <n>` - positive integer, the one inference knob, once
+- `--max-tokens <n>` - positive integer, an inference knob, once
+- `--reasoning-effort <value>` - the reasoning effort, once; the value is
+  passed through unconstrained (providers differ: `high`, `medium`, `low`,
+  numbers, ...) - an unsupported value surfaces as the endpoint's own
+  `api_error`; under `--anthropic` the option is silently not sent
 - `--system-prompt <text>` - the system prompt, once
 - `--prompt <text|->` - `call` only: the one prompt; `-` reads it from
   stdin

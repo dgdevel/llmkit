@@ -378,8 +378,9 @@ static void repl_usage(FILE *out) {
           "<api_base>\n"
           "                [--key <token>] [--model <name>] "
           "[--max-tokens <n>]\n"
-          "                [--system-prompt <text>] "
-          "[--header <name=value>]...\n"
+          "                [--reasoning-effort <value>] "
+          "[--system-prompt <text>]\n"
+          "                [--header <name=value>]...\n"
           "                [--mcp-proxy <config>]... "
           "[--terminal-tool <name.tool>]...\n",
           out);

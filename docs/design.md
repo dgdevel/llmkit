@@ -501,7 +501,10 @@ new wire, mcp or loop code; one new `src/call.c`, a dispatch line in
 - **compilation** - the agent seed path verbatim: `signals_init`,
   `engine_new` with the call sink, `engine_apply_config_record` for the
   `llm` (carrying `inference_options.max_tokens` when `--max-tokens` is
-  given - the one inference knob, anthropic makes it mandatory),
+  given - anthropic makes it mandatory - and
+  `inference_options.reasoning_effort` when `--reasoning-effort` is given,
+  its value passed through unconstrained: providers differ, an unsupported
+  value is the endpoint's own `api_error`),
   optional `system` and optional `tools` records, `tlist_ingest`
   for the `user` record, then `engine_start` + `engine_run`, exit code
   passed through. No stdin reader thread, no queue, no header record: the
