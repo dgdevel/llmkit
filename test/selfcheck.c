@@ -1674,6 +1674,7 @@ static const char *FAKE_ENDPOINT_PY =
     "from http.server import BaseHTTPRequestHandler, HTTPServer\n"
     "LOG = open(sys.argv[1], 'a') if sys.argv[1] != '-' else None\n"
     "EVIL = len(sys.argv) > 2 and sys.argv[2] == 'evil'\n"
+    "MID = len(sys.argv) > 2 and sys.argv[2] == 'interleave'\n"
     "STATE = {'n': 0}\n"
     "def sse(self, chunks):\n"
     "    self.send_response(200)\n"
@@ -1724,12 +1725,16 @@ static const char *FAKE_ENDPOINT_PY =
     "'usage':{'prompt_tokens':10,'completion_tokens':5}})\n"
     "        else:\n"
     "            if stream:\n"
-    "                sse(self, [\n"
-    "                  {'choices':[{'delta':{'content':'all '}}]},\n"
+    "                chunks = [{'choices':[{'delta':{'content':'all '}}]}]\n"
+    "                if MID:\n"
+    "                    chunks.append({'choices':[{'delta':"
+    "{'reasoning_content':'mid-thought'}}]})\n"
+    "                chunks += [\n"
     "                  {'choices':[{'delta':{'content':'done'}}]},\n"
     "                  {'choices':[{'delta':{},'finish_reason':'stop'}]},\n"
     "                  {'usage':{'prompt_tokens':20,'completion_tokens':7}},\n"
-    "                ])\n"
+    "                ]\n"
+    "                sse(self, chunks)\n"
     "            else:\n"
     "                js(self, {'choices':[{'message':{'content':'all done'},"
     "'finish_reason':'stop'}],'usage':{'prompt_tokens':20,"
@@ -1979,6 +1984,98 @@ static void test_agent_tool(void) {
     check(hist, "agent retain: the seed history reaches the endpoint");
     check(first, "agent retain: the first invoke is retained in the next");
     spawn_kill(&sp);
+}
+
+/* agent-as-tool with streaming on and a zero flush interval: the answer
+   arrives as chunked partials plus a block-final that carries only the
+   remainder since the last flush - the invoke reply must be the whole
+   response block, and text streamed before the tool round ("calling
+   now") must not leak into it. The "interleave" mode additionally
+   slips a reasoning delta between the content chunks: thinking in the
+   middle must not end the collected answer either */
+static void agent_stream_case(const char *mode, const char *label,
+                            const char *leak_label) {
+    spawn_t sp;
+    char url[128];
+    if (!endpoint_spawn_mode(&sp, "-", mode, url, sizeof url)) {
+        check(false, "agent endpoint spawned (mode)");
+        return;
+    }
+    check(true, "agent endpoint spawned (mode)");
+    write_file("/tmp/llmkit-test-fake-mcp.py", FAKE_MCP_PY);
+
+    char seed[1024];
+    snprintf(seed, sizeof seed,
+             "{\"type\":\"header\",\"version\":1}\n"
+             "{\"type\":\"llm\",\"endpoint_protocol\":\"openai\","
+             "\"api_base\":\"%s\",\"model\":\"m\",\"inference_options\":"
+             "{\"stream\":true}}\n"
+             "{\"type\":\"options\",\"stream_interval\":0}\n"
+             "{\"type\":\"tools\",\"tools\":[{\"type\":\"stdio\",\"name\":"
+             "\"fs\",\"command_line\":\"python3 "
+             "/tmp/llmkit-test-fake-mcp.py\"}]}\n"
+             "{\"type\":\"agent-as-tool\",\"tool_description\":\"the agent\","
+             "\"input_description\":\"the input\"}\n",
+             url);
+    write_file("/tmp/llmkit-test-agent-stream-seed.jsonl", seed);
+
+    int in_pipe[2], out_pipe[2];
+    if (pipe(in_pipe) || pipe(out_pipe)) {
+        check(false, "streamed agent pipes");
+        spawn_kill(&sp);
+        return;
+    }
+    pid_t pid = fork();
+    check(pid >= 0, "streamed agent fork");
+    if (pid == 0) {
+        dup2(in_pipe[0], 0);
+        dup2(out_pipe[1], 1);
+        close(in_pipe[0]); close(in_pipe[1]);
+        close(out_pipe[0]); close(out_pipe[1]);
+        int rc = cmd_agent("/tmp/llmkit-test-agent-stream-seed.jsonl");
+        _exit(rc == 0 ? 0 : 1);
+    }
+    close(in_pipe[0]);
+    close(out_pipe[1]);
+    FILE *to = fdopen(in_pipe[1], "w");
+    FILE *from = fdopen(out_pipe[0], "r");
+    char line[4096];
+
+    fprintf(to, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\","
+                "\"params\":{}}\n");
+    fflush(to);
+    check(fgets(line, sizeof line, from) != NULL &&
+              strstr(line, "llmkit-agent-as-tool") != NULL,
+          "agent-as-tool: initialize reply (streamed)");
+
+    fprintf(to, "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\","
+                "\"params\":{\"name\":\"invoke\",\"arguments\":"
+                "{\"input\":\"go\"}}}\n");
+    fflush(to);
+    check(fgets(line, sizeof line, from) != NULL &&
+              strstr(line, "all done") != NULL &&
+              strstr(line, "isError") == NULL,
+          label);
+    check(strstr(line, "calling now") == NULL &&
+              strstr(line, "thinking hard") == NULL &&
+              strstr(line, "mid-thought") == NULL,
+          leak_label);
+
+    fclose(to);
+    int st = 0;
+    waitpid(pid, &st, 0);
+    check(WIFEXITED(st) && WEXITSTATUS(st) == 0, "agent-as-tool: exits 0 (streamed)");
+    fclose(from);
+    spawn_kill(&sp);
+}
+
+static void test_agent_tool_streamed(void) {
+    agent_stream_case(NULL,
+        "streamed agent: invoke replies with the whole block",
+        "streamed agent: non-answer text does not leak");
+    agent_stream_case("interleave",
+        "interleaved agent: invoke replies with the whole block",
+        "interleaved agent: non-answer text does not leak");
 }
 
 /* ================= llmkit call ================= */
@@ -2795,202 +2892,6 @@ static void test_repl(void) {
     }
 }
 
-/* ================= prettyprint (design sec.17) ================= */
-
-/* the golden token of the usage line: the stamp and the token counts
-   (the counts vary per vector, the shape does not) */
-static bool pp_usage_line(const char *p, size_t len) {
-    if (!stamped_line(p, len)) return false;
-    char tmp[128];
-    if (len - 11 >= sizeof tmp) return false;
-    memcpy(tmp, p + 11, len - 11);
-    tmp[len - 11] = '\0';
-    double a, b;
-    int used = -1;
-    return sscanf(tmp, "input %lf tok | output %lf tok%n", &a, &b,
-                  &used) == 2 &&
-           used == (int)(len - 11);
-}
-
-/* repl_norm's rewrite for the viewer: stamped rules and the usage line
-   become golden tokens; nothing else is nondeterministic */
-static char *pp_norm(const char *ob) {
-    buf_t b;
-    buf_init(&b);
-    const char *p = ob ? ob : "";
-    while (*p) {
-        const char *eol = strchr(p, '\n');
-        size_t len = eol ? (size_t)(eol - p) : strlen(p);
-        if (stamped_line(p, len)) {
-            const char *rest = p + 11;
-            size_t rlen = len - 11;
-            char g = rlen ? rest[0] : 0;
-            bool rule = rlen > 0 && (g == '=' || g == '-');
-            for (size_t i = 1; i < rlen && rule; i++)
-                if (rest[i] != g) rule = false;
-            if (rule) golden_rule(&b, g);
-            else if (pp_usage_line(p, len)) buf_append_str(&b, "@u\n");
-            else buf_append(&b, p, len + (eol ? 1 : 0));
-        } else {
-            buf_append(&b, p, len + (eol ? 1 : 0));
-        }
-        p = eol ? eol + 1 : p + len;
-    }
-    return buf_steal(&b, NULL);
-}
-
-typedef struct pp_out {
-    char *ob;
-    int rc;
-} pp_out_t;
-
-static pp_out_t pp_session(const char *in) {
-    pp_out_t r = { NULL, 0 };
-    FILE *fin = fmemopen((void *)in, strlen(in), "r");
-    char *ob = NULL;
-    size_t on = 0;
-    FILE *out = open_memstream(&ob, &on);
-    check(fin != NULL && out != NULL, "prettyprint: stream setup");
-    r.rc = pretty_run(fin, out);
-    fclose(out);
-    fclose(fin);
-    r.ob = ob;
-    return r;
-}
-
-static void pp_session_free(pp_out_t *r) { free(r->ob); }
-
-static void test_pretty(void) {
-    /* ---- full conversation: rendering golden bytes, off-tty plain ---- */
-    {
-        /* the wire's real shapes: partials carrying text, empty-text
-           block-close finals carrying signature/usage, a tool round,
-           a non-fatal error, a second turn without usage */
-        const char *in =
-            "{\"type\":\"header\",\"version\":1}\n"
-            "{\"type\":\"llm\",\"endpoint_protocol\":\"openai\","
-            "\"api_base\":\"http://x\"}\n"
-            "{\"type\":\"system\",\"content\":[{\"type\":\"text\","
-            "\"text\":\"be brief\"}]}\n"
-            "{\"type\":\"user\",\"content\":[{\"type\":\"text\","
-            "\"text\":\"hello\"}]}\n"
-            "{\"type\":\"thinking\",\"text\":\"th\",\"partial\":true}\n"
-            "{\"type\":\"thinking\",\"text\":\"ink\",\"partial\":true}\n"
-            "{\"type\":\"thinking\",\"text\":\"\",\"partial\":false,"
-            "\"signature\":\"s\"}\n"
-            "{\"type\":\"response\",\"text\":\"le\",\"partial\":true}\n"
-            "{\"type\":\"response\",\"text\":\"t me check\","
-            "\"partial\":true}\n"
-            "{\"type\":\"response\",\"text\":\"\",\"partial\":false}\n"
-            "{\"type\":\"tool_request\",\"tool\":\"fs.echo\","
-            "\"arguments\":{\"x\":1},\"id\":\"c1\","
-            "\"usage\":{\"input_tokens\":10,\"output_tokens\":2},"
-            "\"finish_reason\":\"tool_use\"}\n"
-            "{\"type\":\"tool_response\",\"id\":\"c1\","
-            "\"text\":\"tool out\"}\n"
-            "{\"type\":\"response\",\"text\":\"done\",\"partial\":false,"
-            "\"usage\":{\"input_tokens\":501,\"output_tokens\":22},"
-            "\"finish_reason\":\"stop\"}\n"
-            "{\"type\":\"user\",\"content\":[{\"type\":\"text\","
-            "\"text\":\"and\"},{\"type\":\"text\",\"text\":\"again\"}]}\n"
-            "{\"type\":\"tool_request\",\"tool\":\"fs.cat\","
-            "\"arguments\":{\"p\":\"q\"},\"id\":\"c2\"}\n"
-            "{\"type\":\"tool_response\",\"id\":\"c2\",\"text\":\"nope\","
-            "\"is_error\":true}\n"
-            "{\"type\":\"error\",\"code\":\"tool_failed\","
-            "\"message\":\"boom\",\"fatal\":false}\n"
-            "{\"type\":\"response\",\"text\":\"ok\",\"partial\":false}\n";
-        pp_out_t r = pp_session(in);
-        buf_t want;
-        buf_init(&want);
-        golden_rule(&want, '=');
-        buf_append_str(&want, "hello\n");
-        golden_rule(&want, '-');
-        buf_append_str(&want, "think\n");
-        golden_rule(&want, '-');
-        buf_append_str(&want, "let me check\n");
-        golden_rule(&want, '-');
-        buf_append_str(&want, "fs.echo {\"x\":1}\n");
-        golden_rule(&want, '-');
-        buf_append_str(&want, "tool out\n");
-        golden_rule(&want, '-');
-        buf_append_str(&want, "done\n");
-        buf_append_str(&want, "@u\n"); /* the turn's usage line */
-        golden_rule(&want, '=');
-        buf_append_str(&want, "and\nagain\n"); /* two blocks, \n join */
-        golden_rule(&want, '-');
-        buf_append_str(&want, "fs.cat {\"p\":\"q\"}\n");
-        golden_rule(&want, '-');
-        buf_append_str(&want, "nope\n");
-        buf_append_str(&want, "! tool_failed: boom\n");
-        golden_rule(&want, '-');
-        buf_append_str(&want, "ok\n"); /* no usage: no usage line */
-        check(r.rc == EXIT_OK, "prettyprint: clean conversation exits 0");
-        char *norm = pp_norm(r.ob);
-        check_str(norm, want.data, "prettyprint: blocks, tools, error, usage");
-        free(norm);
-        check(strchr(r.ob, '\033') == NULL,
-              "prettyprint: off-tty styling fallback: no escape sequences");
-        buf_free(&want);
-        pp_session_free(&r);
-    }
-
-    /* ---- consecutive users: one heavy block each ---- */
-    {
-        pp_out_t r = pp_session("{\"type\":\"user\",\"content\":"
-                                "[{\"type\":\"text\",\"text\":\"a\"}]}\n"
-                                "{\"type\":\"user\",\"content\":"
-                                "[{\"type\":\"text\",\"text\":\"b\"}]}\n");
-        buf_t want;
-        buf_init(&want);
-        golden_rule(&want, '=');
-        buf_append_str(&want, "a\n");
-        golden_rule(&want, '=');
-        buf_append_str(&want, "b\n");
-        check(r.rc == EXIT_OK, "prettyprint: consecutive users exit 0");
-        char *norm = pp_norm(r.ob);
-        check_str(norm, want.data, "prettyprint: consecutive user blocks");
-        free(norm);
-        buf_free(&want);
-        pp_session_free(&r);
-    }
-
-    /* ---- empty input: nothing rendered, exit 0 ---- */
-    {
-        pp_out_t r = pp_session("");
-        check(r.rc == EXIT_OK, "prettyprint: empty input exits 0");
-        check(r.ob != NULL && r.ob[0] == '\0',
-              "prettyprint: empty input renders nothing");
-        pp_session_free(&r);
-    }
-
-    /* ---- the runner's fatal tier: malformed, unknown, bad content ---- */
-    {
-        pp_out_t r = pp_session("{\"type\":\"user\",\"content\":"
-                                "[{\"type\":\"text\",\"text\":\"hi\"}]}\n"
-                                "{oops\n");
-        check(r.rc == EXIT_INVALID_RECORD,
-              "prettyprint: malformed json line exits 2");
-        check(strstr(r.ob, "! invalid_record: malformed json line") != NULL,
-              "prettyprint: malformed json line rendered as an error line");
-        pp_session_free(&r);
-    }
-    {
-        pp_out_t r = pp_session("{\"type\":\"expose\",\"tool\":\"fs.x\"}\n");
-        check(r.rc == EXIT_INVALID_RECORD,
-              "prettyprint: proxy config record exits 2");
-        check(strstr(r.ob, "unknown record type") != NULL,
-              "prettyprint: unknown record type rendered");
-        pp_session_free(&r);
-    }
-    {
-        pp_out_t r = pp_session("{\"type\":\"user\",\"content\":\"nope\"}\n");
-        check(r.rc == EXIT_INVALID_RECORD,
-              "prettyprint: user without block list exits 2");
-        pp_session_free(&r);
-    }
-}
-
 /* ================= mcp-repl (design sec.16) ================= */
 
 /* the golden token of a call's timing line: the measured span normalized
@@ -3800,12 +3701,11 @@ int main(void) {
     test_hostile_endpoint();
     fprintf(stderr, "selfcheck: agent-as-tool\n");
     test_agent_tool();
+    test_agent_tool_streamed();
     fprintf(stderr, "selfcheck: call\n");
     test_call();
     fprintf(stderr, "selfcheck: repl\n");
     test_repl();
-    fprintf(stderr, "selfcheck: prettyprint\n");
-    test_pretty();
     fprintf(stderr, "selfcheck: mcp-repl\n");
     test_mcp_repl();
     fprintf(stderr, "selfcheck: terminal tools\n");

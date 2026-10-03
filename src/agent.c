@@ -238,10 +238,20 @@ static void invoke_run(agent_state_t *a, const char *input,
                 fatal_code = rec_str(c->tree, "code");
                 fatal_msg = rec_str(c->tree, "message");
             }
-        } else if (k == R_RESPONSE &&
-                   !rec_bool(c->tree, "partial", true)) {
             buf_clear(&final);
+        } else if (k == R_RESPONSE) {
+            /* a streamed response arrives in chunks: each partial
+               carries the text since the previous flush, a block-final
+               only the remainder since the last one - and interleaved
+               reasoning deltas split one logical answer across several
+               of each. The reply is every response record of the last
+               turn, concatenated; thinking records in between do not
+               end it */
             buf_append_str(&final, rec_str(c->tree, "text"));
+        } else if (k == R_TOOL_REQUEST) {
+            /* the turn's text is over - a tool round follows, and the
+               answer is the last turn's */
+            buf_clear(&final);
         } else if (k == R_TOOL_RESPONSE && e->terminal_id) {
             /* ids are unique per request: the record carrying the
                terminal id is the terminal tool's own answer - later
