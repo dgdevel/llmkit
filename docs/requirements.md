@@ -31,6 +31,7 @@ applies. Rules marked *(proposed)* are working desiderata, not yet frozen.
    - [cli surface](#cli-surface-1) - [session model](#session-model) - [display](#display) - [interrupts and exit codes](#interrupts-and-exit-codes)
 13. [llmkit mcp-repl](#13-llmkit-mcp-repl)
    - [cli surface](#cli-surface-2) - [session model](#session-model-1) - [call syntax](#call-syntax) - [display](#display-1) - [interrupts and exit codes](#interrupts-and-exit-codes-1)
+14. [llmkit prettyprint](#14-llmkit-prettyprint)
 
 ## 1. cli conventions
 
@@ -1278,3 +1279,48 @@ composes), reconnects, prompt/resource/sampling server traffic beyond
 ignoring it, named-argument syntax (`name(a=1)` - positional plus json
 objects covers it), tool description display, and everything on
 `repl`'s own not-offered list that also applies here.
+
+## 14. llmkit prettyprint
+
+The transcript viewer: one command, one recorded conversation in, the
+`repl` display out. No model is contacted, no tool runs - the file is
+read and drawn, nothing else.
+
+*(proposed)*
+
+### cli surface
+
+`llmkit prettyprint [conversation.jsonl]` - the conversation file, or
+no argument (or `-`) for stdin. An unopenable file is a startup error:
+one stderr line, exit 1.
+
+### rendering
+
+The input is one jsonl stream under the runner's byte rules and record
+catalogue; every transcript record renders with `repl`'s display
+contract (sec.12): the heavy rule and bold text per `user` block, the
+light rule opening each thinking, response, tool request and tool
+response block, partials of one block appending under its single
+separator, thinking italic, tool traffic bold, errors as `!`-lines, an
+empty block nothing. Config and control records render nothing. The
+timestamp of each separator and summary line is the moment it is
+printed - a transcript carries no clocks, so the repl's timing line is
+impossible; in its place, a response block whose closing record
+reports the turn's `usage` closes with one line of those token totals,
+and a turn that ended any other way renders no summary line at all.
+
+### input and exit codes
+
+A violation of the byte rules, a malformed json line, an unknown
+record type, or a `user` record whose `content` is not a list of text
+blocks renders one `! invalid_record` line and exits 2 - the runner's
+fatal tier, applied to the same stream it applies to. Error records in
+the file are conversation content, not endings: they render and the
+print continues. Exit 0 when the file rendered; a stdout write failure
+exits 1.
+
+Deliberately not offered: record validation beyond the fatal tier
+above (the viewer draws, it does not gate), any flag (styling follows
+the output terminal, redirection is the override), and any side
+effect - prettyprint never writes a file, spawns a server or touches a
+network.

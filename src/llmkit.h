@@ -761,6 +761,12 @@ cJSON *repl_build_options(void); /* stream_interval 0 (requirements sec.12) */
 int repl_run(const call_cfg_t *c, int in_fd, FILE *out, const char *exe_path,
              wire_t *(*factory)(engine_t *));
 
+/* ================= pretty.c ================= */
+
+/* render the conversation read from in with the repl's display shapes;
+   returns the exit code: 0 rendered, 2 invalid record, 1 write failure */
+int pretty_run(FILE *in, FILE *out);
+
 /* ================= commands ================= */
 
 int cmd_runner(void);
@@ -770,6 +776,7 @@ int cmd_builtin(void);
 int cmd_call(int argc, char **argv);
 int cmd_repl(int argc, char **argv);
 int cmd_mcp_repl(int argc, char **argv);
+int cmd_prettyprint(const char *path); /* NULL or "-": stdin */
 int cmd_help(void);
 int cmd_version(void);
 

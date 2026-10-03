@@ -23,6 +23,9 @@ static int usage(FILE *out) {
           "  mcp-repl <flags>       interactive tool console for one mcp\n"
           "                         server: tab-completed calls, one\n"
           "                         timing line each\n"
+          "  prettyprint [file]     render a conversation jsonl with the\n"
+          "                         repl's typography; stdin without a\n"
+          "                         file\n"
           "  help                   show this help\n"
           "  version                show the version\n",
           out);
@@ -63,6 +66,10 @@ int main(int argc, char **argv) {
     if (!strcmp(cmd, "call")) return cmd_call(argc, argv);
     if (!strcmp(cmd, "repl")) return cmd_repl(argc, argv);
     if (!strcmp(cmd, "mcp-repl")) return cmd_mcp_repl(argc, argv);
+    if (!strcmp(cmd, "prettyprint")) {
+        if (argc > 3) return usage(stderr);
+        return cmd_prettyprint(argc == 3 ? argv[2] : NULL);
+    }
     if (!strcmp(cmd, "help")) return cmd_help();
     if (!strcmp(cmd, "version")) return cmd_version();
     fprintf(stderr, "llmkit: unknown command '%s'\n", cmd);

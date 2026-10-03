@@ -1,6 +1,6 @@
 # llmkit
 
-A single static-purpose executable for llm interaction from the shell and from other programs. One binary, seven commands:
+A single static-purpose executable for llm interaction from the shell and from other programs. One binary, eight commands:
 
 | command | what it does |
 |---|---|
@@ -11,6 +11,7 @@ A single static-purpose executable for llm interaction from the shell and from o
 | `llmkit mcp-proxy <config.jsonl>` | exposes a curated view (rename, redescribe, hide) of upstream mcp servers on stdio |
 | `llmkit builtin-mcp` | serves the built-in generic-use mcp tools (web search/fetch, file list/search/read/create/edit) on stdio |
 | `llmkit mcp-repl <flags>` | the interactive tool console for one mcp server: tab-completed `name(args)` calls, one timing line each |
+| `llmkit prettyprint [conversation.jsonl]` | renders a recorded conversation jsonl with the repl's typography (stdin without a file) |
 
 Written in C11. Talks to any openai-compatible endpoint (chat completions and responses apis) and any anthropic-compatible endpoint. Tools are mcp servers: `stdio`, `http` (streamable http) and `sse` (legacy) transports, in all current protocol revisions up to `2026-07-28`.
 
@@ -98,6 +99,17 @@ No external tool server at hand? `llmkit builtin-mcp` is one: seven generic-use 
 
 See [docs/builtin-mcp.md](docs/builtin-mcp.md) for the tool contracts, response formats and the description editing spot.
 
+A saved transcript reads back human again with `llmkit prettyprint`: the runner's jsonl in - a file argument or stdin - the repl's rendering out, every user block under its heavy rule, thinking italic, tool traffic bold, one usage line per turn that reports one. Nothing is sent anywhere; the file is only read and drawn.
+
+```sh
+$ llmkit prettyprint session.jsonl
+[10:31:04] =====================================================================
+hello, what is 2+2?
+[10:31:05] ---------------------------------------------------------------------
+2 + 2 equals 4.
+[10:31:05] input 501 tok | output 22 tok
+```
+
 Runnable examples for every command live in [examples/](examples/) - see [docs/records.md](docs/records.md) for the minimal and complete form of each record.
 
 ## Command Line Reference
@@ -113,6 +125,7 @@ Runnable examples for every command live in [examples/](examples/) - see [docs/r
 | `llmkit call <flags>` | flags below, `--prompt` required |
 | `llmkit repl <flags>` | flags below, no `--prompt` (the turns are typed) |
 | `llmkit mcp-repl <flags>` | one transport flag below |
+| `llmkit prettyprint [conversation.jsonl]` | the conversation file, or none: stdin then |
 | `llmkit help` | none: the usage text on stdout |
 | `llmkit version` | none: the version on stdout |
 

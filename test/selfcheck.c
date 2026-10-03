@@ -2795,6 +2795,202 @@ static void test_repl(void) {
     }
 }
 
+/* ================= prettyprint (design sec.17) ================= */
+
+/* the golden token of the usage line: the stamp and the token counts
+   (the counts vary per vector, the shape does not) */
+static bool pp_usage_line(const char *p, size_t len) {
+    if (!stamped_line(p, len)) return false;
+    char tmp[128];
+    if (len - 11 >= sizeof tmp) return false;
+    memcpy(tmp, p + 11, len - 11);
+    tmp[len - 11] = '\0';
+    double a, b;
+    int used = -1;
+    return sscanf(tmp, "input %lf tok | output %lf tok%n", &a, &b,
+                  &used) == 2 &&
+           used == (int)(len - 11);
+}
+
+/* repl_norm's rewrite for the viewer: stamped rules and the usage line
+   become golden tokens; nothing else is nondeterministic */
+static char *pp_norm(const char *ob) {
+    buf_t b;
+    buf_init(&b);
+    const char *p = ob ? ob : "";
+    while (*p) {
+        const char *eol = strchr(p, '\n');
+        size_t len = eol ? (size_t)(eol - p) : strlen(p);
+        if (stamped_line(p, len)) {
+            const char *rest = p + 11;
+            size_t rlen = len - 11;
+            char g = rlen ? rest[0] : 0;
+            bool rule = rlen > 0 && (g == '=' || g == '-');
+            for (size_t i = 1; i < rlen && rule; i++)
+                if (rest[i] != g) rule = false;
+            if (rule) golden_rule(&b, g);
+            else if (pp_usage_line(p, len)) buf_append_str(&b, "@u\n");
+            else buf_append(&b, p, len + (eol ? 1 : 0));
+        } else {
+            buf_append(&b, p, len + (eol ? 1 : 0));
+        }
+        p = eol ? eol + 1 : p + len;
+    }
+    return buf_steal(&b, NULL);
+}
+
+typedef struct pp_out {
+    char *ob;
+    int rc;
+} pp_out_t;
+
+static pp_out_t pp_session(const char *in) {
+    pp_out_t r = { NULL, 0 };
+    FILE *fin = fmemopen((void *)in, strlen(in), "r");
+    char *ob = NULL;
+    size_t on = 0;
+    FILE *out = open_memstream(&ob, &on);
+    check(fin != NULL && out != NULL, "prettyprint: stream setup");
+    r.rc = pretty_run(fin, out);
+    fclose(out);
+    fclose(fin);
+    r.ob = ob;
+    return r;
+}
+
+static void pp_session_free(pp_out_t *r) { free(r->ob); }
+
+static void test_pretty(void) {
+    /* ---- full conversation: rendering golden bytes, off-tty plain ---- */
+    {
+        /* the wire's real shapes: partials carrying text, empty-text
+           block-close finals carrying signature/usage, a tool round,
+           a non-fatal error, a second turn without usage */
+        const char *in =
+            "{\"type\":\"header\",\"version\":1}\n"
+            "{\"type\":\"llm\",\"endpoint_protocol\":\"openai\","
+            "\"api_base\":\"http://x\"}\n"
+            "{\"type\":\"system\",\"content\":[{\"type\":\"text\","
+            "\"text\":\"be brief\"}]}\n"
+            "{\"type\":\"user\",\"content\":[{\"type\":\"text\","
+            "\"text\":\"hello\"}]}\n"
+            "{\"type\":\"thinking\",\"text\":\"th\",\"partial\":true}\n"
+            "{\"type\":\"thinking\",\"text\":\"ink\",\"partial\":true}\n"
+            "{\"type\":\"thinking\",\"text\":\"\",\"partial\":false,"
+            "\"signature\":\"s\"}\n"
+            "{\"type\":\"response\",\"text\":\"le\",\"partial\":true}\n"
+            "{\"type\":\"response\",\"text\":\"t me check\","
+            "\"partial\":true}\n"
+            "{\"type\":\"response\",\"text\":\"\",\"partial\":false}\n"
+            "{\"type\":\"tool_request\",\"tool\":\"fs.echo\","
+            "\"arguments\":{\"x\":1},\"id\":\"c1\","
+            "\"usage\":{\"input_tokens\":10,\"output_tokens\":2},"
+            "\"finish_reason\":\"tool_use\"}\n"
+            "{\"type\":\"tool_response\",\"id\":\"c1\","
+            "\"text\":\"tool out\"}\n"
+            "{\"type\":\"response\",\"text\":\"done\",\"partial\":false,"
+            "\"usage\":{\"input_tokens\":501,\"output_tokens\":22},"
+            "\"finish_reason\":\"stop\"}\n"
+            "{\"type\":\"user\",\"content\":[{\"type\":\"text\","
+            "\"text\":\"and\"},{\"type\":\"text\",\"text\":\"again\"}]}\n"
+            "{\"type\":\"tool_request\",\"tool\":\"fs.cat\","
+            "\"arguments\":{\"p\":\"q\"},\"id\":\"c2\"}\n"
+            "{\"type\":\"tool_response\",\"id\":\"c2\",\"text\":\"nope\","
+            "\"is_error\":true}\n"
+            "{\"type\":\"error\",\"code\":\"tool_failed\","
+            "\"message\":\"boom\",\"fatal\":false}\n"
+            "{\"type\":\"response\",\"text\":\"ok\",\"partial\":false}\n";
+        pp_out_t r = pp_session(in);
+        buf_t want;
+        buf_init(&want);
+        golden_rule(&want, '=');
+        buf_append_str(&want, "hello\n");
+        golden_rule(&want, '-');
+        buf_append_str(&want, "think\n");
+        golden_rule(&want, '-');
+        buf_append_str(&want, "let me check\n");
+        golden_rule(&want, '-');
+        buf_append_str(&want, "fs.echo {\"x\":1}\n");
+        golden_rule(&want, '-');
+        buf_append_str(&want, "tool out\n");
+        golden_rule(&want, '-');
+        buf_append_str(&want, "done\n");
+        buf_append_str(&want, "@u\n"); /* the turn's usage line */
+        golden_rule(&want, '=');
+        buf_append_str(&want, "and\nagain\n"); /* two blocks, \n join */
+        golden_rule(&want, '-');
+        buf_append_str(&want, "fs.cat {\"p\":\"q\"}\n");
+        golden_rule(&want, '-');
+        buf_append_str(&want, "nope\n");
+        buf_append_str(&want, "! tool_failed: boom\n");
+        golden_rule(&want, '-');
+        buf_append_str(&want, "ok\n"); /* no usage: no usage line */
+        check(r.rc == EXIT_OK, "prettyprint: clean conversation exits 0");
+        char *norm = pp_norm(r.ob);
+        check_str(norm, want.data, "prettyprint: blocks, tools, error, usage");
+        free(norm);
+        check(strchr(r.ob, '\033') == NULL,
+              "prettyprint: off-tty styling fallback: no escape sequences");
+        buf_free(&want);
+        pp_session_free(&r);
+    }
+
+    /* ---- consecutive users: one heavy block each ---- */
+    {
+        pp_out_t r = pp_session("{\"type\":\"user\",\"content\":"
+                                "[{\"type\":\"text\",\"text\":\"a\"}]}\n"
+                                "{\"type\":\"user\",\"content\":"
+                                "[{\"type\":\"text\",\"text\":\"b\"}]}\n");
+        buf_t want;
+        buf_init(&want);
+        golden_rule(&want, '=');
+        buf_append_str(&want, "a\n");
+        golden_rule(&want, '=');
+        buf_append_str(&want, "b\n");
+        check(r.rc == EXIT_OK, "prettyprint: consecutive users exit 0");
+        char *norm = pp_norm(r.ob);
+        check_str(norm, want.data, "prettyprint: consecutive user blocks");
+        free(norm);
+        buf_free(&want);
+        pp_session_free(&r);
+    }
+
+    /* ---- empty input: nothing rendered, exit 0 ---- */
+    {
+        pp_out_t r = pp_session("");
+        check(r.rc == EXIT_OK, "prettyprint: empty input exits 0");
+        check(r.ob != NULL && r.ob[0] == '\0',
+              "prettyprint: empty input renders nothing");
+        pp_session_free(&r);
+    }
+
+    /* ---- the runner's fatal tier: malformed, unknown, bad content ---- */
+    {
+        pp_out_t r = pp_session("{\"type\":\"user\",\"content\":"
+                                "[{\"type\":\"text\",\"text\":\"hi\"}]}\n"
+                                "{oops\n");
+        check(r.rc == EXIT_INVALID_RECORD,
+              "prettyprint: malformed json line exits 2");
+        check(strstr(r.ob, "! invalid_record: malformed json line") != NULL,
+              "prettyprint: malformed json line rendered as an error line");
+        pp_session_free(&r);
+    }
+    {
+        pp_out_t r = pp_session("{\"type\":\"expose\",\"tool\":\"fs.x\"}\n");
+        check(r.rc == EXIT_INVALID_RECORD,
+              "prettyprint: proxy config record exits 2");
+        check(strstr(r.ob, "unknown record type") != NULL,
+              "prettyprint: unknown record type rendered");
+        pp_session_free(&r);
+    }
+    {
+        pp_out_t r = pp_session("{\"type\":\"user\",\"content\":\"nope\"}\n");
+        check(r.rc == EXIT_INVALID_RECORD,
+              "prettyprint: user without block list exits 2");
+        pp_session_free(&r);
+    }
+}
+
 /* ================= mcp-repl (design sec.16) ================= */
 
 /* the golden token of a call's timing line: the measured span normalized
@@ -3608,6 +3804,8 @@ int main(void) {
     test_call();
     fprintf(stderr, "selfcheck: repl\n");
     test_repl();
+    fprintf(stderr, "selfcheck: prettyprint\n");
+    test_pretty();
     fprintf(stderr, "selfcheck: mcp-repl\n");
     test_mcp_repl();
     fprintf(stderr, "selfcheck: terminal tools\n");

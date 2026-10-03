@@ -33,7 +33,8 @@ examples/
     |-- call-terminal-tool.sh     --terminal-tool ends it, exit 9, tool text
     |-- repl-minimal.sh           llmkit repl: the interactive chat
     |-- repl-scripted.sh          a piped session, one turn per line
-    `-- mcp-repl.sh               a piped mcp-repl session over builtin-mcp
+    |-- mcp-repl.sh               a piped mcp-repl session over builtin-mcp
+    `-- prettyprint.sh             a saved transcript rendered repl-style
 ```
 
 ## prerequisites
@@ -63,7 +64,8 @@ and `call-terminal-tool.sh` spawn the same upstream through `--mcp-proxy`
 and additionally need the llm endpoint. The `repl-*.sh` scripts need the llm
 endpoint; `repl-minimal.sh` wants an interactive terminal (the styled chat),
 while `repl-scripted.sh` pipes its turns and shows the plain non-tty
-rendering.
+rendering. `prettyprint.sh` needs nothing at all - it replays
+`runner/continuation.jsonl` offline.
 
 ## quick start
 

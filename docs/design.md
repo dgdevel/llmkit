@@ -24,6 +24,7 @@ details in sec.5 and sec.6. Where this document picks a ceiling, it is marked
 14. [build and packaging](#14-build-and-packaging)
 15. [testing](#15-testing)
 16. [mcp-repl](#16-mcp-repl)
+17. [prettyprint](#17-prettyprint)
 
 ## 1. technology choices
 
@@ -670,7 +671,8 @@ validation), `src/wire_openai.c`, `src/wire_anthropic.c`, `src/sse.c`,
 `src/platform.c` (threads, spawn, signals, the windows halves of both),
 `src/editor.c` (the shared line editor, plain reader, wall-clock stamp),
 `src/repl.c` (repl session loop, display sink),
-`src/mcprepl.c` (mcp-repl session, call syntax, console rendering).
+`src/mcprepl.c` (mcp-repl session, call syntax, console rendering),
+`src/pretty.c` (prettyprint: the display sink replayed on a file).
 The windows build adds the vendored openbsd regex (mingw ships no
 `<regex.h>`): the Makefile detects the mingw compiler target, compiles
 `src/vendor/regex/*.c` as their own translation units (`regex2.h` is a
@@ -710,6 +712,11 @@ the openbsd-libc bits mingw lacks. Link flags: `-lcjson -lcurl`.
   off-tty styling fallback. `ponytail:` the raw-mode editor and the two
   ctrl-c stages at the prompt need a pty; they are a manual smoke pass,
   no in-tree pty harness.
+- **prettyprint**: transcript vectors through `pretty_run` on memory
+  streams - golden rendering bytes (user blocks, thinking, tool traffic,
+  error lines, the usage line with and without usage on the final
+  record), consecutive users, empty input, and the fatal tier: malformed
+  json, proxy config records, a user record without its block list.
 - **terminal tools**: engine vectors through the fake endpoint and the tool
   exec seam - a terminal `tool_request` ends the run with exit 9 and no
   error record, the rest of the batch suspended `is_error`, a failed or
@@ -774,3 +781,43 @@ hook. No new wire, mcp or loop code.
 `ponytail:` no per-server timeout flag (the rpc default 30s applies), no
 re-list on `tools/list_changed` (restart the console), no pty harness in
 tree for the completion.
+
+## 17. prettyprint
+
+Eighth entry point, and the one with no engine, wire or mcp in it at
+all: `llmkit prettyprint` is the transcript viewer (requirements
+sec.14). One new `src/pretty.c`; it reads one jsonl conversation - the
+file argument, else stdin - through the shared byte pipeline and renders
+it with the repl's display (sec.12): the same style probe, the same
+rule drawing, the same sink framing state machine, copied rather than
+shared because the two sinks differ at exactly the live parts - the
+repl's mono-clock timing hooks have no meaning against a file.
+
+- **rendering** - sec.12's contract replayed record by record: the
+  heavy rule and bold text per `user` block (the repl's non-tty shape -
+  no `>` glyph, nothing was typed), light rules opening thinking,
+  response and tool blocks with the lazy-separator rule, partials
+  appending under their block's one rule, thinking italic, tool
+  requests bold `name` + compact arguments, tool responses bold,
+  errors as `!`-lines, empty blocks nothing. Config and control
+  records (`header`, `llm`, `tools`, `options`, `system`, `flush`,
+  `start`) render nothing - the records a live session never showed.
+- **usage line** - the file's counterpart of the repl's timing line: a
+  transcript carries no clocks, so a response block whose closing
+  record reports the turn's `usage` closes with
+  `[HH:MM:SS] input <n> tok | output <n> tok` instead. A turn that
+  ended any other way renders no line, the timing rule. `signature`,
+  `finish_reason` and every other field stay undisplayed.
+- **input rules** - the runner's byte pipeline verbatim (`jsonl_feed`:
+  CR dropped, strict UTF-8, NUL rejected) and its fatal tier: a
+  malformed line, an unknown type (proxy `expose`/`hide` included -
+  not conversation records) or a `user` record without a valid
+  content list renders one `! invalid_record` line and exits 2. The
+  `user` check is the one validation run: it is the single record
+  whose shape the framing leans on; the rendered fields of the rest
+  are read null-safely and degrade to empty blocks, never to garbage.
+  An unopenable file is a startup error: stderr, exit 1.
+- **exit codes** - 0 rendered (error records in the file are content,
+  not endings - the viewer draws what happened), 2 invalid record,
+  1 stdout write failure.
+- Threads: none, not even inherited - one fread loop over the input.
