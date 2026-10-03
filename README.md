@@ -11,11 +11,11 @@ A single static-purpose executable for llm interaction from the shell and from o
 | `llmkit mcp-proxy <config.jsonl>` | exposes a curated view (rename, redescribe, hide) of upstream mcp servers on stdio |
 | `llmkit builtin-mcp` | serves the built-in generic-use mcp tools (web search/fetch, file list/search/read/create/edit) on stdio |
 | `llmkit mcp-repl <flags>` | the interactive tool console for one mcp server: tab-completed `name(args)` calls, one timing line each |
-| `llmkit prettyprint [conversation.jsonl]` | renders a recorded conversation jsonl with the repl's typography (stdin without a file) |
+| `llmkit prettyprint <conversation.jsonl>` | renders a recorded conversation jsonl with the repl's typography (stdin without a file) |
 
 Written in C11. Talks to any openai-compatible endpoint (chat completions and responses apis) and any anthropic-compatible endpoint. Tools are mcp servers: `stdio`, `http` (streamable http) and `sse` (legacy) transports, in all current protocol revisions up to `2026-07-28`.
 
-`repl` is the easies to use, `call` is aimed at use in scripting, `runner` is the full package for applications interaction.
+`repl` is the easies to use, `call` is aimed at use in scripting, `runner` is the full package for applications interaction. Other utilities are provided for interaction with mcps and debugging.
 
 ## Examples
 
@@ -55,7 +55,7 @@ divide(float a, float b): divide a by b
 [10:31:09] 0.003s
 ```
 
-Arguments are json literals, bound positionally onto the tool's schema (`add(1, 1)` sends `{"a":1,"b":2}`; an integer literal is a json number, valid for a float parameter). Tab completes tool names from the listing, `[HH:MM:SS] <seconds>` follows every call, `tools` re-lists, `help` explains, `quit` or Ctrl-D ends (exit 0, Ctrl-C at a clear prompt exit 8). Tool errors, unknown tools and syntax mistakes render as `!`-lines and the session lives on.
+Arguments are json literals, bound positionally onto the tool's schema (`add(1, 1)` sends `{"a":1,"b":2}`; an integer literal is a json number, valid for a float parameter). Tab completes tool names from the listing, `tools` re-lists, `help` explains, `quit` or Ctrl-D ends (exit 0, Ctrl-C at a clear prompt exit 8). Tool errors, unknown tools and syntax mistakes render as `!`-lines and the session lives on.
 
 For one-shot use from the shell there is `llmkit call`: flags in, the answer as plain text on stdout, thinking omitted, no records to write -
 
@@ -91,24 +91,14 @@ Tools: add a `tools` record before the `user` record -
 
 `llmkit call --mcp-proxy cfg.jsonl --terminal-tool fs.confirm` marks tools the same way from the command line; the answer is then the tool's text. `llmkit agent-as-tool` seeds honor the attribute too: the `invoke` reply is the terminal tool's answer.
 
-No external tool server at hand? `llmkit builtin-mcp` is one: seven generic-use tools (web search and fetch, file list/search/read/create/edit) served from the same binary, with every tool and argument description starting empty and editable in one block at the top of `src/builtin.c`:
-
-```json
-{"type":"tools","tools":[{"type":"stdio","name":"builtin","command_line":"llmkit builtin-mcp"}]}
+No external tool server at hand? `llmkit builtin-mcp` is one: seven generic-use tools (web search and fetch, file list/search/read/create/edit) served from the same binary.
+```sh
+llmkit mcp-repl --stdio 'llmkit builtin-mcp'
 ```
 
 See [docs/builtin-mcp.md](docs/builtin-mcp.md) for the tool contracts, response formats and the description editing spot.
 
 A saved transcript reads back human again with `llmkit prettyprint`: the runner's jsonl in - a file argument or stdin - the repl's rendering out, every user block under its heavy rule, thinking italic, tool traffic bold, one usage line per turn that reports one. Nothing is sent anywhere; the file is only read and drawn.
-
-```sh
-$ llmkit prettyprint session.jsonl
-[10:31:04] =====================================================================
-hello, what is 2+2?
-[10:31:05] ---------------------------------------------------------------------
-2 + 2 equals 4.
-[10:31:05] input 501 tok | output 22 tok
-```
 
 Runnable examples for every command live in [examples/](examples/) - see [docs/records.md](docs/records.md) for the minimal and complete form of each record.
 
