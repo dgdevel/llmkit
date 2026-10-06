@@ -767,6 +767,44 @@ int repl_run(const call_cfg_t *c, int in_fd, FILE *out, const char *exe_path,
    returns the exit code: 0 rendered, 2 invalid record, 1 write failure */
 int pretty_run(FILE *in, FILE *out);
 
+/* the same display fed record by record instead of from a file: the live
+   wire viewer's renderer (llmkit proxy). Renders what prettyprint renders;
+   ownership of the record stays with the caller. */
+typedef struct pretty_live pretty_live_t;
+pretty_live_t *pretty_live_new(FILE *out);
+void pretty_live_record(pretty_live_t *l, cJSON *rec);
+bool pretty_live_io_failed(const pretty_live_t *l);
+void pretty_live_free(pretty_live_t *l);
+
+/* ================= llmproxy.c ================= */
+
+/* parsed `llmkit proxy` command line; the parser owns CLI shape only */
+typedef struct llm_proxy_cfg {
+    int protocol;                          /* PROTO_* */
+    char *api_base;                        /* owned (rides the protocol flag) */
+    char *key, *listen;                    /* owned, NULL = absent */
+} llm_proxy_cfg_t;
+
+void llm_proxy_cfg_free(llm_proxy_cfg_t *c);
+/* 0 ok, 1 usage error (err filled, cfg freed) */
+int llm_proxy_parse(int argc, char **argv, llm_proxy_cfg_t *c, char *err,
+                    size_t errsz);
+
+/* the wire -> record interception (selfcheck seams): a request body, a
+   complete response body (any status) and a streamed response fed live
+   map to the record catalogue in the protocol's shapes; the emit sink
+   owns each record */
+void llm_proxy_map_request(int proto, const char *body, size_t n,
+                           emit_fn em, void *ctx);
+void llm_proxy_map_response(int proto, long status, const char *body,
+                            size_t n, emit_fn em, void *ctx);
+
+typedef struct llm_proxy_sse llm_proxy_sse_t;
+llm_proxy_sse_t *llm_proxy_sse_new(int proto, emit_fn em, void *ctx);
+void llm_proxy_sse_feed(llm_proxy_sse_t *s, const char *bytes, size_t n);
+void llm_proxy_sse_finish(llm_proxy_sse_t *s); /* closes the turn's blocks */
+void llm_proxy_sse_free(llm_proxy_sse_t *s);
+
 /* ================= commands ================= */
 
 int cmd_runner(void);
@@ -777,6 +815,7 @@ int cmd_call(int argc, char **argv);
 int cmd_repl(int argc, char **argv);
 int cmd_mcp_repl(int argc, char **argv);
 int cmd_prettyprint(const char *path); /* NULL or "-": stdin */
+int cmd_llmproxy(int argc, char **argv);
 int cmd_help(void);
 int cmd_version(void);
 

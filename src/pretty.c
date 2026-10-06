@@ -199,6 +199,34 @@ static void pretty_record(pretty_sink_t *s, const cJSON *rec) {
        start, agent-as-tool - renders nothing */
 }
 
+/* ================= live renderer ================= */
+/* the same sink pretty_run frames, but fed record by record by a caller
+   watching a live wire (llmkit proxy) instead of reading a file. Renders
+   exactly what prettyprint renders - that is the point. */
+
+struct pretty_live {
+    pretty_sink_t s;
+    style_t st; /* owned: the sink keeps a pointer into this */
+};
+
+pretty_live_t *pretty_live_new(FILE *out) {
+    pretty_live_t *l = calloc(1, sizeof *l);
+    if (!l) return NULL;
+    style_probe(&l->st, out);
+    l->s.out = out;
+    l->s.st = &l->st;
+    l->s.cur = -1;
+    return l;
+}
+
+void pretty_live_record(pretty_live_t *l, cJSON *rec) {
+    pretty_record(&l->s, rec);
+}
+
+bool pretty_live_io_failed(const pretty_live_t *l) { return l->s.io_fail; }
+
+void pretty_live_free(pretty_live_t *l) { free(l); }
+
 /* ================= input ================= */
 
 typedef struct pretty_ctx {

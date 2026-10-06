@@ -3674,6 +3674,504 @@ static void test_terminal_tools(void) {
     cap_destroy(&cap);
 }
 
+/* ================= llmkit proxy ================= */
+
+/* join emitted records into one jsonl string */
+typedef struct {
+    buf_t b;
+} jb_t;
+
+static void jb_fn(void *ctx, cJSON *rec) {
+    jb_t *j = ctx;
+    buf_append_tree(&j->b, rec);
+    buf_append_byte(&j->b, '\n');
+}
+
+/* the [HH:MM:SS] stamps are the wall clock: golden-exact after the
+   placeholder swap */
+static void scrub_stamps(char *s) {
+    size_t n = strlen(s), r = 0, w = 0;
+    while (r < n) {
+        if (r + 11 <= n && s[r] == '[' &&
+            s[r + 1] >= '0' && s[r + 1] <= '9' &&
+            s[r + 2] >= '0' && s[r + 2] <= '9' && s[r + 3] == ':' &&
+            s[r + 4] >= '0' && s[r + 4] <= '9' &&
+            s[r + 5] >= '0' && s[r + 5] <= '9' && s[r + 6] == ':' &&
+            s[r + 7] >= '0' && s[r + 7] <= '9' &&
+            s[r + 8] >= '0' && s[r + 8] <= '9' && s[r + 9] == ']' &&
+            s[r + 10] == ' ') {
+            s[w++] = '[';
+            s[w++] = 'T';
+            s[w++] = 'S';
+            s[w++] = ']';
+            s[w++] = ' ';
+            r += 11;
+        } else {
+            s[w++] = s[r++];
+        }
+    }
+    s[w] = '\0';
+}
+
+static void exp_rule(buf_t *b, char glyph) {
+    buf_append_str(b, "[TS] ");
+    for (int i = 0; i < 80 - 11; i++) buf_append_byte(b, glyph);
+    buf_append_byte(b, '\n');
+}
+
+static void test_llm_proxy(void) {
+    llm_proxy_cfg_t c;
+    char err[256];
+    jb_t j;
+
+    /* ---- parse ---- */
+    {
+        char *av[] = {"--openai", "http://x/v1", "--key", "k",
+                      "--listen", "0.0.0.0:9090"};
+        check(llm_proxy_parse(6, av, &c, err, sizeof err) == 0,
+              "proxy: full vector parses");
+        check(c.protocol == PROTO_OPENAI && !strcmp(c.api_base, "http://x/v1") &&
+                  !strcmp(c.key, "k") && !strcmp(c.listen, "0.0.0.0:9090"),
+              "proxy: fields captured");
+        llm_proxy_cfg_free(&c);
+    }
+    {
+        char *av[] = {"--anthropic", "https://a/v1"};
+        check(llm_proxy_parse(2, av, &c, err, sizeof err) == 0,
+              "proxy: anthropic vector parses");
+        check(c.protocol == PROTO_ANTHROPIC && c.key == NULL &&
+                  !strcmp(c.listen, "127.0.0.1:8080"),
+              "proxy: default listen, absent key");
+        llm_proxy_cfg_free(&c);
+    }
+    {
+        char *av[] = {"--openai-responses", "http://x"};
+        check(llm_proxy_parse(2, av, &c, err, sizeof err) == 0 &&
+                  c.protocol == PROTO_RESPONSES,
+              "proxy: responses mapping");
+        llm_proxy_cfg_free(&c);
+    }
+    {
+        char *av[] = {"--openai", "http://x", "--anthropic", "http://y"};
+        check(llm_proxy_parse(4, av, &c, err, sizeof err) == 1,
+              "proxy: protocol flag twice rejected");
+        llm_proxy_cfg_free(&c);
+    }
+    {
+        char *av[] = {"--openai"};
+        check(llm_proxy_parse(1, av, &c, err, sizeof err) == 1,
+              "proxy: missing api_base value rejected");
+        llm_proxy_cfg_free(&c);
+    }
+    {
+        char *av[] = {"--openai", "http://x", "--banana"};
+        check(llm_proxy_parse(3, av, &c, err, sizeof err) == 1,
+              "proxy: unknown flag rejected");
+        llm_proxy_cfg_free(&c);
+    }
+    {
+        char *av[] = {"--openai", "http://x", "stray"};
+        check(llm_proxy_parse(3, av, &c, err, sizeof err) == 1,
+              "proxy: positional argument rejected");
+        llm_proxy_cfg_free(&c);
+    }
+    {
+        char *av[] = {"--key", "k"};
+        check(llm_proxy_parse(2, av, &c, err, sizeof err) == 1,
+              "proxy: missing protocol flag rejected");
+        llm_proxy_cfg_free(&c);
+    }
+
+    /* ---- request mapping ---- */
+    {
+        const char *body =
+            "{\"model\":\"m\",\"messages\":["
+            "{\"role\":\"system\",\"content\":\"sys\"},"
+            "{\"role\":\"user\",\"content\":\"hi\"},"
+            "{\"role\":\"assistant\",\"content\":\"think\",\"tool_calls\":"
+            "[{\"id\":\"c1\",\"type\":\"function\",\"function\":"
+            "{\"name\":\"get\",\"arguments\":\"{\\\"a\\\":1}\"}}]},"
+            "{\"role\":\"tool\",\"tool_call_id\":\"c1\",\"content\":\"res\"}]}";
+        buf_init(&j.b);
+        llm_proxy_map_request(PROTO_OPENAI, body, strlen(body), jb_fn, &j);
+        check_str(j.b.data,
+                  "{\"type\":\"user\",\"content\":[{\"type\":\"text\","
+                  "\"text\":\"hi\"}]}\n"
+                  "{\"type\":\"response\",\"text\":\"think\","
+                  "\"partial\":false}\n"
+                  "{\"type\":\"tool_request\",\"tool\":\"get\","
+                  "\"arguments\":{\"a\":1},\"id\":\"c1\"}\n"
+                  "{\"type\":\"tool_response\",\"id\":\"c1\","
+                  "\"text\":\"res\"}\n",
+                  "proxy: chat request mapping");
+        buf_free(&j.b);
+    }
+    {
+        const char *body =
+            "{\"model\":\"m\",\"instructions\":\"sys\",\"input\":["
+            "{\"type\":\"message\",\"role\":\"user\",\"content\":"
+            "[{\"type\":\"input_text\",\"text\":\"hi\"}]},"
+            "{\"type\":\"function_call\",\"call_id\":\"c1\",\"name\":\"get\","
+            "\"arguments\":\"{\\\"a\\\":1}\"},"
+            "{\"type\":\"function_call_output\",\"call_id\":\"c1\","
+            "\"output\":\"res\"},"
+            "{\"type\":\"reasoning\",\"summary\":"
+            "[{\"type\":\"summary_text\",\"text\":\"hm\"}]}]}";
+        buf_init(&j.b);
+        llm_proxy_map_request(PROTO_RESPONSES, body, strlen(body), jb_fn, &j);
+        check_str(j.b.data,
+                  "{\"type\":\"user\",\"content\":[{\"type\":\"text\","
+                  "\"text\":\"hi\"}]}\n"
+                  "{\"type\":\"tool_request\",\"tool\":\"get\","
+                  "\"arguments\":{\"a\":1},\"id\":\"c1\"}\n"
+                  "{\"type\":\"tool_response\",\"id\":\"c1\","
+                  "\"text\":\"res\"}\n"
+                  "{\"type\":\"thinking\",\"text\":\"hm\",\"partial\":false,"
+                  "\"signature\":\"\"}\n",
+                  "proxy: responses request mapping");
+        buf_free(&j.b);
+    }
+    {
+        const char *body =
+            "{\"system\":\"sys\",\"messages\":["
+            "{\"role\":\"user\",\"content\":["
+            "{\"type\":\"tool_result\",\"tool_use_id\":\"c1\","
+            "\"content\":\"res\"},"
+            "{\"type\":\"text\",\"text\":\"hi\"}]},"
+            "{\"role\":\"assistant\",\"content\":["
+            "{\"type\":\"thinking\",\"thinking\":\"hm\",\"signature\":\"s\"},"
+            "{\"type\":\"text\",\"text\":\"ans\"},"
+            "{\"type\":\"tool_use\",\"id\":\"c2\",\"name\":\"get\","
+            "\"input\":{\"a\":1}}]}]}";
+        buf_init(&j.b);
+        llm_proxy_map_request(PROTO_ANTHROPIC, body, strlen(body), jb_fn, &j);
+        check_str(j.b.data,
+                  "{\"type\":\"tool_response\",\"id\":\"c1\","
+                  "\"text\":\"res\"}\n"
+                  "{\"type\":\"user\",\"content\":[{\"type\":\"text\","
+                  "\"text\":\"hi\"}]}\n"
+                  "{\"type\":\"thinking\",\"text\":\"hm\","
+                  "\"partial\":false,\"signature\":\"s\"}\n"
+                  "{\"type\":\"response\",\"text\":\"ans\","
+                  "\"partial\":false}\n"
+                  "{\"type\":\"tool_request\",\"tool\":\"get\","
+                  "\"arguments\":{\"a\":1},\"id\":\"c2\"}\n",
+                  "proxy: anthropic request mapping");
+        buf_free(&j.b);
+    }
+    {
+        buf_init(&j.b);
+        llm_proxy_map_request(PROTO_OPENAI, "not json", 8, jb_fn, &j);
+        check_str(j.b.data,
+                  "{\"type\":\"error\",\"code\":\"invalid_record\","
+                  "\"message\":\"request body is not json\",\"fatal\":true}\n",
+                  "proxy: malformed request body");
+        buf_free(&j.b);
+    }
+
+    /* ---- response mapping (json bodies) ---- */
+    {
+        const char *body =
+            "{\"choices\":[{\"message\":{\"reasoning_content\":\"hm\","
+            "\"content\":\"ans\",\"tool_calls\":[{\"id\":\"c1\","
+            "\"function\":{\"name\":\"get\",\"arguments\":\"{}\"}}]}}],"
+            "\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":20}}";
+        buf_init(&j.b);
+        llm_proxy_map_response(PROTO_OPENAI, 200, body, strlen(body), jb_fn,
+                               &j);
+        check_str(j.b.data,
+                  "{\"type\":\"thinking\",\"text\":\"hm\",\"partial\":false,"
+                  "\"signature\":\"\"}\n"
+                  "{\"type\":\"response\",\"text\":\"ans\","
+                  "\"partial\":false}\n"
+                  "{\"type\":\"tool_request\",\"tool\":\"get\","
+                  "\"arguments\":{},\"id\":\"c1\","
+                  "\"usage\":{\"input_tokens\":10,\"output_tokens\":20}}\n",
+                  "proxy: chat response mapping, usage on the last");
+        buf_free(&j.b);
+    }
+    {
+        const char *body =
+            "{\"output\":[{\"type\":\"reasoning\","
+            "\"summary\":[{\"text\":\"hm\"}]},{\"type\":\"message\","
+            "\"content\":[{\"type\":\"output_text\",\"text\":\"ans\"}]}],"
+            "\"usage\":{\"input_tokens\":5,\"output_tokens\":6}}";
+        buf_init(&j.b);
+        llm_proxy_map_response(PROTO_RESPONSES, 200, body, strlen(body),
+                               jb_fn, &j);
+        check_str(j.b.data,
+                  "{\"type\":\"thinking\",\"text\":\"hm\",\"partial\":false,"
+                  "\"signature\":\"\"}\n"
+                  "{\"type\":\"response\",\"text\":\"ans\","
+                  "\"partial\":false,\"usage\":{\"input_tokens\":5,"
+                  "\"output_tokens\":6}}\n",
+                  "proxy: responses response mapping");
+        buf_free(&j.b);
+    }
+    {
+        const char *body =
+            "{\"content\":[{\"type\":\"thinking\",\"thinking\":\"hm\","
+            "\"signature\":\"s\"},{\"type\":\"text\",\"text\":\"ans\"}],"
+            "\"usage\":{\"input_tokens\":1,\"output_tokens\":2}}";
+        buf_init(&j.b);
+        llm_proxy_map_response(PROTO_ANTHROPIC, 200, body, strlen(body),
+                               jb_fn, &j);
+        check_str(j.b.data,
+                  "{\"type\":\"thinking\",\"text\":\"hm\",\"partial\":false,"
+                  "\"signature\":\"s\"}\n"
+                  "{\"type\":\"response\",\"text\":\"ans\","
+                  "\"partial\":false,\"usage\":{\"input_tokens\":1,"
+                  "\"output_tokens\":2}}\n",
+                  "proxy: anthropic response mapping");
+        buf_free(&j.b);
+    }
+    {
+        const char *body =
+            "{\"error\":{\"message\":\"bad key\",\"type\":"
+            "\"invalid_request_error\"}}";
+        buf_init(&j.b);
+        llm_proxy_map_response(PROTO_OPENAI, 401, body, strlen(body), jb_fn,
+                               &j);
+        check_str(j.b.data,
+                  "{\"type\":\"error\",\"code\":\"api_error\","
+                  "\"message\":\"HTTP 401: bad key "
+                  "(invalid_request_error)\",\"fatal\":true}\n",
+                  "proxy: openai error shaping");
+        buf_free(&j.b);
+        buf_init(&j.b);
+        llm_proxy_map_response(PROTO_ANTHROPIC, 429, body, strlen(body),
+                               jb_fn, &j);
+        check_str(j.b.data,
+                  "{\"type\":\"error\",\"code\":\"api_error\","
+                  "\"message\":\"HTTP 429: bad key\",\"fatal\":true}\n",
+                  "proxy: anthropic error shaping (no type suffix)");
+        buf_free(&j.b);
+    }
+    {
+        buf_init(&j.b);
+        llm_proxy_map_response(PROTO_OPENAI, 200, "not json", 8, jb_fn, &j);
+        check_str(j.b.data,
+                  "{\"type\":\"error\",\"code\":\"http_error\","
+                  "\"message\":\"endpoint returned a non-json body\","
+                  "\"fatal\":true}\n",
+                  "proxy: non-json 2xx body");
+        buf_free(&j.b);
+    }
+
+    /* ---- response mapping (sse streams) ---- */
+    {
+        const char *stream =
+            "data: {\"choices\":[{\"delta\":{\"content\":\"He\"}}]}\n\n"
+            "data: {\"choices\":[{\"delta\":{\"content\":\"llo\"}}]}\n\n"
+            "data: {\"choices\":[{\"delta\":"
+            "{\"tool_calls\":[{\"index\":0,\"id\":\"c1\",\"function\":"
+            "{\"name\":\"get\",\"arguments\":\"{\\\"a\\\"\"}}]}}]}\n\n"
+            "data: {\"choices\":[{\"delta\":"
+            "{\"tool_calls\":[{\"index\":0,\"function\":"
+            "{\"arguments\":\":1}\"}}]}}]}\n\n"
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":3,"
+            "\"completion_tokens\":4}}\n\n"
+            "data: [DONE]\n\n";
+        buf_init(&j.b);
+        llm_proxy_sse_t *s =
+            llm_proxy_sse_new(PROTO_OPENAI, jb_fn, &j);
+        check(s != NULL, "proxy: chat sse parser created");
+        /* split at the most awkward boundary: one byte at a time */
+        for (size_t i = 0; i < strlen(stream); i++)
+            llm_proxy_sse_feed(s, stream + i, 1);
+        llm_proxy_sse_finish(s);
+        llm_proxy_sse_free(s);
+        check_str(j.b.data,
+                  "{\"type\":\"response\",\"text\":\"He\",\"partial\":true}\n"
+                  "{\"type\":\"response\",\"text\":\"llo\","
+                  "\"partial\":true}\n"
+                  "{\"type\":\"response\",\"text\":\"\",\"partial\":false}\n"
+                  "{\"type\":\"tool_request\",\"tool\":\"get\","
+                  "\"arguments\":{\"a\":1},\"id\":\"c1\","
+                  "\"usage\":{\"input_tokens\":3,\"output_tokens\":4}}\n",
+                  "proxy: chat sse mapping, byte-split feed");
+        buf_free(&j.b);
+    }
+    {
+        const char *stream =
+            "event: response.output_text.delta\n"
+            "data: {\"delta\":\"An\"}\n\n"
+            "event: response.function_call_arguments.delta\n"
+            "data: {\"output_index\":0,\"delta\":\"{\\\"a\\\":1}\"}\n\n"
+            "event: response.output_item.done\n"
+            "data: {\"item\":{\"type\":\"function_call\",\"output_index\":0,"
+            "\"call_id\":\"c1\",\"name\":\"get\","
+            "\"arguments\":\"{\\\"a\\\":1}\"}}\n\n"
+            "event: response.completed\n"
+            "data: {\"response\":{\"usage\":{\"input_tokens\":1,"
+            "\"output_tokens\":2}}}\n\n";
+        buf_init(&j.b);
+        llm_proxy_sse_t *s =
+            llm_proxy_sse_new(PROTO_RESPONSES, jb_fn, &j);
+        llm_proxy_sse_feed(s, stream, strlen(stream));
+        llm_proxy_sse_finish(s);
+        llm_proxy_sse_free(s);
+        check_str(j.b.data,
+                  "{\"type\":\"response\",\"text\":\"An\",\"partial\":true}\n"
+                  "{\"type\":\"response\",\"text\":\"\",\"partial\":false}\n"
+                  "{\"type\":\"tool_request\",\"tool\":\"get\","
+                  "\"arguments\":{\"a\":1},\"id\":\"c1\","
+                  "\"usage\":{\"input_tokens\":1,\"output_tokens\":2}}\n",
+                  "proxy: responses sse mapping");
+        buf_free(&j.b);
+    }
+    {
+        const char *stream =
+            "event: message_start\n"
+            "data: {\"message\":{\"usage\":{\"input_tokens\":7}}}\n\n"
+            "event: content_block_start\n"
+            "data: {\"index\":0,\"content_block\":{\"type\":\"thinking\"}}\n\n"
+            "event: content_block_delta\n"
+            "data: {\"index\":0,\"delta\":{\"type\":\"thinking_delta\","
+            "\"thinking\":\"hm\"}}\n\n"
+            "event: content_block_delta\n"
+            "data: {\"index\":0,\"delta\":{\"type\":\"signature_delta\","
+            "\"signature\":\"sig\"}}\n\n"
+            "event: content_block_stop\n"
+            "data: {\"index\":0}\n\n"
+            "event: content_block_start\n"
+            "data: {\"index\":1,\"content_block\":{\"type\":\"text\"}}\n\n"
+            "event: content_block_delta\n"
+            "data: {\"index\":1,\"delta\":{\"type\":\"text_delta\","
+            "\"text\":\"ans\"}}\n\n"
+            "event: content_block_stop\n"
+            "data: {\"index\":1}\n\n"
+            "event: content_block_start\n"
+            "data: {\"index\":2,\"content_block\":{\"type\":\"tool_use\","
+            "\"id\":\"c1\",\"name\":\"get\"}}\n\n"
+            "event: content_block_delta\n"
+            "data: {\"index\":2,\"delta\":{\"type\":\"input_json_delta\","
+            "\"partial_json\":\"{\\\"a\\\":1}\"}}\n\n"
+            "event: content_block_stop\n"
+            "data: {\"index\":2}\n\n"
+            "event: message_delta\n"
+            "data: {\"usage\":{\"output_tokens\":9}}\n\n"
+            "event: message_stop\n"
+            "data: {}\n\n";
+        buf_init(&j.b);
+        llm_proxy_sse_t *s =
+            llm_proxy_sse_new(PROTO_ANTHROPIC, jb_fn, &j);
+        llm_proxy_sse_feed(s, stream, strlen(stream));
+        llm_proxy_sse_finish(s);
+        llm_proxy_sse_free(s);
+        check_str(j.b.data,
+                  "{\"type\":\"thinking\",\"text\":\"hm\",\"partial\":true}\n"
+                  "{\"type\":\"response\",\"text\":\"ans\","
+                  "\"partial\":true}\n"
+                  /* the engine's held-final order: a streamed block's
+                     final record is emitted at the NEXT block's stop
+                     (blk_stop releases the previous pending first), so
+                     the thinking final lands after the response partials */
+                  "{\"type\":\"thinking\",\"text\":\"\","
+                  "\"partial\":false,\"signature\":\"sig\"}\n"
+                  "{\"type\":\"response\",\"text\":\"\","
+                  "\"partial\":false}\n"
+                  "{\"type\":\"tool_request\",\"tool\":\"get\","
+                  "\"arguments\":{\"a\":1},\"id\":\"c1\","
+                  "\"usage\":{\"input_tokens\":7,\"output_tokens\":9}}\n",
+                  "proxy: anthropic sse mapping");
+        buf_free(&j.b);
+    }
+    {
+        const char *stream =
+            "event: content_block_start\n"
+            "data: {\"index\":0,\"content_block\":{\"type\":\"text\"}}\n\n"
+            "event: content_block_delta\n"
+            "data: {\"index\":0,\"delta\":{\"type\":\"text_delta\","
+            "\"text\":\"cut\"}}\n\n";
+        buf_init(&j.b);
+        llm_proxy_sse_t *s =
+            llm_proxy_sse_new(PROTO_ANTHROPIC, jb_fn, &j);
+        llm_proxy_sse_feed(s, stream, strlen(stream));
+        llm_proxy_sse_finish(s);
+        llm_proxy_sse_free(s);
+        check_str(j.b.data,
+                  "{\"type\":\"response\",\"text\":\"cut\","
+                  "\"partial\":true}\n"
+                  "{\"type\":\"error\",\"code\":\"api_error\","
+                  "\"message\":\"stream ended without message_stop\","
+                  "\"fatal\":true}\n",
+                  "proxy: anthropic stream without message_stop");
+        buf_free(&j.b);
+    }
+    {
+        const char *stream =
+            "event: error\n"
+            "data: {\"error\":{\"message\":\"boom\"}}\n\n";
+        buf_init(&j.b);
+        llm_proxy_sse_t *s =
+            llm_proxy_sse_new(PROTO_ANTHROPIC, jb_fn, &j);
+        llm_proxy_sse_feed(s, stream, strlen(stream));
+        llm_proxy_sse_finish(s);
+        llm_proxy_sse_free(s);
+        check_str(j.b.data,
+                  "{\"type\":\"error\",\"code\":\"api_error\","
+                  "\"message\":\"boom\",\"fatal\":true}\n",
+                  "proxy: sse error event");
+        buf_free(&j.b);
+    }
+
+    /* ---- the rendered view is prettyprint's ---- */
+    {
+        char *ob = NULL;
+        size_t on = 0;
+        FILE *out = open_memstream(&ob, &on);
+        check(out != NULL, "proxy: render memstream");
+        pretty_live_t *pr = pretty_live_new(out);
+        check(pr != NULL, "proxy: live renderer created");
+        check(!pretty_live_io_failed(pr), "proxy: renderer healthy");
+        /* the anthropic request + json response of the vectors above */
+        cJSON *recs[6];
+        recs[0] = cJSON_Parse(
+            "{\"type\":\"tool_response\",\"id\":\"c1\",\"text\":\"res\"}");
+        recs[1] = cJSON_Parse(
+            "{\"type\":\"user\",\"content\":[{\"type\":\"text\","
+            "\"text\":\"hi\"}]}");
+        recs[2] = cJSON_Parse(
+            "{\"type\":\"thinking\",\"text\":\"hm\",\"partial\":false,"
+            "\"signature\":\"s\"}");
+        recs[3] = cJSON_Parse(
+            "{\"type\":\"response\",\"text\":\"ans\",\"partial\":false,"
+            "\"usage\":{\"input_tokens\":1,\"output_tokens\":2}}");
+        recs[4] = cJSON_Parse(
+            "{\"type\":\"tool_request\",\"tool\":\"get\","
+            "\"arguments\":{\"a\":1},\"id\":\"c2\"}");
+        recs[5] = cJSON_Parse(
+            "{\"type\":\"error\",\"code\":\"api_error\","
+            "\"message\":\"HTTP 500: nope\",\"fatal\":true}");
+        for (int i = 0; i < 6; i++) {
+            pretty_live_record(pr, recs[i]);
+            cJSON_Delete(recs[i]);
+        }
+        check(!pretty_live_io_failed(pr), "proxy: renderer still healthy");
+        pretty_live_free(pr);
+        fclose(out);
+        scrub_stamps(ob);
+        buf_t want;
+        buf_init(&want);
+        exp_rule(&want, '-'); /* tool traffic: the light rule */
+        buf_append_str(&want, "res\n");
+        exp_rule(&want, '=');
+        buf_append_str(&want, "hi\n");
+        exp_rule(&want, '-');
+        buf_append_str(&want, "hm\n");
+        exp_rule(&want, '-');
+        buf_append_str(&want,
+                       "ans\n[TS] input 1 tok | output 2 tok\n");
+        exp_rule(&want, '-');
+        buf_append_str(&want, "get {\"a\":1}\n");
+        buf_append_str(&want, "! api_error: HTTP 500: nope\n");
+        check_str(ob, want.data ? want.data : "", "proxy: pretty rendering");
+        free(ob);
+        buf_free(&want);
+    }
+}
+
 int main(void) {
     signals_init();
     http_global_init();
@@ -3710,6 +4208,8 @@ int main(void) {
     test_mcp_repl();
     fprintf(stderr, "selfcheck: terminal tools\n");
     test_terminal_tools();
+    fprintf(stderr, "selfcheck: llmkit proxy\n");
+    test_llm_proxy();
     fprintf(stderr, "%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
 }

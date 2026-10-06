@@ -15,7 +15,7 @@ endif
 SRC  = src/buf.c src/sse.c src/platform.c src/jsonl.c src/wire_openai.c \
        src/wire_anthropic.c src/engine.c src/mcp.c src/agent.c src/proxy.c \
        src/builtin.c src/call.c src/editor.c src/repl.c src/mcprepl.c \
-       src/pretty.c
+       src/pretty.c src/llmproxy.c
 MAIN = src/main.c
 TEST = test/selfcheck.c
 

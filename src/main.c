@@ -26,6 +26,9 @@ static int usage(FILE *out) {
           "  prettyprint [file]     render a conversation jsonl with the\n"
           "                         repl's typography; stdin without a\n"
           "                         file\n"
+          "  proxy <flags>          plain-http llm endpoint that forwards\n"
+          "                         to one upstream and prints the passing\n"
+          "                         conversation prettyprint-style\n"
           "  help                   show this help\n"
           "  version                show the version\n",
           out);
@@ -70,6 +73,7 @@ int main(int argc, char **argv) {
         if (argc > 3) return usage(stderr);
         return cmd_prettyprint(argc == 3 ? argv[2] : NULL);
     }
+    if (!strcmp(cmd, "proxy")) return cmd_llmproxy(argc, argv);
     if (!strcmp(cmd, "help")) return cmd_help();
     if (!strcmp(cmd, "version")) return cmd_version();
     fprintf(stderr, "llmkit: unknown command '%s'\n", cmd);

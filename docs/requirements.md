@@ -32,6 +32,7 @@ applies. Rules marked *(proposed)* are working desiderata, not yet frozen.
 13. [llmkit mcp-repl](#13-llmkit-mcp-repl)
    - [cli surface](#cli-surface-2) - [session model](#session-model-1) - [call syntax](#call-syntax) - [display](#display-1) - [interrupts and exit codes](#interrupts-and-exit-codes-1)
 14. [llmkit prettyprint](#14-llmkit-prettyprint)
+15. [llmkit proxy](#15-llmkit-proxy)
 
 ## 1. cli conventions
 
@@ -1324,3 +1325,75 @@ above (the viewer draws, it does not gate), any flag (styling follows
 the output terminal, redirection is the override), and any side
 effect - prettyprint never writes a file, spawns a server or touches a
 network.
+
+## 15. llmkit proxy
+
+The live wire viewer: a plain http endpoint in front of one fixed llm
+endpoint. Clients talk to the proxy as if it were the endpoint; every
+request is forwarded and every response relayed unchanged, while the
+conversation the bytes carry renders on the proxy's stdout with
+`prettyprint`'s display (sec.14) - live, as it passes.
+
+### cli surface
+
+`llmkit proxy (--anthropic|--openai|--openai-responses) <api_base>
+[--key <token>] [--listen <host:port>]` - one protocol flag required,
+its value the upstream base url. `--listen` defaults to
+`127.0.0.1:8080`; the host may be empty (all interfaces) and is ipv4
+only. A usage error or an unresolvable/bindable listen address is a
+startup error: one stderr line, exit 1. Two stderr lines report the
+listen url and the forwarding target at startup; stdout stays the
+rendered conversation only.
+
+### forwarding
+
+- **routing** - the protocol flag names the language the upstream
+  speaks: every POST goes to `<api_base>/messages`,
+  `<api_base>/chat/completions` or `<api_base>/responses`, whatever
+  path the client itself addressed. The listen side is plain tcp, no
+  tls - the point is to be the http endpoint a client or a local
+  network can talk to; the upstream may be https.
+- **methods** - POST only; anything else is answered `405` with a json
+  error body and the connection closes. Request bodies need
+  `Content-Length` (a chunked body is answered `411`); the head is
+  capped (431 beyond) and the body capped (413 beyond).
+- **headers** - request headers pass except the hop-by-hop set,
+  `Host`, `Content-Length`, `Expect` (a `100 Continue` is sent for it)
+  and `Accept-Encoding` (identity only, so the passing bytes parse);
+  the client's own auth headers pass untouched, and `--key` supplies
+  `x-api-key` (anthropic) or `Authorization: Bearer` (the openai
+  flavors) only when the client sent neither. Response headers pass
+  except the hop-by-hop set and the length/encoding pair (a buffered
+  response gets a fresh `Content-Length`; a streamed one is
+  close-delimited).
+- **keep-alive** - http/1.1 rules: a buffered response keeps the
+  connection up for the next request, a streamed response ends with
+  `Connection: close`. Connections are served one at a time, in order.
+- **failures** - an unreachable or failing upstream renders as the
+  wires' own `connect_failed` / `http_error` records and the client
+  receives `502` (or the truncated stream, when bytes already left).
+
+### interception
+
+Both directions parse in the named protocol's shapes and render with
+sec.14's contract: a request renders as the conversation its messages
+carry - user blocks, assistant text and thinking, tool calls and tool
+results; a response renders as the records the wires map it to,
+streamed responses partial-record by partial-record as the bytes tee
+through, closing with the turn's usage line when the endpoint reports
+one. A non-2xx response renders as one `!` line with the wires' error
+shaping. Parsing never blocks the passthrough: a body that does not
+parse renders as a `! invalid_record` / `! http_error` line and still
+reaches its destination byte for byte.
+
+### process rules
+
+SIGINT stops the proxy (a transfer in flight is aborted mid-stream;
+the exit is 0 unless stdout had failed, then 1). A stdout write
+failure is noted but never breaks the passthrough - the viewer is not
+the data channel. Exit 1 for startup and usage errors.
+
+Deliberately not offered: tls on the listen side, ipv6 listen
+addresses, request paths other than the protocol's canonical one,
+non-POST methods, and any rewriting of the passing bytes - the proxy
+is a viewer, not a gateway.

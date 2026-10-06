@@ -1,6 +1,6 @@
 # llmkit
 
-A single static-purpose executable for llm interaction from the shell and from other programs. One binary, eight commands:
+A single static-purpose executable for llm interaction from the shell and from other programs. One binary, nine commands:
 
 | command | what it does |
 |---|---|
@@ -12,6 +12,7 @@ A single static-purpose executable for llm interaction from the shell and from o
 | `llmkit builtin-mcp` | serves the built-in generic-use mcp tools (web search/fetch, file list/search/read/create/edit) on stdio |
 | `llmkit mcp-repl <flags>` | the interactive tool console for one mcp server: tab-completed `name(args)` calls, one timing line each |
 | `llmkit prettyprint <conversation.jsonl>` | renders a recorded conversation jsonl with the repl's typography (stdin without a file) |
+| `llmkit proxy <flags>` | a plain-http llm endpoint that forwards to one upstream and prints the passing conversation prettyprint-style |
 
 Written in C11. Talks to any openai-compatible endpoint (chat completions and responses apis) and any anthropic-compatible endpoint. Tools are mcp servers: `stdio`, `http` (streamable http) and `sse` (legacy) transports, in all current protocol revisions up to `2026-07-28`.
 
@@ -100,6 +101,16 @@ See [docs/builtin-mcp.md](docs/builtin-mcp.md) for the tool contracts, response 
 
 A saved transcript reads back human again with `llmkit prettyprint`: the runner's jsonl in - a file argument or stdin - the repl's rendering out, every user block under its heavy rule, thinking italic, tool traffic bold, one usage line per turn that reports one. Nothing is sent anywhere; the file is only read and drawn.
 
+To watch a live conversation instead of a recorded one there is `llmkit proxy`: it listens on plain http, forwards every POST to one fixed llm endpoint and renders whatever passes - requests and responses, streaming included - with the same typography on stdout. Point any client's base url at it:
+
+```sh
+$ llmkit proxy --openai http://localhost:11434/v1
+llmkit proxy: listening on http://127.0.0.1:8080 (plain tcp, no tls)
+llmkit proxy: forwarding to openai http://localhost:11434/v1/chat/completions
+```
+
+The protocol flag names the language the upstream speaks (`--anthropic`, `--openai`, `--openai-responses`), so both directions parse: a request renders as the conversation it carries, a response renders live as it streams - partials, tool calls, thinking and the closing usage line, exactly the prettyprint view. The listening side is plain tcp only (no tls); the upstream may be https, curl carries that half. `--listen [host:]port` moves the endpoint, `--key` supplies auth the client did not send.
+
 Runnable examples for every command live in [examples/](examples/) - see [docs/records.md](docs/records.md) for the minimal and complete form of each record.
 
 ## Command Line Reference
@@ -116,6 +127,7 @@ Runnable examples for every command live in [examples/](examples/) - see [docs/r
 | `llmkit repl <flags>` | flags below, no `--prompt` (the turns are typed) |
 | `llmkit mcp-repl <flags>` | one transport flag below |
 | `llmkit prettyprint [conversation.jsonl]` | the conversation file, or none: stdin then |
+| `llmkit proxy <flags>` | flags below, one protocol flag required |
 | `llmkit help` | none: the usage text on stdout |
 | `llmkit version` | none: the version on stdout |
 
@@ -154,6 +166,17 @@ Runnable examples for every command live in [examples/](examples/) - see [docs/r
   `2025-11-25` (v1) or `2026-07-28` (v2)
 - `--header <name>=<value>` - extra http header on every request to this
   server, repeatable
+
+`proxy` takes the endpoint on its protocol flag and serves plain http:
+
+- `--anthropic` / `--openai` / `--openai-responses` `<api_base>` - the
+  protocol the upstream speaks, exactly one; the value is the upstream
+  base url (requests route to its `<api_base>/messages`,
+  `<api_base>/chat/completions` or `<api_base>/responses`)
+- `--listen <host:port>` - the local endpoint, ipv4 names or numbers,
+  host may be empty (all interfaces); default `127.0.0.1:8080`, no tls
+- `--key <token>` - auth for the upstream when the client sent none
+  (`x-api-key` under `--anthropic`, `Authorization: Bearer` otherwise)
 
 ## Building
 

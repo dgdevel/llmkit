@@ -25,6 +25,7 @@ details in sec.5 and sec.6. Where this document picks a ceiling, it is marked
 15. [testing](#15-testing)
 16. [mcp-repl](#16-mcp-repl)
 17. [prettyprint](#17-prettyprint)
+18. [llm-proxy](#18-llm-proxy)
 
 ## 1. technology choices
 
@@ -673,6 +674,8 @@ validation), `src/wire_openai.c`, `src/wire_anthropic.c`, `src/sse.c`,
 `src/repl.c` (repl session loop, display sink),
 `src/mcprepl.c` (mcp-repl session, call syntax, console rendering),
 `src/pretty.c` (prettyprint: the display sink replayed on a file).
+`src/llmproxy.c` (llm-proxy: the tcp listener, the http relay, the
+wire-to-record interception).
 The windows build adds the vendored openbsd regex (mingw ships no
 `<regex.h>`): the Makefile detects the mingw compiler target, compiles
 `src/vendor/regex/*.c` as their own translation units (`regex2.h` is a
@@ -717,6 +720,13 @@ the openbsd-libc bits mingw lacks. Link flags: `-lcjson -lcurl`.
   error lines, the usage line with and without usage on the final
   record), consecutive users, empty input, and the fatal tier: malformed
   json, proxy config records, a user record without its block list.
+- **llm-proxy**: the interception seams as vectors - parse vectors
+  (protocol/key/listen capture, defaults, every usage error), request
+  mapping goldens per protocol, response mapping goldens (usage on the
+  last record, the wires' error shaping through `http_status_error`,
+  non-json bodies), sse mapping goldens per protocol including a
+  byte-split feed, a stream without `message_stop`, sse error events,
+  and one `pretty_live` rendering golden against scrubbed stamps.
 - **terminal tools**: engine vectors through the fake endpoint and the tool
   exec seam - a terminal `tool_request` ends the run with exit 9 and no
   error record, the rest of the batch suspended `is_error`, a failed or
@@ -821,3 +831,59 @@ repl's mono-clock timing hooks have no meaning against a file.
   not endings - the viewer draws what happened), 2 invalid record,
   1 stdout write failure.
 - Threads: none, not even inherited - one fread loop over the input.
+
+## 18. llm-proxy
+
+Ninth entry point, and the first one that is a server: `llmkit proxy`
+is the live wire viewer (requirements sec.15). One new
+`src/llmproxy.c`; `pretty.c` grew exactly one export - `pretty_live_t`,
+the same sink fed record by record instead of from a file - and
+`http_req_t`'s helpers are reused for error shaping only.
+
+- **listener** - one blocking accept loop, connections served one at a
+  time, in order (a debugging viewer, not a load-bearing gateway).
+  Plain tcp, ipv4 (`AI_PASSIVE`, `AF_INET`), `SO_REUSEADDR`; the bound
+  address reports itself (a `:0` port shows the real one). The win32
+  halves of the socket primitives live beside the posix ones in the
+  same file, the `spawn`/`tty` pattern. SIGINT is the orderly stop;
+  `signals_init` is the whole signal story.
+- **client side** - a hand-rolled http/1.1 request reader (no library):
+  head until the blank line (CRLF and LF tolerated, 64 KiB cap), the
+  request line and header fields parsed into a list, `Content-Length`
+  bodies (411 for chunked, 413 beyond the cap), `Expect: 100-continue`
+  answered, keep-alive by version and `Connection`. POST only - 405
+  otherwise; the request path is ignored (routing is the protocol
+  flag's business).
+- **relay** - one fresh curl easy handle per request, the
+  `http_perform` shape with its own callbacks: the header callback
+  collects the status line and the forwardable headers, the write
+  callback decides by `Content-Type` - `text/event-stream` tees byte
+  for byte to the client while the sse parser feeds on the same bytes
+  (live rendering), anything else buffers and answers with a fresh
+  `Content-Length` under keep-alive. `Accept-Encoding` is forced to
+  identity (the passing bytes must parse); hop-by-hop headers and the
+  client's auth pass through untouched, `--key` fills the gap only.
+- **interception** - the protocol flag names the wire language, so
+  both directions map to the record catalogue: requests as the
+  conversation their messages carry, responses as the records the
+  wires would emit - the mappings are compact local twins of
+  `wire_openai.c` / `wire_anthropic.c` field extraction, sunk through
+  `emit_fn` into `pretty_live` instead of the engine (the wires are
+  coupled to the transcript; the viewer renders and forgets). Streamed
+  responses emit partial records per delta - no `blkemit` interval
+  batching, a tty viewer has no record budget - with the block-final
+  held to the wires' rule: a closer is released at the next block's
+  stop, usage rides the turn's last record, tool requests accumulate
+  in bounded slots and emit at stream end. The passthrough is
+  unconditional: a parse failure renders one `!` line and the bytes
+  still pass.
+- **transparency** - nothing of the passing traffic is rewritten:
+  bodies byte for byte, headers minus the hop-by-hop set and the
+  length/encoding pair the relay itself owns. Failures shape as the
+  wires' own records (`http_transport_error`, `http_status_error`)
+  while the client sees a 502 (or the truncated stream, once bytes
+  left).
+`ponytail:` connections are sequential - a slow streamed response
+blocks the next connection; per-connection threads the day a real
+client needs it. No ipv6 listen, no tls terminate, no request-body
+rewrite ever.

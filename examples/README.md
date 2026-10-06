@@ -34,7 +34,8 @@ examples/
     |-- repl-minimal.sh           llmkit repl: the interactive chat
     |-- repl-scripted.sh          a piped session, one turn per line
     |-- mcp-repl.sh               a piped mcp-repl session over builtin-mcp
-    `-- prettyprint.sh             a saved transcript rendered repl-style
+    |-- prettyprint.sh             a saved transcript rendered repl-style
+    `-- proxy.sh                   llmkit proxy in front of ollama, one watched request
 ```
 
 ## prerequisites
