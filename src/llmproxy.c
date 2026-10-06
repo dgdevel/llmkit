@@ -131,10 +131,12 @@ fail:
    Everything is read null-safely; a field no wire sends degrades to an
    empty block, never to garbage. */
 
-/* one user record with a single text block (call.c's text_record shape) */
-static cJSON *user_record(const char *text) {
+/* one caller-authored record with a single text block (call.c's
+   text_record shape) - the user turn's input and the system prompt's
+   instructions alike */
+static cJSON *text_record(const char *type, const char *text) {
     cJSON *t = cJSON_CreateObject();
-    cJSON_AddStringToObject(t, "type", "user");
+    cJSON_AddStringToObject(t, "type", type);
     cJSON *content = cJSON_AddArrayToObject(t, "content");
     cJSON *blk = cJSON_CreateObject();
     cJSON_AddStringToObject(blk, "type", "text");
@@ -193,7 +195,16 @@ static void map_req_chat(const cJSON *body, emit_fn em, void *ctx) {
         const char *role = rec_str(m, "role");
         const cJSON *content =
             cJSON_GetObjectItemCaseSensitive(m, "content");
-        if (role && !strcmp(role, "system")) continue; /* renders nothing */
+        if (role && (!strcmp(role, "system") ||
+                     !strcmp(role, "developer"))) {
+            /* the instructions side: one system block, in wire order */
+            buf_t tx;
+            buf_init(&tx);
+            oai_content_join(content, &tx);
+            if (tx.len) em(ctx, text_record("system", tx.data));
+            buf_free(&tx);
+            continue;
+        }
         if (role && !strcmp(role, "tool")) {
             buf_t tx;
             buf_init(&tx);
@@ -226,15 +237,21 @@ static void map_req_chat(const cJSON *body, emit_fn em, void *ctx) {
         buf_t tx;
         buf_init(&tx);
         oai_content_join(content, &tx);
-        if (tx.len) em(ctx, user_record(tx.data));
+        if (tx.len) em(ctx, text_record("user", tx.data));
         buf_free(&tx);
     }
 }
 
 static void map_req_responses(const cJSON *body, emit_fn em, void *ctx) {
+    /* top-level instructions: the responses wire's system prompt */
+    const cJSON *instr =
+        cJSON_GetObjectItemCaseSensitive(body, "instructions");
+    if (cJSON_IsString(instr) && instr->valuestring && *instr->valuestring)
+        em(ctx, text_record("system", instr->valuestring));
     const cJSON *input = cJSON_GetObjectItemCaseSensitive(body, "input");
     if (cJSON_IsString(input) && input->valuestring) {
-        if (*input->valuestring) em(ctx, user_record(input->valuestring));
+        if (*input->valuestring)
+            em(ctx, text_record("user", input->valuestring));
         return;
     }
     if (!cJSON_IsArray(input)) return;
@@ -265,10 +282,13 @@ static void map_req_responses(const cJSON *body, emit_fn em, void *ctx) {
                 buf_free(&tx);
                 continue;
             }
-            if (role && !strcmp(role, "user")) em(ctx, user_record(tx.data));
+            if (role && !strcmp(role, "user"))
+                em(ctx, text_record("user", tx.data));
             else if (role && !strcmp(role, "assistant"))
                 em(ctx, rec_text("response", tx.data, false));
-            /* system/developer render nothing, like the wires */
+            else if (role && (!strcmp(role, "system") ||
+                              !strcmp(role, "developer")))
+                em(ctx, text_record("system", tx.data));
             buf_free(&tx);
         }
         /* item_reference and unknown items: nothing to say */
@@ -276,6 +296,18 @@ static void map_req_responses(const cJSON *body, emit_fn em, void *ctx) {
 }
 
 static void map_req_anthropic(const cJSON *body, emit_fn em, void *ctx) {
+    /* top-level system: a string or a text-block list - anthropic keeps
+       the instructions out of the messages */
+    const cJSON *sys = cJSON_GetObjectItemCaseSensitive(body, "system");
+    if (cJSON_IsString(sys) && sys->valuestring && *sys->valuestring)
+        em(ctx, text_record("system", sys->valuestring));
+    else if (cJSON_IsArray(sys)) {
+        buf_t tx;
+        buf_init(&tx);
+        oai_content_join(sys, &tx);
+        if (tx.len) em(ctx, text_record("system", tx.data));
+        buf_free(&tx);
+    }
     const cJSON *ms = cJSON_GetObjectItemCaseSensitive(body, "messages");
     if (!cJSON_IsArray(ms)) return;
     for (const cJSON *m = ms->child; m; m = m->next) {
@@ -315,7 +347,7 @@ static void map_req_anthropic(const cJSON *body, emit_fn em, void *ctx) {
                 const char *ty = rec_str(b, "type");
                 if (ty && !strcmp(ty, "tool_result")) {
                     if (tx.len) {
-                        em(ctx, user_record(tx.data));
+                        em(ctx, text_record("user", tx.data));
                         buf_clear(&tx);
                     }
                     buf_t rtx;
@@ -337,7 +369,7 @@ static void map_req_anthropic(const cJSON *body, emit_fn em, void *ctx) {
                     }
                 }
             }
-        if (tx.len) em(ctx, user_record(tx.data));
+        if (tx.len) em(ctx, text_record("user", tx.data));
         buf_free(&tx);
     }
 }

@@ -805,12 +805,13 @@ repl's mono-clock timing hooks have no meaning against a file.
 
 - **rendering** - sec.12's contract replayed record by record: the
   heavy rule and bold text per `user` block (the repl's non-tty shape -
-  no `>` glyph, nothing was typed), light rules opening thinking,
-  response and tool blocks with the lazy-separator rule, partials
-  appending under their block's one rule, thinking italic, tool
+  no `>` glyph, nothing was typed), light rules opening system,
+  thinking, response and tool blocks with the lazy-separator rule,
+  partials appending under their block's one rule, system prompts and
+  thinking italic, tool
   requests bold `name` + compact arguments, tool responses bold,
   errors as `!`-lines, empty blocks nothing. Config and control
-  records (`header`, `llm`, `tools`, `options`, `system`, `flush`,
+  records (`header`, `llm`, `tools`, `options`, `flush`,
   `start`) render nothing - the records a live session never showed.
 - **usage line** - the file's counterpart of the repl's timing line: a
   transcript carries no clocks, so a response block whose closing
@@ -865,7 +866,10 @@ the same sink fed record by record instead of from a file - and
   client's auth pass through untouched, `--key` fills the gap only.
 - **interception** - the protocol flag names the wire language, so
   both directions map to the record catalogue: requests as the
-  conversation their messages carry, responses as the records the
+  conversation their messages carry - the system prompt included
+  (anthropic's top-level `system`, the responses `instructions` or a
+  system/developer message, a chat system/developer message), one
+  italic block per request - responses as the records the
   wires would emit - the mappings are compact local twins of
   `wire_openai.c` / `wire_anthropic.c` field extraction, sunk through
   `emit_fn` into `pretty_live` instead of the engine (the wires are

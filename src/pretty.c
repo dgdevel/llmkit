@@ -2,14 +2,16 @@
    display (design sec.12) applied to a recorded conversation instead of
    a live one. One jsonl in - the file argument, else stdin - and out
    comes the whole exchange with the repl's shapes: the heavy rule
-   opening each user block, light rules opening thinking, response and
-   tool blocks, thinking italic, user lines and tool traffic bold,
+   opening each user block, light rules opening system, thinking,
+   response and tool blocks, system prompts and thinking italic, user
+   lines and tool traffic bold,
    errors as `!` lines. The live-only parts have no record counterpart:
    there is no prompt (the input is the file) and no timing line (a
    transcript carries no clocks) - a response block whose closing
    record reports the turn's token usage closes with a usage line
-   instead, the file's own turn totals. Config and control records
-   render nothing, exactly the records a live session never showed.
+   instead, the file's own turn totals. The remaining config and
+   control records render nothing, exactly the records a live session
+   never showed.
    Input hygiene is the runner's byte pipeline; a violation or a
    malformed line is its fatal invalid_record, exit 2. */
 #include "llmkit.h"
@@ -126,6 +128,21 @@ static void render_usage(pretty_sink_t *s, const cJSON *rec) {
     pwr(s, line, (size_t)n >= sizeof line ? sizeof line - 1 : (size_t)n);
 }
 
+/* the record's content text blocks joined with \n - the
+   caller-authored shape user and system records share */
+static void content_text(const cJSON *rec, buf_t *out) {
+    const cJSON *content =
+        cJSON_GetObjectItemCaseSensitive(rec, "content");
+    bool any = false;
+    for (const cJSON *b = content ? content->child : NULL; b; b = b->next) {
+        const cJSON *tx = cJSON_GetObjectItemCaseSensitive(b, "text");
+        if (!cJSON_IsString(tx) || !tx->valuestring) continue;
+        if (any) buf_append_byte(out, '\n');
+        buf_append_str(out, tx->valuestring);
+        any = true;
+    }
+}
+
 /* the user block: the heavy rule and the bold text of the content's
    text blocks joined with \n - what the repl's non-tty loop renders for
    a submitted line */
@@ -134,16 +151,7 @@ static void render_user_record(pretty_sink_t *s, const cJSON *rec) {
     s->cur = -1;
     buf_t text;
     buf_init(&text);
-    bool any = false;
-    const cJSON *content =
-        cJSON_GetObjectItemCaseSensitive(rec, "content");
-    for (const cJSON *b = content ? content->child : NULL; b; b = b->next) {
-        const cJSON *tx = cJSON_GetObjectItemCaseSensitive(b, "text");
-        if (!cJSON_IsString(tx) || !tx->valuestring) continue;
-        if (any) buf_append_byte(&text, '\n');
-        buf_append_str(&text, tx->valuestring);
-        any = true;
-    }
+    content_text(rec, &text);
     styled(s, s->st->bold, text.data ? text.data : "");
     ensure_nl(s);
     buf_free(&text);
@@ -155,6 +163,17 @@ static void pretty_record(pretty_sink_t *s, const cJSON *rec) {
     int k = rec_classify(rec);
     if (k == R_USER) {
         render_user_record(s, rec);
+    } else if (k == R_SYSTEM) {
+        /* the instructions block: a light rule and italic text, the
+           caller's words where thinking carries the model's */
+        buf_t text;
+        buf_init(&text);
+        content_text(rec, &text);
+        if (text.len) s->sep_pending = true; /* empty renders nothing */
+        s->cur = -1;
+        styled(s, s->st->italic, text.data);
+        ensure_nl(s);
+        buf_free(&text);
     } else if (k == R_THINKING || k == R_RESPONSE) {
         const char *tx = rec_str(rec, "text");
         /* arm the separator only when something will render: the wire's
@@ -195,8 +214,8 @@ static void pretty_record(pretty_sink_t *s, const cJSON *rec) {
     } else if (k == R_ERROR) {
         render_error_line(s, rec_str(rec, "code"), rec_str(rec, "message"));
     }
-    /* everything else - llm, tools, options, system, header, flush,
-       start, agent-as-tool - renders nothing */
+    /* everything else - ll, tools, options, header, flush, start,
+       agent-as-tool - renders nothing */
 }
 
 /* ================= live renderer ================= */

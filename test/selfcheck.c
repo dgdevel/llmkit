@@ -3795,6 +3795,8 @@ static void test_llm_proxy(void) {
         buf_init(&j.b);
         llm_proxy_map_request(PROTO_OPENAI, body, strlen(body), jb_fn, &j);
         check_str(j.b.data,
+                  "{\"type\":\"system\",\"content\":[{\"type\":\"text\","
+                  "\"text\":\"sys\"}]}\n"
                   "{\"type\":\"user\",\"content\":[{\"type\":\"text\","
                   "\"text\":\"hi\"}]}\n"
                   "{\"type\":\"response\",\"text\":\"think\","
@@ -3820,6 +3822,8 @@ static void test_llm_proxy(void) {
         buf_init(&j.b);
         llm_proxy_map_request(PROTO_RESPONSES, body, strlen(body), jb_fn, &j);
         check_str(j.b.data,
+                  "{\"type\":\"system\",\"content\":[{\"type\":\"text\","
+                  "\"text\":\"sys\"}]}\n"
                   "{\"type\":\"user\",\"content\":[{\"type\":\"text\","
                   "\"text\":\"hi\"}]}\n"
                   "{\"type\":\"tool_request\",\"tool\":\"get\","
@@ -3846,6 +3850,8 @@ static void test_llm_proxy(void) {
         buf_init(&j.b);
         llm_proxy_map_request(PROTO_ANTHROPIC, body, strlen(body), jb_fn, &j);
         check_str(j.b.data,
+                  "{\"type\":\"system\",\"content\":[{\"type\":\"text\","
+                  "\"text\":\"sys\"}]}\n"
                   "{\"type\":\"tool_response\",\"id\":\"c1\","
                   "\"text\":\"res\"}\n"
                   "{\"type\":\"user\",\"content\":[{\"type\":\"text\","
@@ -3857,6 +3863,50 @@ static void test_llm_proxy(void) {
                   "{\"type\":\"tool_request\",\"tool\":\"get\","
                   "\"arguments\":{\"a\":1},\"id\":\"c2\"}\n",
                   "proxy: anthropic request mapping");
+        buf_free(&j.b);
+    }
+    {
+        /* the system prompt's other homes: developer roles and
+           text-block lists map to the same system record */
+        const char *chat =
+            "{\"messages\":[{\"role\":\"developer\",\"content\":\"be kind\"},"
+            "{\"role\":\"user\",\"content\":\"hi\"}]}";
+        buf_init(&j.b);
+        llm_proxy_map_request(PROTO_OPENAI, chat, strlen(chat), jb_fn, &j);
+        check_str(j.b.data,
+                  "{\"type\":\"system\",\"content\":[{\"type\":\"text\","
+                  "\"text\":\"be kind\"}]}\n"
+                  "{\"type\":\"user\",\"content\":[{\"type\":\"text\","
+                  "\"text\":\"hi\"}]}\n",
+                  "proxy: chat developer role maps to system");
+        buf_free(&j.b);
+        const char *resp =
+            "{\"input\":[{\"type\":\"message\",\"role\":\"system\","
+            "\"content\":\"be kind\"},"
+            "{\"type\":\"message\",\"role\":\"user\",\"content\":\"hi\"}]}";
+        buf_init(&j.b);
+        llm_proxy_map_request(PROTO_RESPONSES, resp, strlen(resp), jb_fn,
+                              &j);
+        check_str(j.b.data,
+                  "{\"type\":\"system\",\"content\":[{\"type\":\"text\","
+                  "\"text\":\"be kind\"}]}\n"
+                  "{\"type\":\"user\",\"content\":[{\"type\":\"text\","
+                  "\"text\":\"hi\"}]}\n",
+                  "proxy: responses system message maps to system");
+        buf_free(&j.b);
+        const char *anth =
+            "{\"system\":[{\"type\":\"text\",\"text\":\"be kind\"},"
+            "{\"type\":\"text\",\"text\":\"and brief\"}],"
+            "\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}";
+        buf_init(&j.b);
+        llm_proxy_map_request(PROTO_ANTHROPIC, anth, strlen(anth), jb_fn,
+                              &j);
+        check_str(j.b.data,
+                  "{\"type\":\"system\",\"content\":[{\"type\":\"text\","
+                  "\"text\":\"be kind\\nand brief\"}]}\n"
+                  "{\"type\":\"user\",\"content\":[{\"type\":\"text\","
+                  "\"text\":\"hi\"}]}\n",
+                  "proxy: anthropic system block list joins");
         buf_free(&j.b);
     }
     {
@@ -4126,25 +4176,28 @@ static void test_llm_proxy(void) {
         check(pr != NULL, "proxy: live renderer created");
         check(!pretty_live_io_failed(pr), "proxy: renderer healthy");
         /* the anthropic request + json response of the vectors above */
-        cJSON *recs[6];
+        cJSON *recs[7];
         recs[0] = cJSON_Parse(
-            "{\"type\":\"tool_response\",\"id\":\"c1\",\"text\":\"res\"}");
+            "{\"type\":\"system\",\"content\":[{\"type\":\"text\","
+            "\"text\":\"sys\"}]}");
         recs[1] = cJSON_Parse(
+            "{\"type\":\"tool_response\",\"id\":\"c1\",\"text\":\"res\"}");
+        recs[2] = cJSON_Parse(
             "{\"type\":\"user\",\"content\":[{\"type\":\"text\","
             "\"text\":\"hi\"}]}");
-        recs[2] = cJSON_Parse(
+        recs[3] = cJSON_Parse(
             "{\"type\":\"thinking\",\"text\":\"hm\",\"partial\":false,"
             "\"signature\":\"s\"}");
-        recs[3] = cJSON_Parse(
+        recs[4] = cJSON_Parse(
             "{\"type\":\"response\",\"text\":\"ans\",\"partial\":false,"
             "\"usage\":{\"input_tokens\":1,\"output_tokens\":2}}");
-        recs[4] = cJSON_Parse(
+        recs[5] = cJSON_Parse(
             "{\"type\":\"tool_request\",\"tool\":\"get\","
             "\"arguments\":{\"a\":1},\"id\":\"c2\"}");
-        recs[5] = cJSON_Parse(
+        recs[6] = cJSON_Parse(
             "{\"type\":\"error\",\"code\":\"api_error\","
             "\"message\":\"HTTP 500: nope\",\"fatal\":true}");
-        for (int i = 0; i < 6; i++) {
+        for (int i = 0; i < 7; i++) {
             pretty_live_record(pr, recs[i]);
             cJSON_Delete(recs[i]);
         }
@@ -4154,6 +4207,8 @@ static void test_llm_proxy(void) {
         scrub_stamps(ob);
         buf_t want;
         buf_init(&want);
+        exp_rule(&want, '-'); /* the system prompt: the light rule */
+        buf_append_str(&want, "sys\n");
         exp_rule(&want, '-'); /* tool traffic: the light rule */
         buf_append_str(&want, "res\n");
         exp_rule(&want, '=');

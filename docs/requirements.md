@@ -1300,10 +1300,13 @@ one stderr line, exit 1.
 The input is one jsonl stream under the runner's byte rules and record
 catalogue; every transcript record renders with `repl`'s display
 contract (sec.12): the heavy rule and bold text per `user` block, the
-light rule opening each thinking, response, tool request and tool
-response block, partials of one block appending under its single
-separator, thinking italic, tool traffic bold, errors as `!`-lines, an
-empty block nothing. Config and control records render nothing. The
+light rule opening each system, thinking, response, tool request and
+tool response block, partials of one block appending under its single
+separator, system prompts and thinking italic, tool traffic bold,
+errors as `!`-lines, an empty block nothing. A `system` record renders
+one italic block per record - the caller's instructions, its content
+text blocks joined with newline. The remaining config and control
+records render nothing. The
 timestamp of each separator and summary line is the moment it is
 printed - a transcript carries no clocks, so the repl's timing line is
 impossible; in its place, a response block whose closing record
@@ -1377,8 +1380,11 @@ rendered conversation only.
 
 Both directions parse in the named protocol's shapes and render with
 sec.14's contract: a request renders as the conversation its messages
-carry - user blocks, assistant text and thinking, tool calls and tool
-results; a response renders as the records the wires map it to,
+carry - the system prompt (anthropic's top-level `system`, the
+responses top-level `instructions` or a system/developer message, a
+chat system/developer message) as one italic block, then user blocks,
+assistant text and thinking, tool calls and tool results; a response
+renders as the records the wires map it to,
 streamed responses partial-record by partial-record as the bytes tee
 through, closing with the turn's usage line when the endpoint reports
 one. A non-2xx response renders as one `!` line with the wires' error
