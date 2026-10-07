@@ -16,6 +16,10 @@
 #include <curl/curl.h>
 #include <cjson/cJSON.h>
 
+/* the repl line editor: vendored linenoise (design sec.14) - the state
+   type is embedded in the editor below */
+#include "vendor/linenoise/linenoise.h"
+
 /* ---- windows port (mingw-w64, msys2) ----
    the code below is posix-shaped; platform.c carries the win32 half of
    every os-dependent primitive and this header picks types accordingly. */
@@ -159,8 +163,10 @@ void tty_raw_off(tty_raw_t *t);        /* restore; safe when never on */
 /* 1: one byte in *c ('\r' normalized to '\n'); 0: EOF or read error;
    -1: stop flag observed mid-read (posix EINTR path) */
 int tty_read_byte(tty_raw_t *t, unsigned char *c);
-/* terminal width in columns, 0 when not a terminal */
+/* terminal width in columns, 0 when not a terminal; the _fd variant is
+   the same query from a raw descriptor (linenoise's) */
 int tty_cols(FILE *out);
+int tty_cols_fd(int fd);
 /* SGR escapes render: posix callers gate on TERM themselves */
 bool tty_vt_enabled(int fd);
 
@@ -684,19 +690,28 @@ enum {
     ED_BAD,        /* byte hygiene violation: invalid_record tier */
 };
 
-/* the raw-mode line editor: printable bytes append, backspace deletes,
-   Ctrl-U kills, up/down recall history, enter and Ctrl-D submit (Ctrl-D
-   on an empty buffer is EOF), the two Ctrl-C stages apply. Tab goes to
-   the completion hook when one is set. */
+/* completion candidates the on_tab hook fills: whole lines, one
+   editor_add_candidate per match (linenoise's table shape) */
+typedef struct linenoiseCompletions editor_candidates_t;
+
+/* the raw-mode line editor: vendored linenoise (src/vendor/linenoise,
+   design sec.14) driven through the platform tty layer - posix and
+   windows alike. The prompt is the editor's own (it may carry ANSI
+   escapes; their width is not counted as columns), and so are the
+   echo, the refreshes and the newline that closes a finished line.
+   The editing set is linenoise's full one - backspace, line kill,
+   word delete, left/right/home/end, arrow-key history - with llmkit's
+   contract on top: enter and Ctrl-D submit (Ctrl-D on an empty buffer
+   is EOF), the two Ctrl-C stages, NUL rejected. Tab goes to the
+   on_tab hook when one is set. */
 typedef struct editor {
-    tty_raw_t raw; /* fd + raw-mode state (platform.c owns the mechanics) */
     FILE *out;
-    buf_t line;
-    char **hist;
-    size_t nhist;
-    int hist_pos; /* -1: the live line */
-    const char *prompt; /* redrawn below a candidate listing */
-    void (*on_tab)(struct editor *ed, void *ctx);
+    int in_fd;
+    const char *prompt; /* drawn by the editor, redrawn on refresh */
+    buf_t line;         /* the submitted line, empty when interrupted */
+    char *lbuf;         /* linenoise's growable edit buffer */
+    struct linenoiseState ls; /* the live edit session, valid in editor_line */
+    void (*on_tab)(void *ctx, const char *line, editor_candidates_t *c);
     void *tab_ctx;
 } editor_t;
 
@@ -704,10 +719,8 @@ void editor_init(editor_t *ed, FILE *out, int in_fd, const char *prompt);
 void editor_free(editor_t *ed);
 int editor_line(editor_t *ed); /* ED_* */
 void editor_hist_push(editor_t *ed, const char *line);
-/* completion helpers, callable from on_tab: rewrite the line (erase and
-   re-echo) or print below it and redraw prompt + line */
-void editor_set_line(editor_t *ed, const char *s, size_t n);
-void editor_note(editor_t *ed, const char *text);
+/* the on_tab hook's one helper: add one whole-line candidate */
+void editor_add_candidate(editor_candidates_t *c, const char *line);
 
 /* the non-tty line reader: same results, same byte hygiene */
 typedef struct plain_reader {

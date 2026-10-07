@@ -571,24 +571,39 @@ No new wire, mcp or loop code.
   the engine skips every mid-run child kill - sec.8's kills belong to
   process teardown, which repl does not run mid-session; `engine_free`
   tears the servers down once, at session end.
-- **input** - termios on stdin: `ICANON` and `ECHO` off, `ISIG` stays on.
-  The program owns the line buffer - which is what the two Ctrl-C stages
-  and the typed echo both need - and the driver's queue flush on the
-  signal then flushes nothing, raw mode reads bytes as they are typed.
-  The editor: printable bytes append, backspace deletes, Ctrl-U kills the
-  line, up/down recall history, enter and Ctrl-D submit; Ctrl-D on an
-  empty buffer is EOF, session end. Hygiene per the requirements: `0x0d`
-  dropped, NUL and invalid UTF-8 rejected - the `invalid_record` tier,
-  exit 2. `ponytail:` no cursor motion, input appends at the end only;
-  add left/right editing if it is ever missed.
-- **history** - in-memory ring, 128 lines, arrow recall only, no
-  persistence, no search. `ponytail:` grow it when someone complains.
-- **echo** - the editor echoes typed bytes wrapped in the bold sequence:
-  the typed line is the user block itself, under the heavy rule the
-  prompt drew; nothing re-renders on submit. When stdin is not a terminal
-  there is no editor and no echo - a plain `read` loop, line per input -
-  and the sink renders the `user` record instead. One bold user block
-  either way.
+- **input** - linenoise (vendored, `src/vendor/linenoise` - antirez's
+  line editor adapted to the platform tty layer, sec.14) behind the
+  editor contract of `src/editor.c`: raw mode cycles per line - while a
+  line is edited `ICANON` and `ECHO` are off, `ISIG` stays on (posix) or
+  the console runs byte-mode with VT input (windows) - so the program
+  owns the line buffer, which is what the two Ctrl-C stages and the
+  typed echo both need, and the queue is never flushed (`TCSANOW`, not
+  `TCSAFLUSH`): pasted type-ahead survives the cycle, one submit per
+  line, exactly the requirements' paste discipline (bracketed paste is
+  deliberately not armed - a folded paste would swallow the newlines).
+  Between lines the terminal is cooked again, so a turn runs against a
+  cooked one on both platforms alike and ctrl-c reaches the engine's
+  stop flag; raw mode reads bytes as they are typed. The editing set is
+  linenoise's full one - backspace, Ctrl-U/Ctrl-K kills, Ctrl-W word
+  delete, left/right/home/end, arrow-key history, enter and Ctrl-D
+  submit; Ctrl-D on an empty buffer is EOF, session end. Hygiene per
+  the requirements: `0x0d` never reaches the buffer (the platform
+  reader normalizes CR to NL), NUL rejected at the keypress and invalid
+  UTF-8 rejected on submit - both the `invalid_record` tier, exit 2.
+  The line-length ceiling is linenoise's own 1 MiB, pastes included.
+- **history** - in-memory, 128 lines, arrow recall only, no persistence,
+  no search; linenoise's table (consecutive duplicates not repeated -
+  the recall does not step through repeats). `ponytail:` grow it when
+  someone complains.
+- **echo** - the editor's own rendering: the prompt carries the bold
+  sequence (its escapes cost no columns - the editor counts prompt
+  width past ANSI sequences), the typed bytes echo inside it, and the
+  typed line is the user block itself, under the heavy rule the prompt
+  drew. Nothing re-renders on submit beyond the line's closing newline;
+  a stage-1 Ctrl-C wipes the line and redraws the empty prompt. When
+  stdin is not a terminal there is no editor and no echo - a plain
+  `read` loop, line per input - and the sink renders the `user` record
+  instead. One bold user block either way.
 - **typography** - the bold, italic and reset sequences are probed once at
   startup: `isatty(stdout)`, `TERM` set and not `dumb`, then `tput bold`,
   `tput sitm`, `tput sgr0`. A failed probe (no `tput`) falls back to the
@@ -626,12 +641,15 @@ No new wire, mcp or loop code.
   per block; a block whose text is empty renders nothing, separator
   included.
 - **interrupts** - the sec.8 flag and orderly stop unchanged, with two
-  repl branch points. At the prompt the read returns `EINTR`
-  (`SA_RESTART` off) and the stage rule applies: buffer non-empty -
-  cleared, fresh prompt line; empty - exit 8, nothing rendered. During a
-  turn the stop ends the conversation, the engine returns the interrupted
-  code, the session continues. The second-SIGINT hard `_exit(8)` is
-  sec.8's, unchanged.
+  repl branch points. At the prompt the two platforms deliver ctrl-c
+  alike through the editor: posix interrupts the read (`SA_RESTART`
+  off), windows reads the `0x03` byte of the byte-mode console; the
+  editor maps both to one interrupt result and the stage rule applies:
+  buffer non-empty - cleared, the line wiped from the display, the empty
+  prompt redrawn on a fresh line; empty - exit 8, nothing rendered.
+  During a turn the stop ends the conversation, the engine returns the
+  interrupted code, the session continues. The second-SIGINT hard
+  `_exit(8)` is sec.8's, unchanged.
 - Threads: none of its own beyond the engine's stdio server readers -
   input is read only at the prompt and turns run alone; there is no
   steering to observe, so no stdin reader thread.
@@ -670,12 +688,18 @@ Sources: `src/main.c` (subcommands), `src/agent.c` (agent-as-tool),
 validation), `src/wire_openai.c`, `src/wire_anthropic.c`, `src/sse.c`,
 `src/mcp.c`, `src/buf.c` (byte buffers, the sec.7 append-only buffer),
 `src/platform.c` (threads, spawn, signals, the windows halves of both),
-`src/editor.c` (the shared line editor, plain reader, wall-clock stamp),
+`src/editor.c` (the shared line editor over vendored linenoise, plain
+reader, wall-clock stamp),
 `src/repl.c` (repl session loop, display sink),
 `src/mcprepl.c` (mcp-repl session, call syntax, console rendering),
 `src/pretty.c` (prettyprint: the display sink replayed on a file).
 `src/llmproxy.c` (llm-proxy: the tcp listener, the http relay, the
 wire-to-record interception).
+`src/vendor/linenoise/linenoise.c` (the vendored line editor, both
+platforms: upstream is posix-only, the local patch set routes its raw
+mode, reads and width through the platform tty layer - windows
+included; `src/vendor/linenoise/README.md` carries the provenance and
+the patch list).
 The windows build adds the vendored openbsd regex (mingw ships no
 `<regex.h>`): the Makefile detects the mingw compiler target, compiles
 `src/vendor/regex/*.c` as their own translation units (`regex2.h` is a
@@ -746,8 +770,8 @@ Seventh entry point, third front-end, and the first one with no engine
 turns in it: `llmkit mcp-repl` is a tool console for one mcp server
 (requirements sec.13). One new `src/mcprepl.c`; the line editor, the
 non-tty reader and the wall-clock stamp moved out of `src/repl.c` into
-`src/editor.c` and gained exactly one extension, the tab completion
-hook. No new wire, mcp or loop code.
+`src/editor.c` (linenoise-backed, sec.12) and gained exactly one
+extension, the tab completion hook. No new wire, mcp or loop code.
 
 - **connect** - the flags compile to a one-entry `tools` record
   (`mcp_repl_build_tools`, `validate_tools` run on it like any other)
@@ -766,12 +790,14 @@ hook. No new wire, mcp or loop code.
   checks `required` - too many literals and missing required names are
   input errors. Integers for float parameters pass through: json has
   one number type, no coercion byte is needed.
-- **completion** - the editor's `on_tab` hook: the trailing
-  `[A-Za-z0-9_-]` token extends to the unique match (plus `(`), to the
-  longest common prefix of several, or lists the candidates below the
-  line - `editor_note` prints them and redraws prompt + line, the one
-  backward-drawing step the editor has. Completion stops at the first
-  `(`: argument editing offers nothing.
+- **completion** - the editor's `on_tab` hook fills a candidate table:
+  the trailing `[A-Za-z0-9_-]` token's matches go in as whole lines -
+  the unique match with its `(`, the shared-prefix ones bare. Taking
+  the unique match, extending to the longest common prefix of several,
+  or listing the candidates below the line (prompt and line redrawn) is
+  the editor's own completion contract - the patched linenoise,
+  requirements sec.13 verbatim. Completion stops at the first `(`:
+  argument editing offers nothing.
 - **timing** - one stamped line per call, `[HH:MM:SS] <seconds>` from
   the shared `stamp_now` and the mono clock around `mcp_call_raw`,
   rendered for failed calls too. Millisecond precision: tool calls are

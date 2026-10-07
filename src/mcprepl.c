@@ -544,14 +544,16 @@ static void help_text(mr_out_t *o) {
              "  quit              end the session (Ctrl-D as well)\n");
 }
 
-/* tab completion over the tool names: the trailing name token extends to
-   the unique match (plus '('), to the longest common prefix of several,
-   or lists the candidates below the line */
-static void complete_tool(editor_t *ed, void *ctx) {
+/* tab completion over the tool names: the trailing name token's matches
+   go to the editor as whole-line candidates - the unique match with its
+   '(', the shared-prefix ones bare. Taking the unique match, extending
+   to the longest common prefix or listing the candidates below the line
+   is the editor's own contract (requirements sec.13). */
+static void complete_tool(void *ctx, const char *line, editor_candidates_t *c) {
     const cJSON *tools = ((mcp_server_t *)ctx)->tools;
-    const char *line = ed->line.data ? ed->line.data : "";
+    if (!line) line = "";
     if (strchr(line, '(')) return; /* argument editing: no candidates */
-    size_t end = ed->line.len, start = end;
+    size_t end = strlen(line), start = end;
     while (start > 0 && name_char(line[start - 1])) start--;
     size_t tlen = end - start;
     const char *tok = line + start;
@@ -574,45 +576,16 @@ static void complete_tool(editor_t *ed, void *ctx) {
         free(names);
         return;
     }
-    if (nmatch == 1) {
-        buf_t nl;
-        buf_init(&nl);
-        buf_append(&nl, line, start);
-        buf_append_str(&nl, names[0]);
-        buf_append_byte(&nl, '(');
-        editor_set_line(ed, nl.data ? nl.data : "", nl.len);
-        buf_free(&nl);
-        free(names);
-        return;
+    buf_t cand;
+    buf_init(&cand);
+    for (size_t i = 0; i < nmatch; i++) {
+        buf_clear(&cand);
+        buf_append(&cand, line, start);
+        buf_append_str(&cand, names[i]);
+        if (nmatch == 1) buf_append_byte(&cand, '(');
+        editor_add_candidate(c, cand.data ? cand.data : "");
     }
-    /* longest common prefix of the matches beyond the typed token */
-    size_t lcp = tlen;
-    for (;;) {
-        char c = names[0][lcp];
-        if (!c) break;
-        bool all = true;
-        for (size_t i = 1; i < nmatch && all; i++)
-            if (names[i][lcp] != c) all = false;
-        if (!all) break;
-        lcp++;
-    }
-    if (lcp > tlen) {
-        buf_t nl;
-        buf_init(&nl);
-        buf_append(&nl, line, start);
-        buf_append(&nl, names[0], lcp);
-        editor_set_line(ed, nl.data ? nl.data : "", nl.len);
-        buf_free(&nl);
-    } else {
-        buf_t cand;
-        buf_init(&cand);
-        for (size_t i = 0; i < nmatch; i++) {
-            if (i) buf_append_str(&cand, "  ");
-            buf_append_str(&cand, names[i]);
-        }
-        editor_note(ed, cand.data ? cand.data : "");
-        buf_free(&cand);
-    }
+    buf_free(&cand);
     free(names);
 }
 
@@ -717,9 +690,8 @@ int mcp_repl_run(const mcp_repl_cfg_t *c, int in_fd, FILE *out) {
             goto handled;
         }
         if (tty) {
-            mrwr_str(&mo, "> ");
-            r = editor_line(&ed);
-            mrwr_str(&mo, "\n");
+            r = editor_line(&ed); /* prompt, echo and the closing newline
+                                     are the editor's */
         } else {
             r = plain_line(&pr, &line);
         }

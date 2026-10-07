@@ -186,6 +186,10 @@ Linux, a C11 compiler, plus:
 - **libcurl** (easy api, >= 7.80)
 - pthreads
 
+The line editor is [linenoise](https://github.com/antirez/linenoise),
+vendored in `src/vendor/linenoise` (patched onto llmkit's own tty layer,
+so the same editor runs in the windows console too - no package needed).
+
 ```sh
 make          # -> ./llmkit
 make check    # builds and runs the selfcheck (no network needed)

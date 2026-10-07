@@ -256,8 +256,12 @@ int repl_run(const call_cfg_t *c, int in_fd, FILE *out, const char *exe_path,
     tty = isatty(in_fd);
     editor_t ed;
     plain_reader_t pr;
+    char prompt[48]; /* the editor draws it; escapes cost no columns */
+    snprintf(prompt, sizeof prompt, "%s> ", st.bold);
     if (tty)
-        editor_init(&ed, out, in_fd, "> ");
+        /* the typed line is the user block: the prompt carries the bold
+           sequence, the editor counts its width past the escape */
+        editor_init(&ed, out, in_fd, prompt);
     else
         plain_init(&pr, in_fd);
 
@@ -277,11 +281,9 @@ int repl_run(const call_cfg_t *c, int in_fd, FILE *out, const char *exe_path,
         }
         if (tty) {
             if (need_rule) draw_rule(&sink, '=');
-            rwr_str(&sink, "> ");
-            rwr_str(&sink, st.bold); /* the typed line is the user block */
-            r = editor_line(&ed);
-            rwr_str(&sink, st.reset);
-            rwr_str(&sink, "\n");
+            r = editor_line(&ed); /* prompt, echo and the closing newline
+                                     are the editor's (linenoise) */
+            rwr_str(&sink, st.reset); /* the bold user block closed */
         } else {
             r = plain_line(&pr, &line);
         }
@@ -341,17 +343,12 @@ int repl_run(const call_cfg_t *c, int in_fd, FILE *out, const char *exe_path,
             cJSON_Delete(user);
         }
 
-#ifdef _WIN32
-        /* cooked console while a turn runs: ctrl-c must raise the orderly
-           stop signal instead of queueing a 0x03 byte for the next line */
-        if (tty) tty_raw_off(&ed.raw);
-#endif
+        /* a turn runs against the cooked terminal: raw mode cycles per
+           line now (the editor enters and leaves it), so ctrl-c raises
+           the stop signal on both platforms - no byte queues behind it */
         timing_reset(&sink);
         rc = engine_start(e);
         if (rc == 0) rc = engine_run(e);
-#ifdef _WIN32
-        if (tty) tty_raw_on(&ed.raw, in_fd);
-#endif
         if (sink.resp_done) render_timing(&sink); /* response completed */
         last_ending = rc;
         if (rc == EXIT_INTERRUPTED) {

@@ -405,13 +405,15 @@ int tty_read_byte(tty_raw_t *t, unsigned char *c) {
     return 1;
 }
 
-int tty_cols(FILE *out) {
+int tty_cols_fd(int fd) {
     CONSOLE_SCREEN_BUFFER_INFO ci;
-    HANDLE h = con_handle(fileno(out));
+    HANDLE h = con_handle(fd);
     if (h == INVALID_HANDLE_VALUE || !GetConsoleScreenBufferInfo(h, &ci))
         return 0;
     return ci.srWindow.Right - ci.srWindow.Left + 1;
 }
+
+int tty_cols(FILE *out) { return tty_cols_fd(fileno(out)); }
 
 bool tty_vt_enabled(int fd) {
     DWORD mode = 0;
@@ -483,14 +485,15 @@ int tty_read_byte(tty_raw_t *t, unsigned char *c) {
     }
 }
 
-int tty_cols(FILE *out) {
-    int fd = fileno(out);
+int tty_cols_fd(int fd) {
     if (fd < 0) return 0;
     struct winsize ws;
     if (ioctl(fd, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0)
         return ws.ws_col;
     return 0;
 }
+
+int tty_cols(FILE *out) { return tty_cols_fd(fileno(out)); }
 
 bool tty_vt_enabled(int fd) {
     (void)fd;
