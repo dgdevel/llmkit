@@ -52,7 +52,7 @@ check: test/selfcheck
 
 clean:
 	rm -rf dist
-	rm -f llmkit test/selfcheck
+	rm -f llmkit test/selfcheck llmkit.exe
 
 # tag, build and publish binaries to GitHub Releases (needs gh)
 # usage: make release TAG=v1.2.3
