@@ -96,6 +96,11 @@ image in `tools/package.sh` (one variable per target) - e.g. building
   dependency off: the `.a` needs only `ws2_32`/`crypt32` and friends) and
   the pinned cjson, then links `llmkit.exe` fully static - no dlls, no
   ca bundle (schannel uses the windows cert store), windows 10+.
+  The installed curl prefix is cached across runs in
+  `${XDG_CACHE_HOME:-$HOME/.cache}/llmkit-pkg/win` (bind-mounted into the
+  container at `/pkgcache`); a stamp of the curl version, the triplet and
+  the configure flags decides reuse, so only the first build compiles
+  curl and later releases copy it. Delete that dir to force a rebuild.
 - **versioning.** Tag `v1.2.3` -> package versions `1.2.3-1` (deb/arch) and
   `1.2.3-1.<disttag>` (rpm). The release tarball keeps the leading `v`.
 - **fail fast.** A failed target aborts the whole run; rerun with the

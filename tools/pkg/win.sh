@@ -39,6 +39,15 @@ strip_cmd="$trip-strip"
 command -v "$strip_cmd" >/dev/null 2>&1 || strip_cmd=""
 
 # ---- dependencies: pinned, cross-built, static -------------------------------
+# curl takes minutes to cross-build, so the installed prefix is cached
+# between runs: package.sh bind-mounts ~/.cache/llmkit-pkg/win at
+# /pkgcache, and a stamp (version + triplet + configure flags) says
+# whether the cache is still current. no /pkgcache (standalone run)
+# just builds like before; rm -rf the cache dir to force a rebuild.
+cache=${CURL_CACHE:-/pkgcache}
+conf="--with-schannel --disable-shared --enable-static --without-zlib --without-brotli --without-zstd --without-libidn2 --without-libpsl --without-nghttp2 --without-libssh2 --without-gssapi --without-ca-bundle --without-ca-path --disable-ldap --disable-ldaps --disable-manual"
+stamp="$CURL_VER $trip $conf"
+
 build_curl() {
     rm -rf /tmp/curlwin /tmp/curl.src /tmp/curl.tar.xz
     mkdir -p /tmp/curlwin /tmp/curl.src
@@ -47,18 +56,36 @@ build_curl() {
     tar -xf /tmp/curl.tar.xz -C /tmp/curl.src --strip-components=1
     (cd /tmp/curl.src &&
      CC="$cc" AR="$trip-ar" RANLIB="$trip-ranlib" \
-     ./configure --host="$trip" --prefix=/tmp/curlwin \
-         --with-schannel --disable-shared --enable-static \
-         --without-zlib --without-brotli --without-zstd \
-         --without-libidn2 --without-libpsl --without-nghttp2 \
-         --without-libssh2 --without-gssapi \
-         --without-ca-bundle --without-ca-path \
-         --disable-ldap --disable-ldaps --disable-manual >/dev/null &&
+     ./configure --host="$trip" --prefix=/tmp/curlwin $conf >/dev/null &&
      make -s -j"$(nproc)" install >/dev/null)
     [ -f /tmp/curlwin/lib/libcurl.a ] \
         || { echo "win.sh: /tmp/curlwin/lib/libcurl.a missing after build" >&2; exit 1; }
 }
-build_curl
+
+cache_save() {
+    [ -d "$cache" ] || return 0
+    if [ ! -w "$cache" ]; then
+        echo "win.sh: warning: $cache not writable - curl not cached" >&2
+        return 0
+    fi
+    rm -rf "$cache/curl.new"
+    cp -a /tmp/curlwin "$cache/curl.new"
+    printf '%s\n' "$stamp" >"$cache/curl.new/.stamp"
+    rm -rf "$cache/curl"
+    mv "$cache/curl.new" "$cache/curl"
+    # the container runs as root; keep the host user able to rm the cache
+    [ "$(id -u)" = 0 ] && chown -R "$(stat -c '%u:%g' Makefile)" "$cache/curl" || true
+    echo "win.sh: cached libcurl $CURL_VER in $cache for next runs"
+}
+
+if [ -f "$cache/curl/lib/libcurl.a" ] && [ "$(cat "$cache/curl/.stamp" 2>/dev/null || true)" = "$stamp" ]; then
+    echo "win.sh: cached libcurl $CURL_VER is current - reusing"
+    rm -rf /tmp/curlwin
+    cp -a "$cache/curl" /tmp/curlwin
+else
+    build_curl
+    cache_save
+fi
 CC="$cc" AR="$trip-ar" sh tools/pkg/cjson.sh
 
 # ---- build -------------------------------------------------------------------

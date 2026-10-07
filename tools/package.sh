@@ -22,6 +22,12 @@
 #                                  curl and cjson are pinned and
 #                                  cross-built from source, fully static
 #                                  -> any 64-bit windows 10+
+#
+# the win cross-build of curl takes minutes, so its installed prefix is
+# cached on the host across runs in ${XDG_CACHE_HOME:-$HOME/.cache}/
+# llmkit-pkg/win and bind-mounted at /pkgcache; win.sh reuses it while
+# the curl version, triplet and configure flags are unchanged. delete
+# that dir to force a from-scratch curl build.
 set -eu
 die() { echo "package.sh: $*" >&2; exit 1; }
 
@@ -41,16 +47,21 @@ docker info >/dev/null 2>&1 || die "docker daemon is not running"
 
 mkdir -p dist
 for t in $targets; do
+    extra=
     case "$t" in
         deb)     image=ubuntu:22.04;         script=deb.sh  ;;
         rpm-fc)  image=fedora:41;            script=rpm.sh  ;;
         rpm-el9) image=rockylinux:9;         script=rpm.sh  ;;
         arch)    image=archlinux:base-devel; script=arch.sh ;;
-        win)     image=africanfuture/msys2-base:linux-latest; script=win.sh ;;
+        win)     image=africanfuture/msys2-base:linux-latest; script=win.sh
+                 cache=${XDG_CACHE_HOME:-$HOME/.cache}/llmkit-pkg/win
+                 mkdir -p "$cache"
+                 extra="-v $cache:/pkgcache" ;;
         *) die "unknown target '$t' (want: deb rpm-fc rpm-el9 arch win)" ;;
     esac
     echo "==> $t ($image)"
-    docker run --rm -e VER="$VER" -v "$repo":/src -w /src \
+    # $extra stays unquoted on purpose: one -v flag, space-free cache path
+    docker run --rm -e VER="$VER" $extra -v "$repo":/src -w /src \
         "$image" sh "tools/pkg/$script"
 done
 
