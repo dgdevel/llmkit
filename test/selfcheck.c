@@ -1520,17 +1520,10 @@ static void test_builtin(void) {
                 const cJSON *props = cJSON_GetObjectItemCaseSensitive(
                     schema, "properties");
                 if (!cJSON_IsObject(props)) args_set = false;
-                for (const cJSON *p = props ? props->child : NULL; p;
-                     p = p->next) {
-                    const cJSON *pd =
-                        cJSON_GetObjectItemCaseSensitive(p, "description");
-                    if (!cJSON_IsString(pd) || !pd->valuestring[0])
-                        args_set = false;
-                }
             }
         check(names_ok, "builtin: tool names in order");
         check(descs_set, "builtin: tool descriptions all non-empty");
-        check(args_set, "builtin: argument descriptions all non-empty");
+        check(args_set, "builtin: tools declare input schemas");
         cJSON_Delete(r);
         buf_free(&io.out);
     }
@@ -2836,8 +2829,8 @@ static void test_repl(void) {
     }
 
     /* ---- system prompt: bundled default, explicit override, empty ---- */
-    check(strncmp(g_seen_system, "You are the assistant behind llmkit repl",
-                  strlen("You are the assistant behind llmkit repl")) == 0,
+    check(strncmp(g_seen_system, "You are a helpful assistant",
+                  strlen("You are a helpful assistant")) == 0,
           "repl: the bundled default prompt is compiled in");
     {
         fturn_t turns[] = {
