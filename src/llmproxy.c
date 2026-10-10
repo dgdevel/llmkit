@@ -49,16 +49,6 @@ void llm_proxy_cfg_free(llm_proxy_cfg_t *c) {
     memset(c, 0, sizeof *c);
 }
 
-static int perr(char *err, size_t errsz, const char *fmt, ...)
-    __attribute__((format(printf, 3, 4)));
-static int perr(char *err, size_t errsz, const char *fmt, ...) {
-    va_list ap;
-    va_start(ap, fmt);
-    vsnprintf(err, errsz, fmt, ap);
-    va_end(ap);
-    return 1;
-}
-
 int llm_proxy_parse(int argc, char **argv, llm_proxy_cfg_t *c, char *err,
                     size_t errsz) {
     memset(c, 0, sizeof *c);
@@ -70,11 +60,11 @@ int llm_proxy_parse(int argc, char **argv, llm_proxy_cfg_t *c, char *err,
         if (!strcmp(a, "--anthropic") || !strcmp(a, "--openai") ||
             !strcmp(a, "--openai-responses")) {
             if (c->protocol != -1) {
-                perr(err, errsz, "protocol flag given twice");
+                usage_err(err, errsz, "protocol flag given twice");
                 goto fail;
             }
             if (i + 1 >= argc) {
-                perr(err, errsz, "missing <api_base> value for %s", a);
+                usage_err(err, errsz, "missing <api_base> value for %s", a);
                 goto fail;
             }
             c->protocol = !strcmp(a, "--anthropic")     ? PROTO_ANTHROPIC
@@ -83,30 +73,30 @@ int llm_proxy_parse(int argc, char **argv, llm_proxy_cfg_t *c, char *err,
             c->api_base = strdup(argv[++i]);
         } else if (!strcmp(a, "--key") || !strcmp(a, "--listen")) {
             if (i + 1 >= argc) {
-                perr(err, errsz, "missing value for %s", a);
+                usage_err(err, errsz, "missing value for %s", a);
                 goto fail;
             }
             const char *v = argv[++i];
             if (!strcmp(a, "--key")) {
                 if (have_key) {
-                    perr(err, errsz, "--key given twice");
+                    usage_err(err, errsz, "--key given twice");
                     goto fail;
                 }
                 have_key = true;
                 c->key = strdup(v);
             } else {
                 if (have_listen) {
-                    perr(err, errsz, "--listen given twice");
+                    usage_err(err, errsz, "--listen given twice");
                     goto fail;
                 }
                 have_listen = true;
                 c->listen = strdup(v);
             }
         } else if (a[0] == '-' && a[1] == '-') {
-            perr(err, errsz, "unknown flag '%s'", a);
+            usage_err(err, errsz, "unknown flag '%s'", a);
             goto fail;
         } else {
-            perr(err, errsz,
+            usage_err(err, errsz,
                  "unexpected extra argument '%s' (the api base rides on the "
                  "protocol flag)",
                  a);
@@ -114,7 +104,7 @@ int llm_proxy_parse(int argc, char **argv, llm_proxy_cfg_t *c, char *err,
         }
     }
     if (c->protocol == -1) {
-        perr(err, errsz, "missing protocol flag "
+        usage_err(err, errsz, "missing protocol flag "
                          "(--anthropic, --openai or --openai-responses)");
         goto fail;
     }
@@ -541,19 +531,6 @@ void llm_proxy_map_response(int proto, long status, const char *body,
 
 /* ---- streamed responses: the same records, partial, live ---- */
 
-enum { MAX_TOOL_SLOTS = 1024, MAX_ANT_BLOCKS = 64 };
-
-typedef struct {
-    char *id, *name;
-    buf_t args;
-} pslot_t;
-
-typedef struct {
-    int type; /* -1 unset, 0 text, 1 thinking, 2 tool_use */
-    char *id, *name;
-    buf_t args;
-} pblock_t;
-
 struct llm_proxy_sse {
     int proto;
     emit_fn em;
@@ -562,9 +539,9 @@ struct llm_proxy_sse {
     int open;          /* open streamed block: 0 response, 1 thinking, -1 */
     char *pend_sig;    /* signature of the open thinking block */
     cJSON *held_final; /* the turn's last block-final: usage rides it */
-    pslot_t *slots;    /* chat tool_calls / responses function_call */
+    sse_slot_t *slots; /* chat tool_calls / responses function_call */
     size_t nslots;
-    pblock_t blk[MAX_ANT_BLOCKS]; /* anthropic content blocks */
+    sse_block_t blk[MAX_SSE_BLOCKS]; /* anthropic content blocks */
     size_t nblk;
     double u_in, u_out;
     bool have_in, have_out;
@@ -600,49 +577,6 @@ static void ps_delta(llm_proxy_sse_t *s, int kind, const char *text) {
     s->em(s->ctx, rec_text(kind == 1 ? "thinking" : "response", text, true));
 }
 
-/* endpoint-controlled slot index, bounded and allocation-checked - a
-   hostile endpoint must not be able to size an allocation */
-static pslot_t *ps_slot_at(pslot_t **arr, size_t *n, double idx) {
-    if (!(idx >= 0) || idx > (double)MAX_TOOL_SLOTS) return NULL;
-    size_t i = (size_t)idx;
-    if (i >= *n) {
-        size_t nn = i + 1;
-        pslot_t *grown = realloc(*arr, nn * sizeof **arr);
-        if (!grown) return NULL;
-        *arr = grown;
-        for (size_t k = *n; k < nn; k++) {
-            (*arr)[k].id = strdup("");
-            (*arr)[k].name = strdup("");
-            buf_init(&(*arr)[k].args);
-        }
-        *n = nn;
-    }
-    return &(*arr)[i];
-}
-
-static void ps_slots_reset(pslot_t **arr, size_t *n) {
-    for (size_t i = 0; i < *n; i++) {
-        free((*arr)[i].id);
-        free((*arr)[i].name);
-        buf_free(&(*arr)[i].args);
-    }
-    free(*arr);
-    *arr = NULL;
-    *n = 0;
-}
-
-static pblock_t *ps_block_at(llm_proxy_sse_t *s, int idx) {
-    if (idx < 0 || (size_t)idx >= MAX_ANT_BLOCKS) return NULL;
-    for (size_t i = s->nblk; i <= (size_t)idx; i++) {
-        s->blk[i].type = -1;
-        s->blk[i].id = NULL;
-        s->blk[i].name = NULL;
-        buf_init(&s->blk[i].args);
-    }
-    if ((size_t)idx + 1 > s->nblk) s->nblk = (size_t)idx + 1;
-    return &s->blk[idx];
-}
-
 static void ps_event_chat(llm_proxy_sse_t *s, const char *event,
                           const char *data, size_t n) {
     if (strcmp(event, "message")) return;
@@ -673,28 +607,18 @@ static void ps_event_chat(llm_proxy_sse_t *s, const char *event,
                 cJSON_GetObjectItemCaseSensitive(delta, "tool_calls");
             if (cJSON_IsArray(tcs))
                 for (const cJSON *tc = tcs->child; tc; tc = tc->next) {
-                    pslot_t *sl = ps_slot_at(&s->slots, &s->nslots,
-                                             rec_num(tc, "index", 0));
+                    sse_slot_t *sl = sse_slot_at(&s->slots, &s->nslots,
+                                                 rec_num(tc, "index", 0));
                     if (!sl) continue;
-                    const char *id = rec_str(tc, "id");
-                    if (id) {
-                        free(sl->id);
-                        sl->id = strdup(id);
-                    }
                     const cJSON *fn =
                         cJSON_GetObjectItemCaseSensitive(tc, "function");
-                    if (fn) {
-                        const char *nm = rec_str(fn, "name");
-                        if (nm) {
-                            free(sl->name);
-                            sl->name = strdup(nm);
-                        }
-                        const cJSON *ar =
-                            cJSON_GetObjectItemCaseSensitive(fn,
-                                                             "arguments");
-                        if (cJSON_IsString(ar) && ar->valuestring)
-                            buf_append_str(&sl->args, ar->valuestring);
-                    }
+                    sse_slot_set(sl, rec_str(tc, "id"),
+                                 fn ? rec_str(fn, "name") : NULL, NULL);
+                    const cJSON *ar = fn
+                          ? cJSON_GetObjectItemCaseSensitive(fn, "arguments")
+                          : NULL;
+                    if (cJSON_IsString(ar) && ar->valuestring)
+                        buf_append_str(&sl->args, ar->valuestring);
                 }
         }
     const cJSON *u = cJSON_GetObjectItemCaseSensitive(d, "usage");
@@ -715,8 +639,8 @@ static void ps_event_responses(llm_proxy_sse_t *s, const char *ev,
     } else if (!strcmp(ev, "response.reasoning_summary_text.delta")) {
         ps_delta(s, 1, rec_str(d, "delta"));
     } else if (!strcmp(ev, "response.function_call_arguments.delta")) {
-        pslot_t *sl = ps_slot_at(&s->slots, &s->nslots,
-                                 rec_num(d, "output_index", 0));
+        sse_slot_t *sl = sse_slot_at(&s->slots, &s->nslots,
+                                     rec_num(d, "output_index", 0));
         if (sl) {
             const char *a = rec_str(d, "delta");
             if (a) buf_append_str(&sl->args, a);
@@ -727,24 +651,14 @@ static void ps_event_responses(llm_proxy_sse_t *s, const char *ev,
         const cJSON *item = cJSON_GetObjectItemCaseSensitive(d, "item");
         const char *ty = rec_str(item, "type");
         if (item && ty && !strcmp(ty, "function_call")) {
-            pslot_t *sl = ps_slot_at(
+            sse_slot_t *sl = sse_slot_at(
                 &s->slots, &s->nslots,
                 rec_num(item, "output_index", (double)s->nslots));
             if (sl) {
                 const char *id = rec_str(item, "call_id");
                 if (!id) id = rec_str(item, "id");
-                if (id) {
-                    free(sl->id);
-                    sl->id = strdup(id);
-                }
-                const char *nm = rec_str(item, "name");
-                if (nm) {
-                    free(sl->name);
-                    sl->name = strdup(nm);
-                }
-                buf_clear(&sl->args);
-                const char *ar = rec_str(item, "arguments");
-                if (ar) buf_append_str(&sl->args, ar);
+                sse_slot_set(sl, id, rec_str(item, "name"),
+                             rec_str(item, "arguments"));
             }
         }
     } else if (!strcmp(ev, "response.output_text.done")) {
@@ -795,7 +709,8 @@ static void ps_event_anthropic(llm_proxy_sse_t *s, const char *event,
         const cJSON *cb = cJSON_GetObjectItemCaseSensitive(d,
                                                            "content_block");
         const char *ty = rec_str(cb, "type");
-        pblock_t *bl = ps_block_at(s, (int)rec_num(d, "index", 0));
+        sse_block_t *bl =
+            sse_block_at(s->blk, &s->nblk, (int)rec_num(d, "index", 0));
         if (!bl) goto out;
         if (ty && !strcmp(ty, "thinking")) {
             ps_close(s);
@@ -828,8 +743,8 @@ static void ps_event_anthropic(llm_proxy_sse_t *s, const char *event,
                 s->pend_sig = strdup(sig);
             }
         } else if (ty && !strcmp(ty, "input_json_delta")) {
-            pblock_t *bl =
-                ps_block_at(s, (int)rec_num(d, "index", 0));
+            sse_block_t *bl =
+                sse_block_at(s->blk, &s->nblk, (int)rec_num(d, "index", 0));
             const char *pj = rec_str(delta, "partial_json");
             if (bl && pj) buf_append_str(&bl->args, pj);
         }
@@ -962,12 +877,8 @@ void llm_proxy_sse_finish(llm_proxy_sse_t *s) {
 void llm_proxy_sse_free(llm_proxy_sse_t *s) {
     if (!s) return;
     sse_free(&s->sp);
-    ps_slots_reset(&s->slots, &s->nslots);
-    for (size_t i = 0; i < s->nblk; i++) {
-        free(s->blk[i].id);
-        free(s->blk[i].name);
-        buf_free(&s->blk[i].args);
-    }
+    sse_slots_reset(&s->slots, &s->nslots);
+    sse_blocks_reset(s->blk, &s->nblk);
     free(s->pend_sig);
     cJSON_Delete(s->held_final);
     free(s);

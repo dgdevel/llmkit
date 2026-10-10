@@ -164,7 +164,5 @@ size_t stamp_now(char *dst, size_t cap) {
     time_t t = time(NULL);
     struct tm *p = localtime(&t);
     if (!p) return 0;
-    int n = snprintf(dst, cap, "[%02d:%02d:%02d] ", p->tm_hour, p->tm_min,
-                     p->tm_sec);
-    return n < 0 || (size_t)n >= cap ? 0 : (size_t)n;
+    return strftime(dst, cap, "[%H:%M:%S] ", p);
 }

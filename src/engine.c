@@ -176,22 +176,26 @@ void engine_rebuild_options_cache(engine_t *e) {
     e->llm_connect_timeout = 5;
     e->llm_read_timeout = 1200;
     if (!e->options) return;
-    const cJSON *f;
-    if ((f = cJSON_GetObjectItemCaseSensitive(e->options, "max_tool_rounds")) &&
-        cJSON_IsNumber(f))
-        e->max_tool_rounds = (long)f->valuedouble;
-    if ((f = cJSON_GetObjectItemCaseSensitive(e->options, "tool_call_timeout")) &&
-        cJSON_IsNumber(f))
-        e->tool_call_timeout = f->valuedouble;
-    if ((f = cJSON_GetObjectItemCaseSensitive(e->options, "stream_interval")) &&
-        cJSON_IsNumber(f))
-        e->stream_interval = f->valuedouble;
-    if ((f = cJSON_GetObjectItemCaseSensitive(e->options, "llm_connect_timeout")) &&
-        cJSON_IsNumber(f))
-        e->llm_connect_timeout = f->valuedouble;
-    if ((f = cJSON_GetObjectItemCaseSensitive(e->options, "llm_read_timeout")) &&
-        cJSON_IsNumber(f))
-        e->llm_read_timeout = f->valuedouble;
+    static const struct {
+        const char *name;
+        size_t off; /* engine_t member, double or long */
+        bool is_long;
+    } NUM_OPTS[] = {
+        { "max_tool_rounds", offsetof(engine_t, max_tool_rounds), true },
+        { "tool_call_timeout", offsetof(engine_t, tool_call_timeout), false },
+        { "stream_interval", offsetof(engine_t, stream_interval), false },
+        { "llm_connect_timeout", offsetof(engine_t, llm_connect_timeout),
+          false },
+        { "llm_read_timeout", offsetof(engine_t, llm_read_timeout), false },
+    };
+    for (size_t i = 0; i < sizeof NUM_OPTS / sizeof NUM_OPTS[0]; i++) {
+        const cJSON *f =
+            cJSON_GetObjectItemCaseSensitive(e->options, NUM_OPTS[i].name);
+        if (!cJSON_IsNumber(f)) continue;
+        char *m = (char *)e + NUM_OPTS[i].off;
+        if (NUM_OPTS[i].is_long) *(long *)m = (long)f->valuedouble;
+        else *(double *)m = f->valuedouble;
+    }
 }
 
 void engine_apply_config_record(engine_t *e, cJSON *tree) {
@@ -263,9 +267,7 @@ static char *validate_any_record(cJSON *tree) {
 }
 
 static void emit_invalid(engine_t *e, const char *msg) {
-    char m[512];
-    snprintf(m, sizeof m, "%s", msg);
-    engine_emit_error(e, EC_INVALID_RECORD, m, true);
+    engine_emit_error(e, EC_INVALID_RECORD, msg, true);
 }
 
 /* ================= reading-state input dispatch ================= */
@@ -303,22 +305,8 @@ int engine_input_record(engine_t *e, cJSON *tree) {
         return 0;
     }
     default: {
-        switch (k) {
-        case R_LLM:
-        case R_TOOLS:
-        case R_OPTIONS:
-        case R_SYSTEM:
-        case R_USER:
-        case R_THINKING:
-        case R_RESPONSE:
-        case R_TOOL_REQUEST:
-        case R_TOOL_RESPONSE:
-            break;
-        default:
-            emit_invalid(e, k == R_UNKNOWN || k == R_AGENT || k == R_EXPOSE ||
-                                   k == R_HIDE
-                               ? "unknown record type"
-                               : "record type not accepted here");
+        if (k == R_UNKNOWN || k == R_AGENT || k == R_EXPOSE || k == R_HIDE) {
+            emit_invalid(e, "unknown record type");
             cJSON_Delete(tree);
             return 2;
         }
@@ -343,11 +331,7 @@ int engine_input_record(engine_t *e, cJSON *tree) {
 /* ================= running-state drain + steering ================= */
 
 static void pending_push(engine_t *e, cJSON *tree) {
-    if (e->npending == e->cappending) {
-        e->cappending = e->cappending ? e->cappending * 2 : 8;
-        e->pending = realloc(e->pending, e->cappending * sizeof *e->pending);
-    }
-    e->pending[e->npending++] = tree;
+    ptr_push((void ***)&e->pending, &e->npending, &e->cappending, tree);
 }
 
 typedef struct qmsg {
@@ -504,6 +488,54 @@ wire_t *wire_factory_default(engine_t *e) {
     }
 }
 
+const cJSON *wire_io_get(engine_t *e, const char *field) {
+    const cJSON *io =
+        cJSON_GetObjectItemCaseSensitive(e->llm, "inference_options");
+    if (!io) return NULL;
+    const cJSON *f = cJSON_GetObjectItemCaseSensitive(io, field);
+    return cJSON_IsNull(f) ? NULL : f;
+}
+
+void append_tool_json(buf_t *b, const tool_entry_t *t, const char *schema_field,
+                      bool nested, const char *tail) {
+    if (nested)
+        buf_append_str(b, "{\"type\":\"function\",\"function\":{\"name\":");
+    else
+        buf_append_str(b, "{\"name\":");
+    buf_append_jstr(b, t->exposed_name);
+    const cJSON *desc = cJSON_GetObjectItemCaseSensitive(t->tool, "description");
+    if (cJSON_IsString(desc) && desc->valuestring) {
+        buf_append_str(b, ",\"description\":");
+        buf_append_jstr(b, desc->valuestring);
+    }
+    const cJSON *sch = cJSON_GetObjectItemCaseSensitive(t->tool, "inputSchema");
+    if (sch) {
+        buf_appendf(b, ",\"%s\":", schema_field);
+        buf_append_tree(b, sch);
+    }
+    if (tail) buf_append_str(b, tail);
+    buf_append_str(b, nested ? "}}" : "}");
+}
+
+int wire_http_verdict(int rc, http_req_t *req, blkemit_t *be, bool failed,
+                      const char *fail_msg, bool with_type, turn_out_t *out) {
+    if (rc == -1) {
+        blk_abort(be);
+        if (g_stop_flag) return TURN_ABORTED;
+        out->error_rec = http_transport_error(req);
+        return TURN_FATAL;
+    }
+    if (rc == 1) {
+        out->error_rec = http_status_error(req, with_type);
+        return TURN_FATAL;
+    }
+    if (failed) {
+        out->error_rec = rec_error(EC_API_ERROR, fail_msg, true);
+        return TURN_FATAL;
+    }
+    return 0;
+}
+
 static int default_tool_exec(engine_t *e, const char *tool, cJSON *args,
                              buf_t *text_out, bool *is_error, char *err,
                              size_t errsz) {
@@ -516,7 +548,6 @@ static void run_tool(engine_t *e, trec_t *r) {
     buf_init(&text);
     bool is_err = false;
     char err[512] = "";
-    if (!e->tool_exec) e->tool_exec = default_tool_exec;
     int rc = e->tool_exec(e, r->tool, r->args, &text, &is_err, err, sizeof err);
     if (rc == 2) {
         engine_emit_record(e, rec_tool_response(
@@ -548,12 +579,6 @@ static void synth_tool_response(engine_t *e, trec_t *r, const char *msg) {
     engine_emit_record(e, rec_tool_response(r->id, msg, true));
 }
 
-static void emit_held_final(engine_t *e, cJSON *rec) {
-    if (!rec) return;
-    tlist_ingest(&e->tr, rec);
-    e->emit(e->emit_ctx, rec);
-}
-
 /* repl owns a session that continues after engine_run endings: the mcp
    children are not killed mid-session, engine_free tears them down once
    (design sec.8/12) */
@@ -562,17 +587,38 @@ static void engine_mcp_shutdown(engine_t *e) {
     mcp_kill_all((mcp_mgr_t *)e->mcp);
 }
 
-int engine_stop_orderly(engine_t *e, cJSON *held_final) {
-    emit_held_final(e, held_final);
-    if (e->npending) {
-        char msg[128];
-        snprintf(msg, sizeof msg,
-                 "%zu record(s) received without a flush were dropped",
-                 e->npending);
-        engine_emit_error(e, EC_IO_ERROR, msg, false);
-        for (size_t i = 0; i < e->npending; i++) cJSON_Delete(e->pending[i]);
-        e->npending = 0;
+/* the drop rule's report: records that never received a flush */
+static void report_dropped(engine_t *e, size_t n) {
+    if (!n) return;
+    char msg[128];
+    snprintf(msg, sizeof msg,
+             "%zu record(s) received without a flush were dropped", n);
+    engine_emit_error(e, EC_IO_ERROR, msg, false);
+}
+
+static void pending_clear(engine_t *e) {
+    for (size_t i = 0; i < e->npending; i++) cJSON_Delete(e->pending[i]);
+    e->npending = 0;
+}
+
+/* the verdict every post-turn drain shares: 0 = proceed, else the exit
+   code (already emitted, mcp already shut down) */
+static int engine_drain_status(engine_t *e) {
+    if (e->fatal_code) {
+        engine_mcp_shutdown(e);
+        return e->fatal_code;
     }
+    if (e->stdin_ioerr) {
+        engine_emit_error(e, EC_IO_ERROR, "stdin read failed", true);
+        engine_mcp_shutdown(e);
+        return EXIT_IO_ERROR;
+    }
+    return 0;
+}
+
+int engine_stop_orderly(engine_t *e) {
+    report_dropped(e, e->npending);
+    pending_clear(e);
     engine_emit_error(e, EC_INTERRUPTED, "conversation stopped externally",
                       true);
     engine_mcp_shutdown(e);
@@ -580,13 +626,7 @@ int engine_stop_orderly(engine_t *e, cJSON *held_final) {
 }
 
 int engine_pre_start_stop(engine_t *e) {
-    if (e->records_since_flush) {
-        char msg[128];
-        snprintf(msg, sizeof msg,
-                 "%zu record(s) received without a flush were dropped",
-                 e->records_since_flush);
-        engine_emit_error(e, EC_IO_ERROR, msg, false);
-    }
+    report_dropped(e, e->records_since_flush);
     engine_mcp_shutdown(e);
     return EXIT_INTERRUPTED;
 }
@@ -598,7 +638,7 @@ int engine_run(engine_t *e) {
         if (g_stop_flag) {
             /* records received before the stop still get the drop rule */
             engine_drain_input(e);
-            return engine_stop_orderly(e, NULL);
+            return engine_stop_orderly(e);
         }
         if (e->max_tool_rounds >= 0 && turns >= e->max_tool_rounds) {
             engine_emit_error(e, EC_MAX_ROUNDS,
@@ -620,7 +660,7 @@ int engine_run(engine_t *e) {
         }
         if (kind == TURN_ABORTED) {
             engine_drain_input(e); /* drop rule for pre-stop records */
-            return engine_stop_orderly(e, NULL);
+            return engine_stop_orderly(e);
         }
         turns++;
 
@@ -646,15 +686,8 @@ int engine_run(engine_t *e) {
                     continue;
                 }
                 engine_drain_input(e);
-                if (e->fatal_code) {
-                    engine_mcp_shutdown(e);
-                    return e->fatal_code;
-                }
-                if (e->stdin_ioerr) {
-                    engine_emit_error(e, EC_IO_ERROR, "stdin read failed", true);
-                    engine_mcp_shutdown(e);
-                    return EXIT_IO_ERROR;
-                }
+                int drc = engine_drain_status(e);
+                if (drc) return drc;
                 if (g_stop_flag) {
                     susp_int = true;
                     synth_tool_response(e, r, "conversation interrupted");
@@ -674,35 +707,20 @@ int engine_run(engine_t *e) {
                 }
             }
             engine_drain_input(e);
-            if (e->fatal_code) {
-                engine_mcp_shutdown(e);
-                return e->fatal_code;
-            }
-            if (e->stdin_ioerr) {
-                engine_emit_error(e, EC_IO_ERROR, "stdin read failed", true);
-                engine_mcp_shutdown(e);
-                return EXIT_IO_ERROR;
-            }
+            int drc = engine_drain_status(e);
+            if (drc) return drc;
             if (term) {
                 /* terminal ending (design sec.4): requested, not an error -
                    no error record for it, and it outranks a simultaneous
                    external stop. Steering not yet applied is dropped;
                    records without a flush get the drop rule. */
-                if (e->npending && !e->flush_seen && !e->stdin_eof) {
-                    char msg[128];
-                    snprintf(msg, sizeof msg,
-                             "%zu record(s) received without a flush were "
-                             "dropped",
-                             e->npending);
-                    engine_emit_error(e, EC_IO_ERROR, msg, false);
-                }
-                for (size_t i = 0; i < e->npending; i++)
-                    cJSON_Delete(e->pending[i]);
-                e->npending = 0;
+                if (e->npending && !e->flush_seen && !e->stdin_eof)
+                    report_dropped(e, e->npending);
+                pending_clear(e);
                 engine_mcp_shutdown(e);
                 return EXIT_TERMINAL_TOOL;
             }
-            if (g_stop_flag) return engine_stop_orderly(e, NULL);
+            if (g_stop_flag) return engine_stop_orderly(e);
             if (steering_ready(e)) {
                 int rc = apply_steering(e);
                 if (rc) {
@@ -715,23 +733,17 @@ int engine_run(engine_t *e) {
 
         /* TURN_FINAL */
         engine_drain_input(e);
-        if (e->fatal_code) {
-            emit_held_final(e, out.final_rec);
-            engine_mcp_shutdown(e);
-            return e->fatal_code;
-        }
-        if (e->stdin_ioerr) {
-            engine_emit_error(e, EC_IO_ERROR, "stdin read failed", true);
-            emit_held_final(e, out.final_rec);
-            engine_mcp_shutdown(e);
-            return EXIT_IO_ERROR;
+        int drc = engine_drain_status(e);
+        if (drc) {
+            engine_emit_record(e, out.final_rec);
+            return drc;
         }
         if (g_stop_flag) {
-            emit_held_final(e, out.final_rec);
-            return engine_stop_orderly(e, NULL);
+            engine_emit_record(e, out.final_rec);
+            return engine_stop_orderly(e);
         }
         if (steering_ready(e)) {
-            emit_held_final(e, out.final_rec);
+            engine_emit_record(e, out.final_rec);
             int rc = apply_steering(e);
             if (rc) {
                 engine_mcp_shutdown(e);
@@ -741,16 +753,12 @@ int engine_run(engine_t *e) {
         }
         if (e->npending) {
             /* drop rule: records that never received a flush (stdin open) */
-            char msg[128];
-            snprintf(msg, sizeof msg,
-                     "%zu record(s) received without a flush were dropped",
-                     e->npending);
-            engine_emit_error(e, EC_IO_ERROR, msg, false);
-            emit_held_final(e, out.final_rec);
+            report_dropped(e, e->npending);
+            engine_emit_record(e, out.final_rec);
             engine_mcp_shutdown(e);
             return EXIT_OK;
         }
-        emit_held_final(e, out.final_rec);
+        engine_emit_record(e, out.final_rec);
         engine_mcp_shutdown(e);
         return EXIT_OK;
     }

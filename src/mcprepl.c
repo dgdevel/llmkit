@@ -65,16 +65,6 @@ void mcp_repl_cfg_free(mcp_repl_cfg_t *c) {
     memset(c, 0, sizeof *c);
 }
 
-static int usage_err(char *err, size_t errsz, const char *fmt, ...)
-    __attribute__((format(printf, 3, 4)));
-static int usage_err(char *err, size_t errsz, const char *fmt, ...) {
-    va_list ap;
-    va_start(ap, fmt);
-    vsnprintf(err, errsz, fmt, ap);
-    va_end(ap);
-    return 1;
-}
-
 int mcp_repl_parse(int argc, char **argv, mcp_repl_cfg_t *c, char *err,
                    size_t errsz) {
     memset(c, 0, sizeof *c);

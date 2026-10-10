@@ -121,12 +121,8 @@ static int write_all(int fd, const char *p, size_t n) {
 
 /* ---- stdio transport ---- */
 
-typedef struct stdio_reader_ctx {
-    mcp_server_t *s;
-} stdio_reader_ctx_t;
-
 static void stdio_on_line(void *ctx, char *line) {
-    stdio_reader_ctx_t *rc = ctx;
+    mcp_server_t *s = ctx;
     cJSON *t = cJSON_Parse(line);
     free(line);
     if (!t) return;
@@ -136,17 +132,16 @@ static void stdio_on_line(void *ctx, char *line) {
     const cJSON *res = cJSON_GetObjectItemCaseSensitive(t, "result");
     const cJSON *err = cJSON_GetObjectItemCaseSensitive(t, "error");
     if ((res || err) && id && !cJSON_IsNull(id))
-        queue_push(rc->s->q, t);
+        queue_push(s->q, t);
     else
         cJSON_Delete(t);
 }
 
 static void *stdio_reader_thread(void *arg) {
-    stdio_reader_ctx_t *rc = arg;
-    mcp_server_t *s = rc->s;
+    mcp_server_t *s = arg;
     jsonl_pusher_t p;
     /* reuse the jsonl byte rules: CR dropping, line split, utf-8 */
-    jsonl_pusher_init(&p, stdio_on_line, rc);
+    jsonl_pusher_init(&p, stdio_on_line, s);
     char bbuf[8192];
     for (;;) {
         ssize_t n = read(s->sp.from_fd, bbuf, sizeof bbuf);
@@ -163,8 +158,24 @@ static void *stdio_reader_thread(void *arg) {
     /* queue_close is this thread's last touch of s and s->q: server_free
        waits for it before freeing (kill + queue_wait_closed) */
     queue_close(s->q);
-    free(rc);
     return NULL;
+}
+
+/* a json-rpc response tree -> the reply's result (owned) or err (1);
+   the message tree is consumed */
+static int rpc_take_reply(cJSON *msg, cJSON **reply, char *err, size_t errsz) {
+    const cJSON *e = cJSON_GetObjectItemCaseSensitive(msg, "error");
+    if (e) {
+        const char *m = rec_str(e, "message");
+        snprintf(err, errsz, "%s",
+                 m ? m : "json-rpc error from mcp server");
+        cJSON_Delete(msg);
+        return 1;
+    }
+    const cJSON *res = cJSON_GetObjectItemCaseSensitive(msg, "result");
+    *reply = res ? cJSON_Duplicate(res, 1) : cJSON_CreateObject();
+    cJSON_Delete(msg);
+    return 0;
 }
 
 static int stdio_rpc(mcp_server_t *s, cJSON *req, cJSON **reply,
@@ -202,28 +213,22 @@ static int stdio_rpc(mcp_server_t *s, cJSON *req, cJSON **reply,
             }
             continue; /* spurious wakeup: recompute the deadline */
         }
-        if (rec_num(t, "id", -1) == reqid) {
-            const cJSON *e = cJSON_GetObjectItemCaseSensitive(t, "error");
-            if (e) {
-                const char *m = rec_str(e, "message");
-                snprintf(err, errsz, "%s",
-                         m ? m : "json-rpc error from mcp server");
-                cJSON_Delete(t);
-                return 1;
-            }
-            const cJSON *res = cJSON_GetObjectItemCaseSensitive(t, "result");
-            *reply = res ? cJSON_Duplicate(res, 1) : cJSON_CreateObject();
-            cJSON_Delete(t);
-            return 0;
-        }
+        if (rec_num(t, "id", -1) == reqid)
+            return rpc_take_reply(t, reply, err, errsz);
         cJSON_Delete(t); /* stale response */
     }
 }
 
-static void stdio_notify(mcp_server_t *s, const char *method) {
+/* {"jsonrpc":"2.0","method":...} - a notification, no id */
+static cJSON *notify_make(const char *method) {
     cJSON *n = cJSON_CreateObject();
     cJSON_AddStringToObject(n, "jsonrpc", "2.0");
     cJSON_AddStringToObject(n, "method", method);
+    return n;
+}
+
+static void stdio_notify(mcp_server_t *s, const char *method) {
+    cJSON *n = notify_make(method);
     char *line = cJSON_PrintUnformatted(n);
     if (line) {
         write_all(s->sp.to_fd, line, strlen(line));
@@ -372,18 +377,7 @@ static int http_rpc(mcp_server_t *s, cJSON *req, cJSON **reply, double timeout,
     buf_free(&r.content_type);
     curl_slist_free_all(hdrs);
     if (ret) return ret;
-
-    const cJSON *e = cJSON_GetObjectItemCaseSensitive(msg, "error");
-    if (e) {
-        const char *m = rec_str(e, "message");
-        snprintf(err, errsz, "%s", m ? m : "json-rpc error from mcp server");
-        cJSON_Delete(msg);
-        return 1;
-    }
-    const cJSON *res = cJSON_GetObjectItemCaseSensitive(msg, "result");
-    *reply = res ? cJSON_Duplicate(res, 1) : cJSON_CreateObject();
-    cJSON_Delete(msg);
-    return 0;
+    return rpc_take_reply(msg, reply, err, errsz);
 }
 
 static int server_rpc(mcp_server_t *s, cJSON *req, cJSON **reply,
@@ -403,10 +397,7 @@ static int server_connect(mcp_server_t *s, char *err, size_t errsz) {
             return 1;
         }
         s->q = queue_new();
-        stdio_reader_ctx_t *rc = calloc(1, sizeof *rc);
-        rc->s = s;
-        if (thread_start_detached(stdio_reader_thread, rc) != 0) {
-            free(rc);
+        if (thread_start_detached(stdio_reader_thread, s) != 0) {
             snprintf(err, errsz, "cannot start reader for '%s'", s->name);
             return 1;
         }
@@ -454,10 +445,7 @@ static int server_connect(mcp_server_t *s, char *err, size_t errsz) {
             stdio_notify(s, "notifications/initialized");
         } else {
             /* POST the notification; the reply body is ignored */
-            cJSON *note = cJSON_CreateObject();
-            cJSON_AddStringToObject(note, "jsonrpc", "2.0");
-            cJSON_AddStringToObject(note, "method", "notifications/initialized");
-            cJSON_AddItemToObject(note, "params", cJSON_CreateObject());
+            cJSON *note = notify_make("notifications/initialized");
             cJSON *ignored = NULL;
             char nerr[256] = "";
             http_rpc(s, note, &ignored, CONNECT_TIMEOUT, nerr, sizeof nerr);
@@ -654,6 +642,28 @@ bool mcp_tool_is_terminal(mcp_mgr_t *m, const char *tool) {
 
 /* ================= tools/call ================= */
 
+/* join a tools/call result's text content blocks with \n; the count of
+   text blocks, or -1 when a non-text block appears (the text found
+   before that still joins, the caller reports the failure) */
+int mcp_content_join(const cJSON *result, buf_t *out) {
+    const cJSON *content = cJSON_GetObjectItemCaseSensitive(result, "content");
+    int ntext = 0;
+    bool nontext = false;
+    if (cJSON_IsArray(content))
+        for (const cJSON *b = content->child; b; b = b->next) {
+            const char *ty = rec_str(b, "type");
+            if (ty && !strcmp(ty, "text")) {
+                const char *t = rec_str(b, "text");
+                if (ntext) buf_append_byte(out, '\n');
+                buf_append_str(out, t ? t : "");
+                ntext++;
+            } else {
+                nontext = true;
+            }
+        }
+    return nontext ? -1 : ntext;
+}
+
 int mcp_call_raw(mcp_server_t *srv, const char *upstream_tool,
                  const cJSON *args, cJSON **result_out, char *err,
                  size_t errsz, double timeout) {
@@ -696,37 +706,21 @@ int mcp_call(mcp_mgr_t *m, const char *tool, cJSON *args, buf_t *text_out,
     if (rc) return rc;
 
     /* map the result to text (requirements sec.6) */
-    const cJSON *content = cJSON_GetObjectItemCaseSensitive(result, "content");
-    bool any_text = false, any_non_text = false;
-    if (cJSON_IsArray(content))
-        for (const cJSON *b = content->child; b; b = b->next) {
-            const char *ty = rec_str(b, "type");
-            if (ty && !strcmp(ty, "text")) {
-                const char *t = rec_str(b, "text");
-                if (any_text) buf_append_byte(text_out, '\n');
-                buf_append_str(text_out, t ? t : "");
-                any_text = true;
-            } else {
-                any_non_text = true;
-            }
-        }
+    int ntext = mcp_content_join(result, text_out);
     bool is_err = rec_bool(result, "isError", false);
-    if (any_non_text) {
+    if (ntext < 0) {
         cJSON_Delete(result);
         snprintf(err, errsz, "tool '%s' returned non-text content", tool);
         return 1;
     }
-    if (!any_text &&
+    if (!ntext &&
         cJSON_GetObjectItemCaseSensitive(result, "structuredContent")) {
         cJSON_Delete(result);
         snprintf(err, errsz, "tool '%s' returned no text content", tool);
         return 1;
     }
     cJSON_Delete(result);
-    if (is_err) {
-        *is_error = true;
-        return 0;
-    }
+    *is_error = is_err;
     return 0;
 }
 
@@ -749,6 +743,21 @@ cJSON *rpc_initialize_result(const cJSON *params, const char *server_name) {
     cJSON_AddStringToObject(si, "version", LLMKIT_VERSION);
     cJSON_AddItemToObject(res, "serverInfo", si);
     return res;
+}
+
+/* the method preamble every stdio server shares: initialize replies with
+   the named server's banner, initialized/ping are notification-tier.
+   The rpc handler codes: 0 = replied, 2 = no reply, -1 = not a common
+   method (the caller serves its own) */
+int rpc_common(const char *method, cJSON *params, const char *server_name,
+               cJSON **result_out) {
+    if (!strcmp(method, "initialize")) {
+        *result_out = rpc_initialize_result(params, server_name);
+        return 0;
+    }
+    if (!strcmp(method, "notifications/initialized") || !strcmp(method, "ping"))
+        return 2;
+    return -1;
 }
 
 typedef struct serve_ctx {
@@ -778,27 +787,23 @@ static void serve_line(serve_ctx_t *c, const char *line) {
     cJSON *result = NULL;
     char *errmsg = NULL;
     int rc = c->h->handle(c->h->ctx, method, pcopy, idc, &result, &errmsg);
-    if (idc && rc == 0) {
-        cJSON *resp = cJSON_CreateObject();
-        cJSON_AddStringToObject(resp, "jsonrpc", "2.0");
-        cJSON_AddItemToObject(resp, "id", idc);
-        cJSON_AddItemToObject(resp, "result", result ? result : cJSON_CreateObject());
-        char *out = cJSON_PrintUnformatted(resp);
-        if (out) {
-            c->wr(c->io, out, strlen(out));
-            c->wr(c->io, "\n", 1);
-            cJSON_free(out);
-        }
-        cJSON_Delete(resp);
-    } else if (idc && rc == 1) {
-        cJSON *resp = cJSON_CreateObject();
-        cJSON_AddStringToObject(resp, "jsonrpc", "2.0");
-        cJSON_AddItemToObject(resp, "id", idc);
-        cJSON *errobj = cJSON_CreateObject();
-        cJSON_AddNumberToObject(errobj, "code", -32000);
-        cJSON_AddStringToObject(errobj, "message",
+    /* the reply payload: the handler's result tree ({} when it sent
+       none) or the error envelope */
+    cJSON *payload = NULL;
+    if (rc == 0) {
+        payload = result ? result : cJSON_CreateObject();
+        result = NULL; /* consumed below */
+    } else if (rc == 1) {
+        payload = cJSON_CreateObject();
+        cJSON_AddNumberToObject(payload, "code", -32000);
+        cJSON_AddStringToObject(payload, "message",
                                 errmsg ? errmsg : "internal error");
-        cJSON_AddItemToObject(resp, "error", errobj);
+    }
+    if (idc && payload) {
+        cJSON *resp = cJSON_CreateObject();
+        cJSON_AddStringToObject(resp, "jsonrpc", "2.0");
+        cJSON_AddItemToObject(resp, "id", idc);
+        cJSON_AddItemToObject(resp, rc == 0 ? "result" : "error", payload);
         char *out = cJSON_PrintUnformatted(resp);
         if (out) {
             c->wr(c->io, out, strlen(out));
@@ -808,10 +813,11 @@ static void serve_line(serve_ctx_t *c, const char *line) {
         cJSON_Delete(resp);
     } else {
         cJSON_Delete(idc);
+        cJSON_Delete(payload);
     }
     free(errmsg);
     /* the result was consumed only when it went into a success reply */
-    if (result && !(rc == 0 && idc)) cJSON_Delete(result);
+    cJSON_Delete(result);
     cJSON_Delete(pcopy);
     cJSON_Delete(msg);
     if (rc < 0) c->stop = true;

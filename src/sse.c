@@ -3,6 +3,7 @@
    fields skipped. Chunk-safe: feed at any byte boundary. */
 #include "llmkit.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 static void dispatch(sse_parser_t *p) {
@@ -80,4 +81,72 @@ void sse_eof(sse_parser_t *p) {
         buf_clear(&p->line);
     }
     dispatch(p); /* a final unterminated event still dispatches */
+}
+
+/* ================= llm stream accumulation ================= */
+/* the tool/block bookkeeping every llm sse consumer (both wires, the
+   proxy) keeps while parsing a streamed turn */
+
+sse_slot_t *sse_slot_at(sse_slot_t **arr, size_t *n, double idx) {
+    if (!(idx >= 0) || idx > (double)MAX_SSE_SLOTS) return NULL;
+    size_t i = (size_t)idx;
+    if (i >= *n) {
+        size_t nn = i + 1;
+        sse_slot_t *grown = realloc(*arr, nn * sizeof **arr);
+        if (!grown) return NULL;
+        *arr = grown;
+        for (size_t k = *n; k < nn; k++) {
+            (*arr)[k].id = strdup("");
+            (*arr)[k].name = strdup("");
+            buf_init(&(*arr)[k].args);
+        }
+        *n = nn;
+    }
+    return &(*arr)[i];
+}
+
+void sse_slots_reset(sse_slot_t **arr, size_t *n) {
+    for (size_t i = 0; i < *n; i++) {
+        free((*arr)[i].id);
+        free((*arr)[i].name);
+        buf_free(&(*arr)[i].args);
+    }
+    free(*arr);
+    *arr = NULL;
+    *n = 0;
+}
+
+void sse_slot_set(sse_slot_t *s, const char *id, const char *name,
+                  const char *args /* replaces when non-NULL */) {
+    if (id) {
+        free(s->id);
+        s->id = strdup(id);
+    }
+    if (name) {
+        free(s->name);
+        s->name = strdup(name);
+    }
+    if (args) {
+        buf_clear(&s->args);
+        buf_append_str(&s->args, args);
+    }
+}
+
+sse_block_t *sse_block_at(sse_block_t *blocks, size_t *n, int idx) {
+    if (idx < 0 || (size_t)idx >= MAX_SSE_BLOCKS) return NULL;
+    for (size_t i = *n; i <= (size_t)idx; i++)
+        blocks[i].type = -1; /* calloc-zeroed fields stay cleared */
+    if ((size_t)idx + 1 > *n) *n = (size_t)idx + 1;
+    return &blocks[idx];
+}
+
+void sse_blocks_reset(sse_block_t *blocks, size_t *n) {
+    for (size_t i = 0; i < *n; i++) {
+        free(blocks[i].id);
+        free(blocks[i].name);
+        free(blocks[i].signature);
+        buf_free(&blocks[i].args);
+        blocks[i].id = blocks[i].name = blocks[i].signature = NULL;
+    }
+    *n = 0;
 }

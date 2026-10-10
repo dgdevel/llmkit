@@ -86,7 +86,6 @@ bool proxy_config_line(proxy_state_t *p, char *line) {
         memset(e, 0, sizeof *e);
         e->presentation = t; /* tree owned by the entry for now */
         e->upstream_srv = (char *)-1; /* marker: config record */
-        (void)e;
         return p->ok;
     }
     default:
@@ -382,12 +381,8 @@ int proxy_handle(void *ctx, const char *method, cJSON *params,
                  cJSON *id, cJSON **result_out, char **errmsg_out) {
     proxy_state_t *p = ctx;
     (void)id;
-    if (!strcmp(method, "initialize")) {
-        *result_out = rpc_initialize_result(params, "llmkit-mcp-proxy");
-        return 0;
-    }
-    if (!strcmp(method, "notifications/initialized") || !strcmp(method, "ping"))
-        return 2;
+    int rc = rpc_common(method, params, "llmkit-mcp-proxy", result_out);
+    if (rc >= 0) return rc;
     if (!strcmp(method, "tools/list")) {
         cJSON *res = cJSON_CreateObject();
         cJSON *tools = cJSON_CreateArray();
@@ -437,10 +432,8 @@ int proxy_handle(void *ctx, const char *method, cJSON *params,
 }
 
 static void proxy_file_on_line(void *ctx, char *line) {
-    proxy_state_t *p = ctx;
-    if (!proxy_config_line(p, line)) {
-        /* fatal already printed; keep draining */
-    }
+    /* a fatal line already printed itself; keep draining */
+    (void)proxy_config_line(ctx, line);
 }
 
 void proxy_state_init(proxy_state_t *p) {

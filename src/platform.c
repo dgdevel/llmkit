@@ -114,15 +114,21 @@ void queue_push(queue_t *q, void *item) {
     pthread_mutex_unlock(&q->m);
 }
 
-void *queue_try_pop(queue_t *q) {
-    pthread_mutex_lock(&q->m);
-    if (!q->head) { pthread_mutex_unlock(&q->m); return NULL; }
+/* the locked unlink tail both pop flavors share (lock held) */
+static void *queue_pop_locked(queue_t *q) {
+    if (!q->head) return NULL;
     qnode_t *n = q->head;
     q->head = n->next;
     if (!q->head) q->tail = NULL;
-    pthread_mutex_unlock(&q->m);
     void *d = n->data;
     free(n);
+    return d;
+}
+
+void *queue_try_pop(queue_t *q) {
+    pthread_mutex_lock(&q->m);
+    void *d = queue_pop_locked(q);
+    pthread_mutex_unlock(&q->m);
     return d;
 }
 
@@ -139,13 +145,8 @@ void *queue_pop_timeout(queue_t *q, double seconds) {
             return NULL;
         }
     }
-    if (!q->head) { pthread_mutex_unlock(&q->m); return NULL; }
-    qnode_t *n = q->head;
-    q->head = n->next;
-    if (!q->head) q->tail = NULL;
+    void *d = queue_pop_locked(q);
     pthread_mutex_unlock(&q->m);
-    void *d = n->data;
-    free(n);
     return d;
 }
 
@@ -522,9 +523,16 @@ void self_exe(char *out, size_t sz, const char *argv0) {
 
 typedef struct http_aux {
     http_req_t *r;
-    bool saw_status;
     bool is_json; /* application/json body: buffer even when streaming */
 } http_aux_t;
+
+/* header value edges: skip leading blanks, drop crlf and trailing blanks */
+static void trim_hdr_val(const char **v, size_t *vn) {
+    while (*vn && (**v == ' ' || **v == '\t')) { (*v)++; (*vn)--; }
+    while (*vn && ((*v)[*vn - 1] == '\r' || (*v)[*vn - 1] == '\n' ||
+                   (*v)[*vn - 1] == ' '))
+        (*vn)--;
+}
 
 static size_t hdr_cb(char *buf, size_t sz, size_t nm, void *ud) {
     http_aux_t *a = ud;
@@ -532,17 +540,13 @@ static size_t hdr_cb(char *buf, size_t sz, size_t nm, void *ud) {
     /* the status line is delivered to the header callback too */
     if (n > 5 && memcmp(buf, "HTTP/", 5) == 0) {
         const char *sp = memchr(buf, ' ', n);
-        if (sp) {
-            a->r->status = strtol(sp + 1, NULL, 10);
-            a->saw_status = true;
-        }
+        if (sp) a->r->status = strtol(sp + 1, NULL, 10);
         return n;
     }
     if (n >= 14 && strncasecmp(buf, "Content-Type:", 13) == 0) {
         const char *v = buf + 13;
         size_t vn = n - 13;
-        while (vn && (*v == ' ' || *v == '\t')) { v++; vn--; }
-        while (vn && (v[vn - 1] == '\r' || v[vn - 1] == '\n' || v[vn - 1] == ' ')) vn--;
+        trim_hdr_val(&v, &vn);
         buf_clear(&a->r->content_type);
         buf_append(&a->r->content_type, v, vn);
         if (vn >= strlen("application/json") &&
@@ -551,8 +555,7 @@ static size_t hdr_cb(char *buf, size_t sz, size_t nm, void *ud) {
     } else if (n >= 15 && strncasecmp(buf, "Mcp-Session-Id:", 15) == 0) {
         const char *v = buf + 15;
         size_t vn = n - 15;
-        while (vn && (*v == ' ' || *v == '\t')) { v++; vn--; }
-        while (vn && (v[vn - 1] == '\r' || v[vn - 1] == '\n' || v[vn - 1] == ' ')) vn--;
+        trim_hdr_val(&v, &vn);
         if (vn < sizeof a->r->session_id) {
             memcpy(a->r->session_id, v, vn);
             a->r->session_id[vn] = '\0';

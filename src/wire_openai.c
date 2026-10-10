@@ -22,17 +22,7 @@ static const char *print_args(const cJSON *args) {
     return ab.data ? ab.data : "{}";
 }
 
-static void append_msg_sep(buf_t *b) {
-    if (b->len > 1) buf_append_byte(b, ','); /* "[" alone takes no comma */
-}
-
 /* ---------------- openai wire state ---------------- */
-
-typedef struct {
-    char *id;
-    char *name;
-    buf_t args;
-} tslot_t;
 
 typedef struct owire owire_t;
 
@@ -56,9 +46,9 @@ typedef struct owire {
     bool sse_done; /* [DONE] / terminal event seen */
     bool failed;
     char fail_msg[512];
-    tslot_t *slots;  /* chat tool accumulation, by index */
+    sse_slot_t *slots;  /* chat tool accumulation, by index */
     size_t nslots;
-    tslot_t *rslots; /* responses tool accumulation, by output_index */
+    sse_slot_t *rslots; /* responses tool accumulation, by output_index */
     size_t nrslots;
     char finish[64];
     bool have_finish;
@@ -68,12 +58,12 @@ typedef struct owire {
 
 /* ---------------- serialization: message array ---------------- */
 
-static void oai_user_msg(owire_t *w, const trec_t *u) {
+static void oai_user_msg(owire_t *w, const trec_t *u, const char *head) {
     buf_t txt;
     buf_init(&txt);
     user_text_join(u, &txt);
     append_msg_sep(&w->msgbuf);
-    buf_append_str(&w->msgbuf, "{\"role\":\"user\",\"content\":");
+    buf_append_str(&w->msgbuf, head);
     buf_append_jstr(&w->msgbuf, txt.data ? txt.data : "");
     buf_append_byte(&w->msgbuf, '}');
     buf_free(&txt);
@@ -106,12 +96,7 @@ static void oai_system_msg(owire_t *w, const cJSON *system) {
 static void oai_assistant_msg(owire_t *w, group_iter_t *g) {
     buf_t txt;
     buf_init(&txt);
-    for (size_t i = g->begin; i < g->end; i++) {
-        const trec_t *r = g->l->v[i];
-        if (r->kind != T_TEXT) continue;
-        if (txt.len) buf_append_byte(&txt, '\n');
-        buf_append_str(&txt, r->text);
-    }
+    group_text_join(g, &txt);
     bool has_treq = false;
     for (size_t i = g->begin; i < g->end; i++)
         if (g->l->v[i]->kind == T_TREQ) has_treq = true;
@@ -141,13 +126,14 @@ static void oai_assistant_msg(owire_t *w, group_iter_t *g) {
     buf_free(&txt);
 }
 
-static void oai_toolresp_msgs(owire_t *w, group_iter_t *g) {
+static void oai_toolresp_msgs(owire_t *w, group_iter_t *g, const char *head,
+                              const char *text_field) {
     for (size_t i = g->rbegin; i < g->rend; i++) {
         const trec_t *r = g->l->v[i];
         append_msg_sep(&w->msgbuf);
-        buf_append_str(&w->msgbuf, "{\"role\":\"tool\",\"tool_call_id\":");
+        buf_append_str(&w->msgbuf, head);
         buf_append_jstr(&w->msgbuf, r->id);
-        buf_append_str(&w->msgbuf, ",\"content\":");
+        buf_appendf(&w->msgbuf, ",\"%s\":", text_field);
         buf_append_jstr(&w->msgbuf, r->text);
         buf_append_byte(&w->msgbuf, '}');
     }
@@ -159,10 +145,12 @@ static void oai_serialize_new(owire_t *w, engine_t *e) {
     int kg;
     while ((kg = group_next(&gi)) != G_DONE) {
         if (gi.start < w->done_upto) continue;
-        if (kg == G_USER) oai_user_msg(w, gi.user);
+        if (kg == G_USER)
+            oai_user_msg(w, gi.user, "{\"role\":\"user\",\"content\":");
         else {
             oai_assistant_msg(w, &gi);
-            oai_toolresp_msgs(w, &gi);
+            oai_toolresp_msgs(
+                w, &gi, "{\"role\":\"tool\",\"tool_call_id\":", "content");
         }
         w->done_upto = gi.stop;
     }
@@ -170,27 +158,11 @@ static void oai_serialize_new(owire_t *w, engine_t *e) {
 
 /* responses api input items */
 
-static void rsp_user_item(owire_t *w, const trec_t *u) {
-    buf_t txt;
-    buf_init(&txt);
-    user_text_join(u, &txt);
-    append_msg_sep(&w->msgbuf);
-    buf_append_str(&w->msgbuf, "{\"type\":\"message\",\"role\":\"user\",\"content\":");
-    buf_append_jstr(&w->msgbuf, txt.data ? txt.data : "");
-    buf_append_byte(&w->msgbuf, '}');
-    buf_free(&txt);
-}
-
 static void rsp_assistant_items(owire_t *w, group_iter_t *g) {
     bool has_treq = g->rend > g->rbegin;
     buf_t txt;
     buf_init(&txt);
-    for (size_t i = g->begin; i < g->end; i++) {
-        const trec_t *r = g->l->v[i];
-        if (r->kind != T_TEXT) continue;
-        if (txt.len) buf_append_byte(&txt, '\n');
-        buf_append_str(&txt, r->text);
-    }
+    group_text_join(g, &txt);
     /* reasoning items are resent verbatim, but only for tool turns whose
        thinking came from the current llm (requirements sec.3, sec.5) */
     bool any = txt.len || has_treq;
@@ -242,15 +214,8 @@ static void rsp_assistant_items(owire_t *w, group_iter_t *g) {
 }
 
 static void rsp_toolresp_items(owire_t *w, group_iter_t *g) {
-    for (size_t i = g->rbegin; i < g->rend; i++) {
-        const trec_t *r = g->l->v[i];
-        append_msg_sep(&w->msgbuf);
-        buf_append_str(&w->msgbuf, "{\"type\":\"function_call_output\",\"call_id\":");
-        buf_append_jstr(&w->msgbuf, r->id);
-        buf_append_str(&w->msgbuf, ",\"output\":");
-        buf_append_jstr(&w->msgbuf, r->text);
-        buf_append_byte(&w->msgbuf, '}');
-    }
+    oai_toolresp_msgs(w, g, "{\"type\":\"function_call_output\",\"call_id\":",
+                      "output");
 }
 
 static void rsp_serialize_new(owire_t *w, engine_t *e) {
@@ -259,7 +224,9 @@ static void rsp_serialize_new(owire_t *w, engine_t *e) {
     int kg;
     while ((kg = group_next(&gi)) != G_DONE) {
         if (gi.start < w->done_upto) continue;
-        if (kg == G_USER) rsp_user_item(w, gi.user);
+        if (kg == G_USER)
+            oai_user_msg(w, gi.user,
+                         "{\"type\":\"message\",\"role\":\"user\",\"content\":");
         else {
             rsp_assistant_items(w, &gi);
             rsp_toolresp_items(w, &gi);
@@ -270,20 +237,9 @@ static void rsp_serialize_new(owire_t *w, engine_t *e) {
 
 /* ---------------- request build ---------------- */
 
-static const cJSON *inference(engine_t *e) {
-    return cJSON_GetObjectItemCaseSensitive(e->llm, "inference_options");
-}
-
-static const cJSON *io_get(engine_t *e, const char *field) {
-    const cJSON *io = inference(e);
-    if (!io) return NULL;
-    const cJSON *f = cJSON_GetObjectItemCaseSensitive(io, field);
-    return cJSON_IsNull(f) ? NULL : f;
-}
-
 static void append_opt_num(buf_t *b, engine_t *e, const char *name,
                            const char *wire_name) {
-    const cJSON *f = io_get(e, name);
+    const cJSON *f = wire_io_get(e, name);
     if (!cJSON_IsNumber(f)) return;
     buf_appendf(b, ",\"%s\":", wire_name);
     buf_append_jnum(b, f->valuedouble);
@@ -291,27 +247,10 @@ static void append_opt_num(buf_t *b, engine_t *e, const char *name,
 
 static void append_opt_str(buf_t *b, engine_t *e, const char *name,
                            const char *wire_name) {
-    const cJSON *f = io_get(e, name);
+    const cJSON *f = wire_io_get(e, name);
     if (!cJSON_IsString(f) || !f->valuestring) return;
     buf_appendf(b, ",\"%s\":", wire_name);
     buf_append_jstr(b, f->valuestring);
-}
-
-static void append_tool_entry(buf_t *b, const tool_entry_t *t, bool nested) {
-    if (nested) buf_append_str(b, "{\"type\":\"function\",\"function\":{\"name\":");
-    else buf_append_str(b, "{\"type\":\"function\",\"name\":");
-    buf_append_jstr(b, t->exposed_name);
-    const cJSON *desc = cJSON_GetObjectItemCaseSensitive(t->tool, "description");
-    if (cJSON_IsString(desc) && desc->valuestring) {
-        buf_append_str(b, ",\"description\":");
-        buf_append_jstr(b, desc->valuestring);
-    }
-    const cJSON *sch = cJSON_GetObjectItemCaseSensitive(t->tool, "inputSchema");
-    if (sch) {
-        buf_append_str(b, ",\"parameters\":");
-        buf_append_tree(b, sch);
-    }
-    buf_append_str(b, nested ? "}}" : "}");
 }
 
 static void append_tools(buf_t *b, engine_t *e, bool nested) {
@@ -320,7 +259,7 @@ static void append_tools(buf_t *b, engine_t *e, bool nested) {
     buf_append_str(b, ",\"tools\":[");
     for (size_t i = 0; i < tl->n; i++) {
         if (i) buf_append_byte(b, ',');
-        append_tool_entry(b, &tl->v[i], nested);
+        append_tool_json(b, &tl->v[i], "parameters", nested, NULL);
     }
     buf_append_byte(b, ']');
 }
@@ -339,7 +278,7 @@ static bool build_body(owire_t *w, engine_t *e) {
     if (w->proto == PROTO_OPENAI) oai_serialize_new(w, e);
     else rsp_serialize_new(w, e);
 
-    const cJSON *sf = io_get(e, "stream");
+    const cJSON *sf = wire_io_get(e, "stream");
     bool stream = sf ? cJSON_IsTrue(sf) : true;
 
     buf_t *b = &w->base.last_body;
@@ -370,7 +309,7 @@ static bool build_body(owire_t *w, engine_t *e) {
         append_opt_num(b, e, "top_p", "top_p");
         append_opt_num(b, e, "max_tokens", "max_tokens");
         {
-            const cJSON *f = io_get(e, "stop");
+            const cJSON *f = wire_io_get(e, "stop");
             if (f) {
                 buf_append_str(b, ",\"stop\":");
                 buf_append_tree(b, f);
@@ -389,7 +328,7 @@ static bool build_body(owire_t *w, engine_t *e) {
         append_opt_num(b, e, "temperature", "temperature");
         append_opt_num(b, e, "top_p", "top_p");
         {
-            const cJSON *f = io_get(e, "reasoning_effort");
+            const cJSON *f = wire_io_get(e, "reasoning_effort");
             if (cJSON_IsString(f) && f->valuestring) {
                 buf_append_str(b, ",\"reasoning\":{\"effort\":");
                 buf_append_jstr(b, f->valuestring);
@@ -409,9 +348,6 @@ static bool build_body(owire_t *w, engine_t *e) {
 
 static const char *finish_norm_openai(const char *fr) {
     if (!fr) return "stop";
-    if (!strcmp(fr, "stop")) return "stop";
-    if (!strcmp(fr, "length")) return "length";
-    if (!strcmp(fr, "content_filter")) return "content_filter";
     if (!strcmp(fr, "tool_calls") || !strcmp(fr, "function_call"))
         return "tool_use";
     return fr;
@@ -429,46 +365,22 @@ static const char *finish_norm_responses(const char *status,
         return incomplete_reason ? incomplete_reason : "incomplete";
     }
     return status;
-}
-
-/* ---------------- tool slots ---------------- */
-
-/* endpoint-controlled slot index (tool_calls[].index / output_index):
-   bounded and allocation-checked. Out-of-range, non-finite or
-   unallocatable indices yield NULL and the chunk is dropped - a hostile
-   endpoint must not be able to size an allocation. */
-enum { MAX_TOOL_SLOTS = 1024 };
-
-static tslot_t *slot_at(tslot_t **arr, size_t *n, double idx) {
-    if (!(idx >= 0) || idx > (double)MAX_TOOL_SLOTS) return NULL;
-    size_t i = (size_t)idx;
-    if (i >= *n) {
-        size_t nn = i + 1;
-        tslot_t *grown = realloc(*arr, nn * sizeof **arr);
-        if (!grown) return NULL;
-        *arr = grown;
-        for (size_t k = *n; k < nn; k++) {
-            (*arr)[k].id = strdup("");
-            (*arr)[k].name = strdup("");
-            buf_init(&(*arr)[k].args);
-        }
-        *n = nn;
-    }
-    return &(*arr)[i];
-}
-
-static void slots_reset(tslot_t **arr, size_t *n) {
-    for (size_t i = 0; i < *n; i++) {
-        free((*arr)[i].id);
-        free((*arr)[i].name);
-        buf_free(&(*arr)[i].args);
-    }
-    free(*arr);
-    *arr = NULL;
-    *n = 0;
-}
+ }
 
 /* ---------------- streaming: chat completions ---------------- */
+
+
+static void set_finish(owire_t *w, const char *fr) {
+    snprintf(w->finish, sizeof w->finish, "%s", fr ? fr : "");
+    w->have_finish = true;
+}
+
+static void set_usage(owire_t *w, const cJSON *u, const char *in_f,
+                      const char *out_f) {
+    w->usage_in = rec_num(u, in_f, 0);
+    w->usage_out = rec_num(u, out_f, 0);
+    w->have_usage = true;
+}
 
 static void chat_chunk(owire_t *w, const cJSON *ch) {
     const cJSON *choices = cJSON_GetObjectItemCaseSensitive(ch, "choices");
@@ -492,64 +404,45 @@ static void chat_chunk(owire_t *w, const cJSON *ch) {
                     cJSON_GetObjectItemCaseSensitive(delta, "tool_calls");
                 if (cJSON_IsArray(tcs))
                     for (const cJSON *tc = tcs->child; tc; tc = tc->next) {
-                        tslot_t *s = slot_at(&w->slots, &w->nslots,
-                                             rec_num(tc, "index", 0));
+                        sse_slot_t *s = sse_slot_at(&w->slots, &w->nslots,
+                                                    rec_num(tc, "index", 0));
                         if (!s) continue;
-                        const char *id = rec_str(tc, "id");
-                        if (id) {
-                            free(s->id);
-                            s->id = strdup(id);
-                        }
                         const cJSON *fn =
                             cJSON_GetObjectItemCaseSensitive(tc, "function");
-                        if (fn) {
-                            const char *nm = rec_str(fn, "name");
-                            if (nm) {
-                                free(s->name);
-                                s->name = strdup(nm);
-                            }
-                            const cJSON *ar =
-                                cJSON_GetObjectItemCaseSensitive(fn, "arguments");
-                            if (cJSON_IsString(ar) && ar->valuestring)
-                                buf_append_str(&s->args, ar->valuestring);
-                        }
+                        sse_slot_set(s, rec_str(tc, "id"),
+                                     fn ? rec_str(fn, "name") : NULL, NULL);
+                        const cJSON *ar = fn
+                              ? cJSON_GetObjectItemCaseSensitive(fn, "arguments")
+                              : NULL;
+                        if (cJSON_IsString(ar) && ar->valuestring)
+                            buf_append_str(&s->args, ar->valuestring);
                     }
             }
             const char *fr = rec_str(c, "finish_reason");
-            if (fr) {
-                snprintf(w->finish, sizeof w->finish, "%s", fr);
-                w->have_finish = true;
-            }
+            if (fr) set_finish(w, fr);
         }
     const cJSON *usage = cJSON_GetObjectItemCaseSensitive(ch, "usage");
-    if (usage) {
-        w->usage_in = rec_num(usage, "prompt_tokens", 0);
-        w->usage_out = rec_num(usage, "completion_tokens", 0);
-        w->have_usage = true;
-    }
+    if (usage) set_usage(w, usage, "prompt_tokens", "completion_tokens");
 }
 
-/* stop the open block, flush the block-final, emit tool requests when any */
-static int chat_finish_turn(owire_t *w, engine_t *e, turn_out_t *out) {
+/* the accumulated slots as tool requests (usage+finish on the last), or
+   the turn's final record; norm_finish NULL: no finish reason */
+static int slots_finish(owire_t *w, engine_t *e, sse_slot_t *slots,
+                        size_t nslots, const char *norm_finish,
+                        turn_out_t *out) {
     blk_stop(&w->be);
-    if (!w->have_finish) {
-        snprintf(w->finish, sizeof w->finish,
-                 w->nslots ? "tool_calls" : "stop");
-        w->have_finish = true;
-    }
-    if (w->nslots) {
+    if (nslots) {
         blk_emit_pending(&w->be);
-        const char *norm = finish_norm_openai(w->finish);
-        for (size_t i = 0; i < w->nslots; i++) {
-            cJSON *args =
-                cJSON_Parse(w->slots[i].args.data ? w->slots[i].args.data : "{}");
+        for (size_t i = 0; i < nslots; i++) {
+            cJSON *args = cJSON_Parse(
+                slots[i].args.data ? slots[i].args.data : "{}");
             if (!args) args = cJSON_CreateObject();
-            cJSON *rec = rec_tool_request(w->slots[i].name, args, w->slots[i].id);
+            cJSON *rec = rec_tool_request(slots[i].name, args, slots[i].id);
             cJSON_Delete(args);
-            if (i + 1 == w->nslots) {
+            if (i + 1 == nslots) {
                 if (w->have_usage)
                     rec_attach_usage(rec, w->usage_in, w->usage_out);
-                rec_attach_finish(rec, norm);
+                if (norm_finish) rec_attach_finish(rec, norm_finish);
             }
             engine_emit_record(e, rec);
         }
@@ -559,9 +452,18 @@ static int chat_finish_turn(owire_t *w, engine_t *e, turn_out_t *out) {
     if (out->final_rec) {
         if (w->have_usage)
             rec_attach_usage(out->final_rec, w->usage_in, w->usage_out);
-        rec_attach_finish(out->final_rec, finish_norm_openai(w->finish));
+        if (norm_finish) rec_attach_finish(out->final_rec, norm_finish);
     }
     return TURN_FINAL;
+}
+
+/* stop the open block, flush the block-final, emit tool requests when any */
+static int chat_finish_turn(owire_t *w, engine_t *e, turn_out_t *out) {
+    if (!w->have_finish)
+        snprintf(w->finish, sizeof w->finish,
+                 w->nslots ? "tool_calls" : "stop");
+    return slots_finish(w, e, w->slots, w->nslots,
+                        finish_norm_openai(w->finish), out);
 }
 
 /* ---------------- streaming: responses api ---------------- */
@@ -609,24 +511,13 @@ static void rsp_item_done(owire_t *w, engine_t *e, const cJSON *item) {
         return;
     }
     if (ty && !strcmp(ty, "function_call")) {
-        tslot_t *s = slot_at(&w->rslots, &w->nrslots,
-                             rec_num(item, "output_index",
-                                     (double)w->nrslots));
+        sse_slot_t *s = sse_slot_at(&w->rslots, &w->nrslots,
+                                    rec_num(item, "output_index",
+                                            (double)w->nrslots));
         if (!s) return;
         const char *id = rec_str(item, "call_id");
         if (!id) id = rec_str(item, "id");
-        if (id) {
-            free(s->id);
-            s->id = strdup(id);
-        }
-        const char *nm = rec_str(item, "name");
-        if (nm) {
-            free(s->name);
-            s->name = strdup(nm);
-        }
-        const char *ar = rec_str(item, "arguments");
-        buf_clear(&s->args);
-        if (ar) buf_append_str(&s->args, ar);
+        sse_slot_set(s, id, rec_str(item, "name"), rec_str(item, "arguments"));
     }
 }
 
@@ -645,8 +536,8 @@ static void rsp_event(owire_t *w, engine_t *e, const char *ev, const char *data,
         const cJSON *item = cJSON_GetObjectItemCaseSensitive(d, "item");
         if (item) rsp_item_done(w, e, item);
     } else if (!strcmp(ev, "response.function_call_arguments.delta")) {
-        tslot_t *s = slot_at(&w->rslots, &w->nrslots,
-                             rec_num(d, "output_index", 0));
+        sse_slot_t *s = sse_slot_at(&w->rslots, &w->nrslots,
+                                    rec_num(d, "output_index", 0));
         if (s) {
             const char *s2 = rec_str(d, "delta");
             if (s2) buf_append_str(&s->args, s2);
@@ -663,14 +554,8 @@ static void rsp_event(owire_t *w, engine_t *e, const char *ev, const char *data,
         const char *reason = rec_str(inc, "reason");
         const cJSON *usage =
             resp ? cJSON_GetObjectItemCaseSensitive(resp, "usage") : NULL;
-        if (usage) {
-            w->usage_in = rec_num(usage, "input_tokens", 0);
-            w->usage_out = rec_num(usage, "output_tokens", 0);
-            w->have_usage = true;
-        }
-        snprintf(w->finish, sizeof w->finish, "%s",
-                 finish_norm_responses(status, reason, w->nrslots > 0));
-        w->have_finish = true;
+        if (usage) set_usage(w, usage, "input_tokens", "output_tokens");
+        set_finish(w, finish_norm_responses(status, reason, w->nrslots > 0));
         w->sse_done = true;
     } else if (!strcmp(ev, "response.failed") || !strcmp(ev, "error")) {
         const cJSON *resp = cJSON_GetObjectItemCaseSensitive(d, "response");
@@ -687,32 +572,8 @@ static void rsp_event(owire_t *w, engine_t *e, const char *ev, const char *data,
 }
 
 static int rsp_finish_turn(owire_t *w, engine_t *e, turn_out_t *out) {
-    blk_stop(&w->be);
-    if (w->nrslots) {
-        blk_emit_pending(&w->be);
-        for (size_t i = 0; i < w->nrslots; i++) {
-            cJSON *args = cJSON_Parse(w->rslots[i].args.data
-                                          ? w->rslots[i].args.data
-                                          : "{}");
-            if (!args) args = cJSON_CreateObject();
-            cJSON *rec = rec_tool_request(w->rslots[i].name, args, w->rslots[i].id);
-            cJSON_Delete(args);
-            if (i + 1 == w->nrslots) {
-                if (w->have_usage)
-                    rec_attach_usage(rec, w->usage_in, w->usage_out);
-                if (w->have_finish) rec_attach_finish(rec, w->finish);
-            }
-            engine_emit_record(e, rec);
-        }
-        return TURN_TOOLS;
-    }
-    out->final_rec = blk_take_pending(&w->be);
-    if (out->final_rec) {
-        if (w->have_usage)
-            rec_attach_usage(out->final_rec, w->usage_in, w->usage_out);
-        if (w->have_finish) rec_attach_finish(out->final_rec, w->finish);
-    }
-    return TURN_FINAL;
+    return slots_finish(w, e, w->rslots, w->nrslots,
+                        w->have_finish ? w->finish : NULL, out);
 }
 
 /* ---------------- sse glue ---------------- */
@@ -767,39 +628,21 @@ static int chat_body_map(owire_t *w, engine_t *e, const cJSON *body,
         const cJSON *tcs = cJSON_GetObjectItemCaseSensitive(msg, "tool_calls");
         if (cJSON_IsArray(tcs))
             for (const cJSON *tc = tcs->child; tc; tc = tc->next) {
-                tslot_t *s = slot_at(&w->slots, &w->nslots,
-                                     rec_num(tc, "index", (double)w->nslots));
+                sse_slot_t *s = sse_slot_at(&w->slots, &w->nslots,
+                                            rec_num(tc, "index",
+                                                    (double)w->nslots));
                 if (!s) continue;
-                const char *id = rec_str(tc, "id");
-                if (id) {
-                    free(s->id);
-                    s->id = strdup(id);
-                }
                 const cJSON *fn =
                     cJSON_GetObjectItemCaseSensitive(tc, "function");
-                if (fn) {
-                    const char *nm = rec_str(fn, "name");
-                    if (nm) {
-                        free(s->name);
-                        s->name = strdup(nm);
-                    }
-                    const char *ar = rec_str(fn, "arguments");
-                    buf_clear(&s->args);
-                    if (ar) buf_append_str(&s->args, ar);
-                }
+                sse_slot_set(s, rec_str(tc, "id"),
+                             fn ? rec_str(fn, "name") : NULL,
+                             fn ? rec_str(fn, "arguments") : NULL);
             }
     }
     const char *fr = rec_str(ch, "finish_reason");
-    if (fr) {
-        snprintf(w->finish, sizeof w->finish, "%s", fr);
-        w->have_finish = true;
-    }
+    if (fr) set_finish(w, fr);
     const cJSON *usage = cJSON_GetObjectItemCaseSensitive(body, "usage");
-    if (usage) {
-        w->usage_in = rec_num(usage, "prompt_tokens", 0);
-        w->usage_out = rec_num(usage, "completion_tokens", 0);
-        w->have_usage = true;
-    }
+    if (usage) set_usage(w, usage, "prompt_tokens", "completion_tokens");
     return chat_finish_turn(w, e, out);
 }
 
@@ -814,14 +657,8 @@ static int rsp_body_map(owire_t *w, engine_t *e, const cJSON *body,
         cJSON_GetObjectItemCaseSensitive(body, "incomplete_details");
     const char *reason = rec_str(inc, "reason");
     const cJSON *usage = cJSON_GetObjectItemCaseSensitive(body, "usage");
-    if (usage) {
-        w->usage_in = rec_num(usage, "input_tokens", 0);
-        w->usage_out = rec_num(usage, "output_tokens", 0);
-        w->have_usage = true;
-    }
-    snprintf(w->finish, sizeof w->finish, "%s",
-             finish_norm_responses(status, reason, w->nrslots > 0));
-    w->have_finish = true;
+    if (usage) set_usage(w, usage, "input_tokens", "output_tokens");
+    set_finish(w, finish_norm_responses(status, reason, w->nrslots > 0));
     if (status && !strcmp(status, "failed")) {
         const cJSON *err = cJSON_GetObjectItemCaseSensitive(body, "error");
         const char *m = rec_str(err, "message");
@@ -842,8 +679,8 @@ static void owire_reset_turn(owire_t *w, engine_t *e, bool stream) {
     w->have_finish = false;
     w->have_usage = false;
     w->finish[0] = '\0';
-    slots_reset(&w->slots, &w->nslots);
-    slots_reset(&w->rslots, &w->nrslots);
+    sse_slots_reset(&w->slots, &w->nslots);
+    sse_slots_reset(&w->rslots, &w->nrslots);
     sse_free(&w->sse);
     w->sctx.w = w;
     w->sctx.e = e;
@@ -902,20 +739,9 @@ static int owire_turn(wire_t *base, engine_t *e, turn_out_t *out) {
     req.body_len = w->base.last_body.len;
 
     int rc = http_perform(&req);
-    int result;
-    if (rc == -1) {
-        blk_abort(&w->be);
-        result = g_stop_flag ? TURN_ABORTED : TURN_FATAL;
-        if (result == TURN_FATAL) out->error_rec = http_transport_error(&req);
-    } else if (rc == 1) {
-        out->error_rec = http_status_error(&req, true);
-        result = TURN_FATAL;
-    } else if (w->failed) {
-        out->error_rec = rec_error(EC_API_ERROR, w->fail_msg, true);
-        result = TURN_FATAL;
-    } else {
-        result = map_response(w, e, stream, &req, out);
-    }
+    int result = wire_http_verdict(rc, &req, &w->be, w->failed, w->fail_msg,
+                                   true, out);
+    if (!result) result = map_response(w, e, stream, &req, out);
 
     llm_http_teardown(&url, hdrs, &req);
     sse_free(&w->sse);
@@ -933,8 +759,8 @@ static void owire_destroy(wire_t *base) {
     buf_free(&w->msgbuf);
     blk_free(&w->be);
     sse_free(&w->sse);
-    slots_reset(&w->slots, &w->nslots);
-    slots_reset(&w->rslots, &w->nrslots);
+    sse_slots_reset(&w->slots, &w->nslots);
+    sse_slots_reset(&w->rslots, &w->nrslots);
     buf_free(&base->last_body);
     free(w);
 }

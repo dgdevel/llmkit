@@ -3,7 +3,8 @@
 #
 # Scope: every file git knows about plus untracked files, minus gitignored
 # ones (git ls-files --cached --others --exclude-standard) - exactly the set
-# of files that would enter a commit.
+# of files that would enter a commit - except src/prompts (the prompt texts
+# are prose the owner may shape freely, non-ASCII included).
 #
 # Detection: with LC_ALL=C, grep works on raw bytes, and any byte outside
 # ASCII is neither [:print:] nor [:space:], so one bracket class flags them
@@ -15,6 +16,7 @@ set -u
 cd "$(dirname "$0")/.." || exit 2
 
 hits=$(git ls-files --cached --others --exclude-standard |
+    grep -v '^src/prompts/' |
     while IFS= read -r f; do
         LC_ALL=C grep -Hn '[^[:print:][:space:]]' "$f" || true
     done)

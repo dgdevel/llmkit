@@ -3065,12 +3065,8 @@ int builtin_handle(void *ctx, const char *method, cJSON *params, cJSON *id,
                    cJSON **result_out, char **errmsg_out) {
     (void)ctx;
     (void)id;
-    if (!strcmp(method, "initialize")) {
-        *result_out = rpc_initialize_result(params, "llmkit-builtin-mcp");
-        return 0;
-    }
-    if (!strcmp(method, "notifications/initialized") || !strcmp(method, "ping"))
-        return 2;
+    int rc = rpc_common(method, params, "llmkit-builtin-mcp", result_out);
+    if (rc >= 0) return rc;
     if (!strcmp(method, "tools/list")) {
         *result_out = tools_list_result();
         return 0;

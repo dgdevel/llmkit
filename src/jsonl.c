@@ -124,9 +124,15 @@ char *validate_llm(const cJSON *t) {
     return NULL;
 }
 
-static const char *const known_options[] = {
-    "max_tool_rounds", "tool_call_timeout", "stream_interval",
-    "llm_connect_timeout", "llm_read_timeout", "retain_context", NULL,
+typedef struct {
+    const char *name;
+    bool is_num; /* false: boolean */
+} opt_def_t;
+
+static const opt_def_t option_types[] = {
+    { "max_tool_rounds", true },   { "tool_call_timeout", true },
+    { "stream_interval", true },   { "llm_connect_timeout", true },
+    { "llm_read_timeout", true },  { "retain_context", false },
 };
 
 static const char *const known_inference[] = {
@@ -157,22 +163,17 @@ char *validate_options(const cJSON *t) {
     if (!cJSON_IsObject(t)) return vmsg("options record must be an object");
     for (const cJSON *f = t->child; f; f = f->next) {
         if (f->string && !strcmp(f->string, "type")) continue; /* envelope */
-        bool known = false;
-        for (int i = 0; known_options[i]; i++)
-            if (!strcmp(f->string, known_options[i])) { known = true; break; }
-        if (!known) return vmsg("unknown option '%s'", f->string);
-        if (!strcmp(f->string, "max_tool_rounds") && !cJSON_IsNumber(f))
-            return vmsg("max_tool_rounds must be a number");
-        if (!strcmp(f->string, "retain_context") && !cJSON_IsBool(f))
-            return vmsg("retain_context must be a boolean");
-        if (!strcmp(f->string, "tool_call_timeout") && !cJSON_IsNumber(f))
-            return vmsg("tool_call_timeout must be a number");
-        if (!strcmp(f->string, "stream_interval") && !cJSON_IsNumber(f))
-            return vmsg("stream_interval must be a number");
-        if (!strcmp(f->string, "llm_connect_timeout") && !cJSON_IsNumber(f))
-            return vmsg("llm_connect_timeout must be a number");
-        if (!strcmp(f->string, "llm_read_timeout") && !cJSON_IsNumber(f))
-            return vmsg("llm_read_timeout must be a number");
+        const opt_def_t *d = NULL;
+        for (size_t i = 0; i < sizeof option_types / sizeof option_types[0];
+             i++)
+            if (!strcmp(f->string, option_types[i].name)) {
+                d = &option_types[i];
+                break;
+            }
+        if (!d) return vmsg("unknown option '%s'", f->string);
+        if (d->is_num ? !cJSON_IsNumber(f) : !cJSON_IsBool(f))
+            return vmsg("%s must be a %s", d->name,
+                        d->is_num ? "number" : "boolean");
     }
     return NULL;
 }
@@ -272,17 +273,13 @@ cJSON *jsonl_parse_line(const char *line) {
 }
 
 int jsonl_feed(jsonl_pusher_t *p, const char *bytes, size_t n) {
-    /* byte rule 1: drop every 0x0d byte (covers \r\n and raw CR) */
-    buf_t raw;
-    buf_init(&raw);
-    for (size_t i = 0; i < n; i++)
-        if (bytes[i] != '\x0d') buf_append_byte(&raw, bytes[i]);
-    /* strict UTF-8 on held + new bytes */
+    /* byte rule 1: drop every 0x0d byte (covers \r\n and raw CR); strict
+       utf-8 over the hold plus the stripped new bytes */
     buf_t all;
     buf_init(&all);
     if (p->hold.len) buf_append(&all, p->hold.data, p->hold.len);
-    buf_append(&all, raw.data ? raw.data : "", raw.len);
-    buf_free(&raw);
+    for (size_t i = 0; i < n; i++)
+        if (bytes[i] != '\x0d') buf_append_byte(&all, bytes[i]);
     if (!utf8_valid((const uint8_t *)all.data, all.len)) {
         buf_free(&all);
         return -1;
@@ -320,21 +317,28 @@ int jsonl_eof(jsonl_pusher_t *p) {
     return 0;
 }
 
-bool jsonl_read_file(const char *path, jsonl_line_fn on_line, void *ctx) {
-    FILE *f = fopen(path, "r");
-    if (!f) return false;
+/* feed a whole stream through the byte pipeline; false on a byte-rule
+   violation (invalid utf-8 or a NUL byte) */
+bool jsonl_read_stream(FILE *in, jsonl_line_fn on_line, void *ctx) {
     jsonl_pusher_t p;
     jsonl_pusher_init(&p, on_line, ctx);
     char bbuf[8192];
     size_t n;
     bool ok = true;
-    while ((n = fread(bbuf, 1, sizeof bbuf, f)) > 0)
+    while ((n = fread(bbuf, 1, sizeof bbuf, in)) > 0)
         if (jsonl_feed(&p, bbuf, n) != 0) {
             ok = false;
             break;
         }
     if (ok && jsonl_eof(&p) != 0) ok = false;
     jsonl_pusher_free(&p);
+    return ok;
+}
+
+bool jsonl_read_file(const char *path, jsonl_line_fn on_line, void *ctx) {
+    FILE *f = fopen(path, "r");
+    if (!f) return false;
+    bool ok = jsonl_read_stream(f, on_line, ctx);
     fclose(f);
     return ok;
 }
@@ -423,14 +427,9 @@ void tlist_clear(tlist_t *l) {
 }
 
 static trec_t *tlist_push(tlist_t *l, uint8_t kind) {
-    if (l->n == l->cap) {
-        l->cap = l->cap ? l->cap * 2 : 16;
-        l->v = realloc(l->v, l->cap * sizeof *l->v);
-        if (!l->v) { perror("realloc"); exit(1); }
-    }
     trec_t *r = calloc(1, sizeof *r);
     r->kind = kind;
-    l->v[l->n++] = r;
+    ptr_push((void ***)&l->v, &l->n, &l->cap, r);
     return r;
 }
 
@@ -572,6 +571,19 @@ bool user_text_join(const trec_t *u, buf_t *out) {
         any = true;
     }
     return any;
+}
+
+void group_text_join(const group_iter_t *g, buf_t *out) {
+    for (size_t i = g->begin; i < g->end; i++) {
+        const trec_t *r = g->l->v[i];
+        if (r->kind != T_TEXT) continue;
+        if (out->len) buf_append_byte(out, '\n');
+        buf_append_str(out, r->text);
+    }
+}
+
+void append_msg_sep(buf_t *b) {
+    if (b->len > 1) buf_append_byte(b, ','); /* "[" alone takes no comma */
 }
 
 /* ---- stdout sink ---- */

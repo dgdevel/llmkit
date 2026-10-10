@@ -93,6 +93,8 @@ void buf_append_byte(buf_t *b, char c);
 void buf_appendf(buf_t *b, const char *fmt, ...);
 void buf_clear(buf_t *b); /* keep capacity */
 char *buf_steal(buf_t *b, size_t *len_out); /* NUL-terminated; resets b */
+/* growable pointer array: append one item, doubling (unchecked like buf) */
+void ptr_push(void ***v, size_t *n, size_t *cap, void *item);
 
 /* append a JSON-encoded string literal (with quotes) */
 void buf_append_jstr(buf_t *b, const char *s);
@@ -250,6 +252,38 @@ void sse_free(sse_parser_t *p);
 void sse_feed(sse_parser_t *p, const char *bytes, size_t n);
 void sse_eof(sse_parser_t *p); /* dispatch any unterminated event */
 
+/* ---- llm stream accumulation (shared by the wires and the proxy) ---- */
+
+enum { MAX_SSE_SLOTS = 1024, MAX_SSE_BLOCKS = 64 };
+
+/* a streamed tool call assembling itself: chat tool_calls[] by index,
+   responses function_calls by output_index */
+typedef struct sse_slot {
+    char *id, *name;
+    buf_t args;
+} sse_slot_t;
+
+/* an anthropic content block by index */
+typedef struct sse_block {
+    int type; /* -1 unset, 0 text, 1 thinking, 2 tool_use */
+    char *id, *name, *signature;
+    buf_t args;
+} sse_block_t;
+
+/* endpoint-controlled slot index (tool_calls[].index / output_index):
+   bounded and allocation-checked. Out-of-range, non-finite or
+   unallocatable indices yield NULL and the chunk is dropped - a hostile
+   endpoint must not be able to size an allocation. */
+sse_slot_t *sse_slot_at(sse_slot_t **arr, size_t *n, double idx);
+void sse_slots_reset(sse_slot_t **arr, size_t *n);
+/* id/name/args capture into a slot; NULL keeps the current value, a
+   non-NULL args replaces the accumulated one */
+void sse_slot_set(sse_slot_t *s, const char *id, const char *name,
+                  const char *args);
+/* the fixed block table both anthropic consumers index into */
+sse_block_t *sse_block_at(sse_block_t *blocks, size_t *n, int idx);
+void sse_blocks_reset(sse_block_t *blocks, size_t *n);
+
 /* ================= jsonl.c ================= */
 
 /* record classification */
@@ -292,8 +326,9 @@ int jsonl_eof(jsonl_pusher_t *p);
 /* parse one line; NULL on malformed json (or embedded NUL - pre-checked) */
 cJSON *jsonl_parse_line(const char *line);
 
-/* feed a whole file through the byte pipeline; false on io error or a
+/* feed a whole stream through the byte pipeline; false on io error or a
    byte-rule violation (record validity is the callback's business) */
+bool jsonl_read_stream(FILE *in, jsonl_line_fn on_line, void *ctx);
 bool jsonl_read_file(const char *path, jsonl_line_fn on_line, void *ctx);
 
 /* output record builders (field order fixed, deterministic) */
@@ -476,7 +511,7 @@ int engine_input_record(engine_t *e, cJSON *tree); /* reading-state dispatch:
 int engine_start(engine_t *e); /* validate + connect; 0 ok, exit code on fatal */
 int engine_run(engine_t *e);   /* turn loop; returns exit code */
 void engine_drain_input(engine_t *e); /* non-blocking drain into pending */
-int engine_stop_orderly(engine_t *e, cJSON *held_final); /* returns EXIT_INTERRUPTED */
+int engine_stop_orderly(engine_t *e); /* returns EXIT_INTERRUPTED */
 int engine_pre_start_stop(engine_t *e);  /* SIGINT before start; returns exit code */
 void engine_rebuild_options_cache(engine_t *e);
 wire_t *wire_factory_default(engine_t *e);
@@ -506,7 +541,6 @@ typedef struct mcp_server {
     char *url;     /* request url (sse: from endpoint event) */
     char *session; /* Mcp-Session-Id */
     bool sse_ready;
-    pthread_t sse_th;
     bool have_sse_th;
     /* common */
     int next_id;
@@ -555,6 +589,9 @@ int mcp_call_raw(mcp_server_t *srv, const char *upstream_tool,
 int mcp_call(mcp_mgr_t *m, const char *tool /* server.tool */, cJSON *args,
              buf_t *text_out, bool *is_error, char *err, size_t errsz,
              double timeout /*<0 none*/);
+/* join a tools/call result's text blocks with \n; text-block count, or
+   -1 when a non-text block appears */
+int mcp_content_join(const cJSON *result, buf_t *out);
 void mcp_kill_all(mcp_mgr_t *m);
 
 /* json-rpc stdio server loop (agent-as-tool + mcp-proxy) */
@@ -574,6 +611,9 @@ void rpc_serve(rpc_handler_t *h, rpc_read_fn rd, rpc_write_fn wr, void *io_ctx);
 int rpc_serve_stdio(rpc_handler_t *h);
 /* the initialize reply tree every stdio server handler sends */
 cJSON *rpc_initialize_result(const cJSON *params, const char *server_name);
+/* initialize / initialized / ping, shared by every stdio server handler */
+int rpc_common(const char *method, cJSON *params, const char *server_name,
+               cJSON **result_out);
 
 /* transcript truncation (agent rollback) */
 void tlist_truncate(tlist_t *l, size_t n);
@@ -590,6 +630,22 @@ void engine_test_push_eof(engine_t *e);
 /* ================= wire constructors ================= */
 wire_t *wire_openai_new(int proto /*PROTO_OPENAI|PROTO_RESPONSES*/);
 wire_t *wire_anthropic_new(void);
+
+/* ---- shared wire helpers (engine.c / jsonl.c) ---- */
+/* the message-array separator of the wires' append-only prefix */
+void append_msg_sep(buf_t *b);
+/* join a group's T_TEXT records with \n */
+void group_text_join(const group_iter_t *g, buf_t *out);
+/* inference_options field, NULL when absent or null */
+const cJSON *wire_io_get(engine_t *e, const char *field);
+/* one tool listing entry: schema under schema_field, openai nested in a
+   function object, anthropic with the trailing cache mark */
+void append_tool_json(buf_t *b, const tool_entry_t *t, const char *schema_field,
+                      bool nested, const char *tail);
+/* the post-transfer verdict both wires share: transport error, http
+   error or an in-stream failure; 0 = the body still needs mapping */
+int wire_http_verdict(int rc, http_req_t *req, blkemit_t *be, bool failed,
+                      const char *fail_msg, bool with_type, turn_out_t *out);
 
 /* ================= proxy internals (shared with the selfcheck) ========== */
 typedef struct exposed_tool {
@@ -653,12 +709,16 @@ typedef struct call_cfg {
     char **hdr_names, **hdr_values;  /* owned, parallel arrays */
     size_t nhdrs;
     char **proxies;                  /* owned config paths, argv order */
-    size_t nproxies;
+    size_t nproxies, capproxies;
     char **terminals;                /* owned --terminal-tool values */
-    size_t nterminals;
+    size_t nterminals, capterminals;
 } call_cfg_t;
 
 void call_cfg_free(call_cfg_t *c);
+/* the CLI parsers' usage-error report (call, mcp-repl, proxy): fills
+   err, returns 1 */
+int usage_err(char *err, size_t errsz, const char *fmt, ...)
+    __attribute__((format(printf, 3, 4)));
 /* 0 ok, 1 usage error (err filled, cfg freed). with_prompt false is the
    repl surface: --prompt is an unknown flag there (requirements sec.12) */
 int call_parse_ex(int argc, char **argv, call_cfg_t *c, char *err,
@@ -798,6 +858,40 @@ int repl_store_extract(int argc, char **argv, const char **store,
                        char *err, size_t errsz);
 
 /* ================= pretty.c ================= */
+
+/* ---- display framing (shared with the repl's live sink) ---- */
+
+/* the tty/TERM typography probe: "" fields when styling is off */
+typedef struct style {
+    char bold[32], italic[32], reset[32]; /* "" = attribute off */
+} style_t;
+
+void style_probe(style_t *st, FILE *out);
+
+/* the framing state machine under the front-end sinks: rules, lazy
+   separators, styled spans, the error line */
+typedef struct dspy {
+    FILE *out;
+    const style_t *st;
+    bool io_fail;     /* stdout write failed: out-of-channel exit 1 */
+    bool wrote;       /* any transcript byte written */
+    bool last_nl;     /* last written byte was \n */
+    int cur;          /* open streamed block: R_THINKING/R_RESPONSE, -1 */
+    bool sep_pending; /* a block opened, its rule not yet drawn (lazy) */
+} dspy_t;
+
+void dspy_write(dspy_t *s, const char *t, size_t n);
+void dspy_write_str(dspy_t *s, const char *t);
+void dspy_ensure_nl(dspy_t *s);
+void dspy_rule(dspy_t *s, char glyph);
+void dspy_sep_flush(dspy_t *s);
+void dspy_styled(dspy_t *s, const char *on, const char *text);
+void dspy_error_line(dspy_t *s, const char *code, const char *msg);
+/* the tool traffic arms both record dispatchers share */
+void dspy_tool_request(dspy_t *s, const cJSON *rec);
+void dspy_tool_response(dspy_t *s, const char *tx);
+/* a record's content text blocks joined with \n */
+void dspy_content_text(const cJSON *rec, buf_t *out);
 
 /* render the conversation read from in with the repl's display shapes;
    returns the exit code: 0 rendered, 2 invalid record, 1 write failure */

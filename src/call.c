@@ -31,10 +31,8 @@ void call_cfg_free(call_cfg_t *c) {
     memset(c, 0, sizeof *c);
 }
 
-/* argv[0] of the flag range, not of the process */
-static int usage_err(char *err, size_t errsz, const char *fmt, ...)
-    __attribute__((format(printf, 3, 4)));
-static int usage_err(char *err, size_t errsz, const char *fmt, ...) {
+/* the CLI parsers' usage-error report: fills err, returns 1 */
+int usage_err(char *err, size_t errsz, const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
     vsnprintf(err, errsz, fmt, ap);
@@ -71,16 +69,11 @@ static int cfg_hdr_add(call_cfg_t *c, const char *name, const char *value) {
     return 0;
 }
 
-static int cfg_proxy_add(call_cfg_t *c, const char *path) {
-    char *d = strdup(path);
+/* strdup-append one string to a growable string list */
+static int cfg_str_add(char ***v, size_t *n, size_t *cap, const char *s) {
+    char *d = strdup(s);
     if (!d) return -1;
-    char **p = realloc(c->proxies, (c->nproxies + 1) * sizeof *p);
-    if (!p) {
-        free(d);
-        return -1;
-    }
-    c->proxies = p;
-    c->proxies[c->nproxies++] = d;
+    ptr_push((void ***)v, n, cap, d);
     return 0;
 }
 
@@ -94,6 +87,15 @@ static char *proxy_name(const char *path) {
     if (dot) n = (size_t)(dot - base);
     if (n == 0) return NULL;
     return strndup(base, n);
+}
+
+/* value flag: strdup once, "given twice" on repeat */
+static int set_str_once(const char *flag, const char *v, char **dst,
+                        bool *have, char *err, size_t errsz) {
+    if (*have) return usage_err(err, errsz, "%s given twice", flag);
+    *have = true;
+    *dst = strdup(v);
+    return 0;
 }
 
 int call_parse_ex(int argc, char **argv, call_cfg_t *c, char *err,
@@ -129,29 +131,18 @@ int call_parse_ex(int argc, char **argv, call_cfg_t *c, char *err,
             }
             const char *v = argv[++i];
             if (!strcmp(a, "--key")) {
-                if (have_key) {
-                    usage_err(err, errsz, "--key given twice");
+                if (set_str_once(a, v, &c->key, &have_key, err, errsz))
                     goto fail;
-                }
-                have_key = true;
-                c->key = strdup(v);
             } else if (!strcmp(a, "--model")) {
-                if (have_model) {
-                    usage_err(err, errsz, "--model given twice");
+                if (set_str_once(a, v, &c->model, &have_model, err, errsz))
                     goto fail;
-                }
-                have_model = true;
-                c->model = strdup(v);
             } else if (!strcmp(a, "--reasoning-effort")) {
-                if (have_effort) {
-                    usage_err(err, errsz, "--reasoning-effort given twice");
-                    goto fail;
-                }
                 /* the value is not constrained: providers differ in what
                    they accept, violations surface as the endpoint's own
                    api_error (requirements sec.4) */
-                have_effort = true;
-                c->reasoning_effort = strdup(v);
+                if (set_str_once(a, v, &c->reasoning_effort, &have_effort,
+                                 err, errsz))
+                    goto fail;
             } else if (!strcmp(a, "--max-tokens")) {
                 if (have_mt) {
                     usage_err(err, errsz, "--max-tokens given twice");
@@ -168,19 +159,11 @@ int call_parse_ex(int argc, char **argv, call_cfg_t *c, char *err,
                 have_mt = true;
                 c->max_tokens = n;
             } else if (!strcmp(a, "--system-prompt")) {
-                if (have_system) {
-                    usage_err(err, errsz, "--system-prompt given twice");
+                if (set_str_once(a, v, &c->system, &have_system, err, errsz))
                     goto fail;
-                }
-                have_system = true;
-                c->system = strdup(v);
             } else if (with_prompt && !strcmp(a, "--prompt")) {
-                if (have_prompt) {
-                    usage_err(err, errsz, "--prompt given twice");
+                if (set_str_once(a, v, &c->prompt, &have_prompt, err, errsz))
                     goto fail;
-                }
-                have_prompt = true;
-                c->prompt = strdup(v);
             } else if (!strcmp(a, "--header")) {
                 const char *eq = strchr(v, '=');
                 if (!eq || eq == v || !eq[1]) {
@@ -199,17 +182,11 @@ int call_parse_ex(int argc, char **argv, call_cfg_t *c, char *err,
                     goto fail;
                 }
             } else if (!strcmp(a, "--terminal-tool")) {
-                char *d = strdup(v);
-                char **p =
-                    d ? realloc(c->terminals,
-                                (c->nterminals + 1) * sizeof *p) : NULL;
-                if (!d || !p) {
-                    free(d);
+                if (cfg_str_add(&c->terminals, &c->nterminals,
+                                &c->capterminals, v)) {
                     usage_err(err, errsz, "out of memory");
                     goto fail;
                 }
-                c->terminals = p;
-                c->terminals[c->nterminals++] = d;
             } else { /* --mcp-proxy */
                 char *nm = proxy_name(v);
                 if (!nm) {
@@ -231,7 +208,8 @@ int call_parse_ex(int argc, char **argv, call_cfg_t *c, char *err,
                     }
                 }
                 free(nm);
-                if (cfg_proxy_add(c, v)) {
+                if (cfg_str_add(&c->proxies, &c->nproxies, &c->capproxies,
+                                v)) {
                     usage_err(err, errsz, "out of memory");
                     goto fail;
                 }
@@ -500,6 +478,17 @@ static int compile_fail(engine_t *e, char *msg /* malloc'd or NULL */,
     return EXIT_INVALID_RECORD;
 }
 
+/* validate + compile one leading record (msg from its validator): 0 ok,
+   else the record is deleted and the failure emitted */
+static int compile_step(engine_t *e, cJSON *rec, char *msg,
+                        const char *stat) {
+    int rc = 0;
+    if (msg) rc = compile_fail(e, msg, stat);
+    else engine_apply_config_record(e, rec);
+    cJSON_Delete(rec);
+    return rc;
+}
+
 int call_compile(const call_cfg_t *c, engine_t *e, const char *exe_path) {
     if (!utf8_check_str(c->api_base) || !utf8_check_str(c->key) ||
         !utf8_check_str(c->model) || !utf8_check_str(c->reasoning_effort) ||
@@ -520,38 +509,23 @@ int call_compile(const call_cfg_t *c, engine_t *e, const char *exe_path) {
         }
 
     cJSON *llm = call_build_llm(c);
-    int rc = 0;
-    char *m = validate_llm(llm);
-    if (m) {
-        rc = compile_fail(e, m, "invalid llm record");
-        cJSON_Delete(llm);
-        return rc;
-    }
-    engine_apply_config_record(e, llm);
-    cJSON_Delete(llm);
+    int rc = compile_step(e, llm, validate_llm(llm), "invalid llm record");
+    if (rc) return rc;
 
     if (c->system) {
         cJSON *sys = call_build_system(c);
-        m = validate_content(cJSON_GetObjectItemCaseSensitive(sys, "content"));
-        if (m) {
-            rc = compile_fail(e, m, "invalid system record");
-            cJSON_Delete(sys);
-            return rc;
-        }
-        engine_apply_config_record(e, sys);
-        cJSON_Delete(sys);
+        rc = compile_step(e, sys,
+                          validate_content(
+                              cJSON_GetObjectItemCaseSensitive(sys, "content")),
+                          "invalid system record");
+        if (rc) return rc;
     }
 
     if (c->nproxies) {
         cJSON *tools = call_build_tools(c, exe_path);
-        m = validate_tools(tools);
-        if (m) {
-            rc = compile_fail(e, m, "invalid tools record");
-            cJSON_Delete(tools);
-            return rc;
-        }
-        engine_apply_config_record(e, tools);
-        cJSON_Delete(tools);
+        rc = compile_step(e, tools, validate_tools(tools),
+                          "invalid tools record");
+        if (rc) return rc;
     }
     return 0;
 }

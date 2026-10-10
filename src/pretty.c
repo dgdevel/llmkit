@@ -20,14 +20,11 @@
 #include <string.h>
 #include <unistd.h>
 
-/* ================= typography probe ================= */
-/* (repl.c's probe, verbatim: one look per process, the same contract) */
+/* ================= display framing ================= */
+/* the typography probe and the framing state machine shared with the
+   repl's live sink (design sec.12): one look per process */
 
-typedef struct style {
-    char bold[32], italic[32], reset[32]; /* "" = attribute off */
-} style_t;
-
-static void style_probe(style_t *st, FILE *out) {
+void style_probe(style_t *st, FILE *out) {
     memset(st, 0, sizeof *st);
     int fd = fileno(out);
     if (fd < 0 || !isatty(fd)) return;
@@ -45,34 +42,21 @@ static void style_probe(style_t *st, FILE *out) {
     snprintf(st->reset, sizeof st->reset, "\033[0m");
 }
 
-/* ================= display sink ================= */
-/* (repl.c's sink minus the mono clock: the framing state machine only) */
-
-typedef struct pretty_sink {
-    FILE *out;
-    const style_t *st;
-    bool io_fail;    /* stdout write failed: out-of-channel exit 1 */
-    bool wrote;      /* any transcript byte written */
-    bool last_nl;    /* last written byte was \n */
-    int cur;         /* open streamed block: R_THINKING/R_RESPONSE, -1 none */
-    bool sep_pending;/* a block opened, its rule not yet drawn (lazy) */
-} pretty_sink_t;
-
-static void pwr(pretty_sink_t *s, const char *t, size_t n) {
+void dspy_write(dspy_t *s, const char *t, size_t n) {
     if (!n) return;
     if (fwrite(t, 1, n, s->out) != n || fflush(s->out) != 0) s->io_fail = true;
     s->wrote = true;
     s->last_nl = t[n - 1] == '\n';
 }
 
-static void pwr_str(pretty_sink_t *s, const char *t) { pwr(s, t, strlen(t)); }
+void dspy_write_str(dspy_t *s, const char *t) { dspy_write(s, t, strlen(t)); }
 
-static void ensure_nl(pretty_sink_t *s) {
-    if (s->wrote && !s->last_nl) pwr_str(s, "\n");
+void dspy_ensure_nl(dspy_t *s) {
+    if (s->wrote && !s->last_nl) dspy_write_str(s, "\n");
 }
 
-static void draw_rule(pretty_sink_t *s, char glyph) {
-    ensure_nl(s);
+void dspy_rule(dspy_t *s, char glyph) {
+    dspy_ensure_nl(s);
     int w = tty_cols(s->out);
     if (w <= 0) w = 80;
     char line[512];
@@ -81,41 +65,66 @@ static void draw_rule(pretty_sink_t *s, char glyph) {
     if ((int)tsl > w) tsl = (size_t)w; /* pathological width: stamp only */
     memset(line + tsl, glyph, (size_t)w - tsl);
     line[w] = '\n';
-    pwr(s, line, (size_t)w + 1);
+    dspy_write(s, line, (size_t)w + 1);
 }
 
 /* the block's light rule, drawn lazily: a block whose text stays empty
    renders nothing, separator included (requirements sec.12) */
-static void sep_flush(pretty_sink_t *s) {
+void dspy_sep_flush(dspy_t *s) {
     if (!s->sep_pending) return;
-    draw_rule(s, '-');
+    dspy_rule(s, '-');
     s->sep_pending = false;
 }
 
-static void styled(pretty_sink_t *s, const char *on, const char *text) {
+void dspy_styled(dspy_t *s, const char *on, const char *text) {
     if (!text || !*text) return;
-    sep_flush(s);
-    if (*on) pwr_str(s, on);
-    pwr_str(s, text);
-    if (*on) pwr_str(s, s->st->reset);
+    dspy_sep_flush(s);
+    if (*on) dspy_write_str(s, on);
+    dspy_write_str(s, text);
+    if (*on) dspy_write_str(s, s->st->reset);
 }
 
-static void render_error_line(pretty_sink_t *s, const char *code,
-                              const char *msg) {
-    ensure_nl(s);
+void dspy_error_line(dspy_t *s, const char *code, const char *msg) {
+    dspy_ensure_nl(s);
     s->cur = -1; /* an error line closes any open block */
-    pwr_str(s, "! ");
-    pwr_str(s, code ? code : "error");
-    pwr_str(s, ": ");
-    pwr_str(s, msg ? msg : "");
-    pwr_str(s, "\n");
+    dspy_write_str(s, "! ");
+    dspy_write_str(s, code ? code : "error");
+    dspy_write_str(s, ": ");
+    dspy_write_str(s, msg ? msg : "");
+    dspy_write_str(s, "\n");
+}
+
+/* the tool traffic arms both record dispatchers share: the tool name
+   with its arguments tree, and the response text, bold */
+void dspy_tool_request(dspy_t *s, const cJSON *rec) {
+    s->cur = -1;
+    const char *tool = rec_str(rec, "tool");
+    buf_t line;
+    buf_init(&line);
+    if (tool) buf_append_str(&line, tool);
+    const cJSON *args = cJSON_GetObjectItemCaseSensitive(rec, "arguments");
+    if (cJSON_IsObject(args)) {
+        if (line.len) buf_append_byte(&line, ' ');
+        buf_append_tree(&line, args);
+    }
+    if (line.len) s->sep_pending = true; /* empty renders nothing */
+    dspy_styled(s, s->st->bold, line.data ? line.data : "");
+    dspy_ensure_nl(s);
+    buf_free(&line);
+}
+
+void dspy_tool_response(dspy_t *s, const char *tx) {
+    if (tx && *tx) s->sep_pending = true; /* empty renders nothing */
+    s->cur = -1;
+    dspy_styled(s, s->st->bold, tx);
+    dspy_ensure_nl(s);
 }
 
 /* the turn-closing usage line - the file's counterpart of the repl's
    timing line, stamped like one: the token totals of the turn as its
    final response record reports them. No usage on the closing record
    (a turn that ended any other way) renders nothing, timing's rule */
-static void render_usage(pretty_sink_t *s, const cJSON *rec) {
+static void render_usage(dspy_t *s, const cJSON *rec) {
     const cJSON *u = cJSON_GetObjectItemCaseSensitive(rec, "usage");
     if (!cJSON_IsObject(u)) return;
     char ts[32] = "", line[128];
@@ -124,13 +133,13 @@ static void render_usage(pretty_sink_t *s, const cJSON *rec) {
                      ts, rec_num(u, "input_tokens", 0.0),
                      rec_num(u, "output_tokens", 0.0));
     if (n <= 0) return;
-    ensure_nl(s);
-    pwr(s, line, (size_t)n >= sizeof line ? sizeof line - 1 : (size_t)n);
+    dspy_ensure_nl(s);
+    dspy_write(s, line, (size_t)n >= sizeof line ? sizeof line - 1 : (size_t)n);
 }
 
 /* the record's content text blocks joined with \n - the
    caller-authored shape user and system records share */
-static void content_text(const cJSON *rec, buf_t *out) {
+void dspy_content_text(const cJSON *rec, buf_t *out) {
     const cJSON *content =
         cJSON_GetObjectItemCaseSensitive(rec, "content");
     bool any = false;
@@ -146,20 +155,20 @@ static void content_text(const cJSON *rec, buf_t *out) {
 /* the user block: the heavy rule and the bold text of the content's
    text blocks joined with \n - what the repl's non-tty loop renders for
    a submitted line */
-static void render_user_record(pretty_sink_t *s, const cJSON *rec) {
-    draw_rule(s, '='); /* heavy rule opens each user block */
+static void render_user_record(dspy_t *s, const cJSON *rec) {
+    dspy_rule(s, '='); /* heavy rule opens each user block */
     s->cur = -1;
     buf_t text;
     buf_init(&text);
-    content_text(rec, &text);
-    styled(s, s->st->bold, text.data ? text.data : "");
-    ensure_nl(s);
+    dspy_content_text(rec, &text);
+    dspy_styled(s, s->st->bold, text.data ? text.data : "");
+    dspy_ensure_nl(s);
     buf_free(&text);
 }
 
 /* one parsed record, the repl sink's dispatch (design sec.12):
    transcript records render, config and control records never did */
-static void pretty_record(pretty_sink_t *s, const cJSON *rec) {
+static void pretty_record(dspy_t *s, const cJSON *rec) {
     int k = rec_classify(rec);
     if (k == R_USER) {
         render_user_record(s, rec);
@@ -168,11 +177,11 @@ static void pretty_record(pretty_sink_t *s, const cJSON *rec) {
            caller's words where thinking carries the model's */
         buf_t text;
         buf_init(&text);
-        content_text(rec, &text);
+        dspy_content_text(rec, &text);
         if (text.len) s->sep_pending = true; /* empty renders nothing */
         s->cur = -1;
-        styled(s, s->st->italic, text.data);
-        ensure_nl(s);
+        dspy_styled(s, s->st->italic, text.data);
+        dspy_ensure_nl(s);
         buf_free(&text);
     } else if (k == R_THINKING || k == R_RESPONSE) {
         const char *tx = rec_str(rec, "text");
@@ -183,36 +192,18 @@ static void pretty_record(pretty_sink_t *s, const cJSON *rec) {
             s->sep_pending = true;
             s->cur = k;
         }
-        styled(s, k == R_THINKING ? s->st->italic : "", tx);
+        dspy_styled(s, k == R_THINKING ? s->st->italic : "", tx);
         if (!rec_bool(rec, "partial", false)) {
             if (k == R_RESPONSE) render_usage(s, rec);
-            ensure_nl(s); /* per-block trailing newline, call's rule */
+            dspy_ensure_nl(s); /* per-block trailing newline, call's rule */
             s->cur = -1;
         }
     } else if (k == R_TOOL_REQUEST) {
-        s->cur = -1;
-        const char *tool = rec_str(rec, "tool");
-        buf_t line;
-        buf_init(&line);
-        if (tool) buf_append_str(&line, tool);
-        const cJSON *args =
-            cJSON_GetObjectItemCaseSensitive(rec, "arguments");
-        if (cJSON_IsObject(args)) {
-            if (line.len) buf_append_byte(&line, ' ');
-            buf_append_tree(&line, args);
-        }
-        if (line.len) s->sep_pending = true; /* empty renders nothing */
-        styled(s, s->st->bold, line.data ? line.data : "");
-        ensure_nl(s);
-        buf_free(&line);
+        dspy_tool_request(s, rec);
     } else if (k == R_TOOL_RESPONSE) {
-        const char *tx = rec_str(rec, "text");
-        if (tx && *tx) s->sep_pending = true; /* empty renders nothing */
-        s->cur = -1;
-        styled(s, s->st->bold, tx);
-        ensure_nl(s);
+        dspy_tool_response(s, rec_str(rec, "text"));
     } else if (k == R_ERROR) {
-        render_error_line(s, rec_str(rec, "code"), rec_str(rec, "message"));
+        dspy_error_line(s, rec_str(rec, "code"), rec_str(rec, "message"));
     }
     /* everything else - ll, tools, options, header, flush, start,
        agent-as-tool - renders nothing */
@@ -224,7 +215,7 @@ static void pretty_record(pretty_sink_t *s, const cJSON *rec) {
    exactly what prettyprint renders - that is the point. */
 
 struct pretty_live {
-    pretty_sink_t s;
+    dspy_t s;
     style_t st; /* owned: the sink keeps a pointer into this */
 };
 
@@ -249,7 +240,7 @@ void pretty_live_free(pretty_live_t *l) { free(l); }
 /* ================= input ================= */
 
 typedef struct pretty_ctx {
-    pretty_sink_t *s;
+    dspy_t *s;
     int rc; /* EXIT_INVALID_RECORD once a line failed, else EXIT_OK */
 } pretty_ctx_t;
 
@@ -258,7 +249,7 @@ static void pretty_line(void *ctx, char *line /*malloc'd*/) {
     cJSON *rec = jsonl_parse_line(line);
     free(line);
     if (!rec) {
-        render_error_line(c->s, EC_INVALID_RECORD, "malformed json line");
+        dspy_error_line(c->s, EC_INVALID_RECORD, "malformed json line");
         c->rc = EXIT_INVALID_RECORD;
         return;
     }
@@ -266,7 +257,7 @@ static void pretty_line(void *ctx, char *line /*malloc'd*/) {
     /* the conversation view of the catalogue: expose/hide are proxy
        config, anything unknown is not a record at all */
     if (k == R_UNKNOWN || k == R_EXPOSE || k == R_HIDE) {
-        render_error_line(c->s, EC_INVALID_RECORD, "unknown record type");
+        dspy_error_line(c->s, EC_INVALID_RECORD, "unknown record type");
         cJSON_Delete(rec);
         c->rc = EXIT_INVALID_RECORD;
         return;
@@ -275,7 +266,7 @@ static void pretty_line(void *ctx, char *line /*malloc'd*/) {
         char *m = validate_content(
             cJSON_GetObjectItemCaseSensitive(rec, "content"));
         if (m) {
-            render_error_line(c->s, EC_INVALID_RECORD, m);
+            dspy_error_line(c->s, EC_INVALID_RECORD, m);
             free(m);
             cJSON_Delete(rec);
             c->rc = EXIT_INVALID_RECORD;
@@ -293,31 +284,20 @@ static void pretty_line(void *ctx, char *line /*malloc'd*/) {
 int pretty_run(FILE *in, FILE *out) {
     style_t st;
     style_probe(&st, out);
-    pretty_sink_t sink;
+    dspy_t sink;
     memset(&sink, 0, sizeof sink);
     sink.out = out;
     sink.st = &st;
     sink.cur = -1;
 
     pretty_ctx_t c = { &sink, EXIT_OK };
-    jsonl_pusher_t p;
-    jsonl_pusher_init(&p, pretty_line, &c);
-    char bbuf[8192];
-    size_t n;
-    bool ok = true;
-    while ((n = fread(bbuf, 1, sizeof bbuf, in)) > 0)
-        if (jsonl_feed(&p, bbuf, n) != 0) {
-            ok = false; /* invalid utf-8 or a NUL byte */
-            break;
-        }
-    if (ok && jsonl_eof(&p) != 0) ok = false;
-    jsonl_pusher_free(&p);
+    bool ok = jsonl_read_stream(in, pretty_line, &c);
 
     int rc = c.rc;
     if (!ok) {
         if (rc == EXIT_OK)
-            render_error_line(&sink, EC_INVALID_RECORD,
-                              "invalid utf-8 or NUL byte in input");
+            dspy_error_line(&sink, EC_INVALID_RECORD,
+                            "invalid utf-8 or NUL byte in input");
         rc = EXIT_INVALID_RECORD;
     }
     if (sink.io_fail) rc = EXIT_OUT_OF_CHANNEL;

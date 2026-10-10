@@ -20,15 +20,6 @@ struct ant_ctx {
     engine_t *e;
 };
 
-typedef struct ant_block {
-    int type; /* -1 unset, 0 text, 1 thinking, 2 tool_use */
-    char *id;
-    char *name;
-    buf_t args;
-    char *signature;
-    bool done;
-} ant_block_t;
-
 typedef struct awire {
     wire_t base;
     buf_t msgbuf; /* "[msg,msg,..." without the closing bracket */
@@ -40,7 +31,7 @@ typedef struct awire {
     blkemit_t be;
     sse_parser_t sse;
     struct ant_ctx sctx;
-    ant_block_t blocks[64];
+    sse_block_t blocks[MAX_SSE_BLOCKS];
     size_t nblocks;
     char finish[64];
     bool have_finish;
@@ -52,10 +43,6 @@ typedef struct awire {
 } awire_t;
 
 /* ---------------- serialization ---------------- */
-
-static void append_msg_sep(buf_t *b) {
-    if (b->len > 1) buf_append_byte(b, ',');
-}
 
 static void ant_user_msg(awire_t *w, const trec_t *u) {
     append_msg_sep(&w->msgbuf);
@@ -198,21 +185,13 @@ static void ant_serialize_new(awire_t *w, engine_t *e) {
 
 /* ---------------- request build ---------------- */
 
-static const cJSON *io_get_ant(engine_t *e, const char *field) {
-    const cJSON *io =
-        cJSON_GetObjectItemCaseSensitive(e->llm, "inference_options");
-    if (!io) return NULL;
-    const cJSON *f = cJSON_GetObjectItemCaseSensitive(io, field);
-    return cJSON_IsNull(f) ? NULL : f;
-}
-
 static cJSON *ant_validate(engine_t *e) {
-    const cJSON *mt = io_get_ant(e, "max_tokens");
+    const cJSON *mt = wire_io_get(e, "max_tokens");
     if (!cJSON_IsNumber(mt))
         return rec_error(EC_INVALID_RECORD,
                          "anthropic requires max_tokens in inference_options",
                          true);
-    const cJSON *tb = io_get_ant(e, "thinking_budget");
+    const cJSON *tb = wire_io_get(e, "thinking_budget");
     if (cJSON_IsNumber(tb) && tb->valuedouble >= mt->valuedouble)
         return rec_error(EC_INVALID_RECORD,
                          "thinking_budget must be lower than max_tokens", true);
@@ -282,7 +261,7 @@ static bool ant_build_body(awire_t *w, engine_t *e, cJSON **err) {
     }
     ant_serialize_new(w, e);
 
-    const cJSON *sf = io_get_ant(e, "stream");
+    const cJSON *sf = wire_io_get(e, "stream");
     bool stream = sf ? cJSON_IsTrue(sf) : true;
 
     buf_t *b = &w->base.last_body;
@@ -302,25 +281,11 @@ static bool ant_build_body(awire_t *w, engine_t *e, cJSON **err) {
     if (have_tools) {
         buf_append_str(b, ",\"tools\":[");
         for (size_t i = 0; i < e->tools->n; i++) {
-            const tool_entry_t *t = &e->tools->v[i];
             if (i) buf_append_byte(b, ',');
-            buf_append_str(b, "{\"name\":");
-            buf_append_jstr(b, t->exposed_name);
-            const cJSON *desc =
-                cJSON_GetObjectItemCaseSensitive(t->tool, "description");
-            if (cJSON_IsString(desc) && desc->valuestring) {
-                buf_append_str(b, ",\"description\":");
-                buf_append_jstr(b, desc->valuestring);
-            }
-            const cJSON *sch =
-                cJSON_GetObjectItemCaseSensitive(t->tool, "inputSchema");
-            if (sch) {
-                buf_append_str(b, ",\"input_schema\":");
-                buf_append_tree(b, sch);
-            }
-            if (static_marker && i + 1 == e->tools->n)
-                buf_append_str(b, CACHE_MARK);
-            buf_append_byte(b, '}');
+            append_tool_json(b, &e->tools->v[i], "input_schema", false,
+                             static_marker && i + 1 == e->tools->n
+                                 ? CACHE_MARK
+                                 : NULL);
         }
         buf_append_byte(b, ']');
     }
@@ -328,28 +293,28 @@ static bool ant_build_body(awire_t *w, engine_t *e, cJSON **err) {
     /* sampling fields in requirements sec.4 order; max_tokens is pulled to the
        end per design sec.5 */
     const cJSON *f;
-    if ((f = io_get_ant(e, "temperature")) && cJSON_IsNumber(f)) {
+    if ((f = wire_io_get(e, "temperature")) && cJSON_IsNumber(f)) {
         buf_append_str(b, ",\"temperature\":");
         buf_append_jnum(b, f->valuedouble);
     }
-    if ((f = io_get_ant(e, "top_p")) && cJSON_IsNumber(f)) {
+    if ((f = wire_io_get(e, "top_p")) && cJSON_IsNumber(f)) {
         buf_append_str(b, ",\"top_p\":");
         buf_append_jnum(b, f->valuedouble);
     }
-    if ((f = io_get_ant(e, "stop"))) {
+    if ((f = wire_io_get(e, "stop"))) {
         buf_append_str(b, ",\"stop_sequences\":");
         buf_append_tree(b, f);
     }
-    if ((f = io_get_ant(e, "top_k")) && cJSON_IsNumber(f)) {
+    if ((f = wire_io_get(e, "top_k")) && cJSON_IsNumber(f)) {
         buf_append_str(b, ",\"top_k\":");
         buf_append_jnum(b, f->valuedouble);
     }
-    if ((f = io_get_ant(e, "thinking_budget")) && cJSON_IsNumber(f)) {
+    if ((f = wire_io_get(e, "thinking_budget")) && cJSON_IsNumber(f)) {
         buf_append_str(b, ",\"thinking\":{\"type\":\"enabled\",\"budget_tokens\":");
         buf_append_jnum(b, f->valuedouble);
         buf_append_byte(b, '}');
     }
-    f = io_get_ant(e, "max_tokens");
+    f = wire_io_get(e, "max_tokens");
     buf_append_str(b, ",\"max_tokens\":");
     buf_append_jnum(b, f ? f->valuedouble : 0);
     buf_appendf(b, ",\"stream\":%s}", stream ? "true" : "false");
@@ -367,38 +332,36 @@ static const char *finish_norm_ant(const char *sr) {
     return sr;
 }
 
-static ant_block_t *ant_block_at(awire_t *w, int idx) {
-    if (idx < 0 || (size_t)idx >= 64) return NULL;
-    for (size_t i = w->nblocks; i <= (size_t)idx; i++) {
-        w->blocks[i].type = -1;
-        w->blocks[i].id = NULL;
-        w->blocks[i].name = NULL;
-        buf_init(&w->blocks[i].args);
-        w->blocks[i].signature = NULL;
-        w->blocks[i].done = false;
+/* the anthropic usage split: input lands at message_start, output at
+   message_delta; the attach defaults the missing half to 0 */
+static void ant_set_usage(awire_t *w, const cJSON *u, bool in, bool out) {
+    if (in) {
+        w->usage_in = rec_num(u, "input_tokens", 0);
+        w->have_in = true;
     }
-    if ((size_t)idx + 1 > w->nblocks) w->nblocks = (size_t)idx + 1;
-    return &w->blocks[idx];
+    if (out) {
+        w->usage_out = rec_num(u, "output_tokens", 0);
+        w->have_out = true;
+    }
 }
 
-static void ant_blocks_reset(awire_t *w) {
-    for (size_t i = 0; i < w->nblocks; i++) {
-        free(w->blocks[i].id);
-        free(w->blocks[i].name);
-        free(w->blocks[i].signature);
-        buf_free(&w->blocks[i].args);
-    }
-    w->nblocks = 0;
+static void ant_attach_usage(cJSON *rec, const awire_t *w) {
+    if (w->have_in || w->have_out)
+        rec_attach_usage(rec, w->usage_in, w->have_out ? w->usage_out : 0);
 }
 
-static void ant_emit_tool(awire_t *w, engine_t *e, ant_block_t *bl, bool last) {
+static void set_finish(awire_t *w, const char *sr) {
+    snprintf(w->finish, sizeof w->finish, "%s", sr ? sr : "");
+    w->have_finish = true;
+}
+
+static void ant_emit_tool(awire_t *w, engine_t *e, sse_block_t *bl, bool last) {
     cJSON *args = cJSON_Parse(bl->args.data ? bl->args.data : "{}");
     if (!args) args = cJSON_CreateObject();
     cJSON *rec = rec_tool_request(bl->name, args, bl->id);
     cJSON_Delete(args);
     if (last) {
-        if (w->have_in || w->have_out)
-            rec_attach_usage(rec, w->usage_in, w->have_out ? w->usage_out : 0);
+        ant_attach_usage(rec, w);
         if (w->have_finish)
             rec_attach_finish(rec, finish_norm_ant(w->finish));
     }
@@ -416,15 +379,12 @@ static void ant_event(void *ctx, const char *event, const char *data,
         const cJSON *msg = cJSON_GetObjectItemCaseSensitive(d, "message");
         const cJSON *usage =
             msg ? cJSON_GetObjectItemCaseSensitive(msg, "usage") : NULL;
-        if (usage) {
-            w->usage_in = rec_num(usage, "input_tokens", 0);
-            w->have_in = true;
-        }
+        if (usage) ant_set_usage(w, usage, true, false);
     } else if (!strcmp(event, "content_block_start")) {
         int idx = (int)rec_num(d, "index", 0);
         const cJSON *cb = cJSON_GetObjectItemCaseSensitive(d, "content_block");
         const char *ty = rec_str(cb, "type");
-        ant_block_t *bl = ant_block_at(w, idx);
+        sse_block_t *bl = sse_block_at(w->blocks, &w->nblocks, idx);
         if (bl) {
             if (ty && !strcmp(ty, "thinking")) {
                 bl->type = 1;
@@ -445,7 +405,7 @@ static void ant_event(void *ctx, const char *event, const char *data,
         int idx = (int)rec_num(d, "index", 0);
         const cJSON *delta = cJSON_GetObjectItemCaseSensitive(d, "delta");
         const char *ty = rec_str(delta, "type");
-        ant_block_t *bl = ant_block_at(w, idx);
+        sse_block_t *bl = sse_block_at(w->blocks, &w->nblocks, idx);
         if (!bl) goto out;
         if (ty && !strcmp(ty, "text_delta")) {
             const char *t = rec_str(delta, "text");
@@ -464,24 +424,17 @@ static void ant_event(void *ctx, const char *event, const char *data,
             if (pj) buf_append_str(&bl->args, pj);
         }
     } else if (!strcmp(event, "content_block_stop")) {
-        ant_block_t *bl = ant_block_at(w, (int)rec_num(d, "index", 0));
+        sse_block_t *bl = sse_block_at(w->blocks, &w->nblocks, (int)rec_num(d, "index", 0));
         if (!bl) goto out;
-        bl->done = true;
         if (bl->type == 0) blk_stop(&w->be);
         else if (bl->type == 1) blk_stop_thinking(&w->be, bl->signature);
         /* tool_use blocks are emitted at message_stop */
     } else if (!strcmp(event, "message_delta")) {
         const cJSON *delta = cJSON_GetObjectItemCaseSensitive(d, "delta");
         const char *sr = rec_str(delta, "stop_reason");
-        if (sr) {
-            snprintf(w->finish, sizeof w->finish, "%s", sr);
-            w->have_finish = true;
-        }
+        if (sr) set_finish(w, sr);
         const cJSON *usage = cJSON_GetObjectItemCaseSensitive(d, "usage");
-        if (usage) {
-            w->usage_out = rec_num(usage, "output_tokens", 0);
-            w->have_out = true;
-        }
+        if (usage) ant_set_usage(w, usage, false, true);
     } else if (!strcmp(event, "message_stop")) {
         w->sse_done = true;
     } else if (!strcmp(event, "error")) {
@@ -517,9 +470,7 @@ static int ant_finish_stream(awire_t *w, engine_t *e, turn_out_t *out) {
     }
     out->final_rec = blk_take_pending(&w->be);
     if (out->final_rec) {
-        if (w->have_in || w->have_out)
-            rec_attach_usage(out->final_rec, w->usage_in,
-                             w->have_out ? w->usage_out : 0);
+        ant_attach_usage(out->final_rec, w);
         if (w->have_finish)
             rec_attach_finish(out->final_rec, finish_norm_ant(w->finish));
     }
@@ -532,16 +483,9 @@ static int ant_body_map(awire_t *w, engine_t *e, const cJSON *body,
                         turn_out_t *out) {
     const cJSON *content = cJSON_GetObjectItemCaseSensitive(body, "content");
     const cJSON *usage = cJSON_GetObjectItemCaseSensitive(body, "usage");
-    if (usage) {
-        w->usage_in = rec_num(usage, "input_tokens", 0);
-        w->usage_out = rec_num(usage, "output_tokens", 0);
-        w->have_in = w->have_out = true;
-    }
+    if (usage) ant_set_usage(w, usage, true, true);
     const char *sr = rec_str(body, "stop_reason");
-    if (sr) {
-        snprintf(w->finish, sizeof w->finish, "%s", sr);
-        w->have_finish = true;
-    }
+    if (sr) set_finish(w, sr);
     size_t ntools = 0;
     if (cJSON_IsArray(content))
         for (const cJSON *b = content->child; b; b = b->next) {
@@ -579,8 +523,7 @@ static int ant_body_map(awire_t *w, engine_t *e, const cJSON *body,
     }
     out->final_rec = blk_take_pending(&w->be);
     if (out->final_rec) {
-        if (w->have_in || w->have_out)
-            rec_attach_usage(out->final_rec, w->usage_in, w->usage_out);
+        ant_attach_usage(out->final_rec, w);
         if (w->have_finish)
             rec_attach_finish(out->final_rec, finish_norm_ant(w->finish));
     }
@@ -601,7 +544,7 @@ static int awire_turn(wire_t *base, engine_t *e, turn_out_t *out) {
 
     blk_begin_turn(&w->be, e);
     w->be.streaming = stream;
-    ant_blocks_reset(w);
+    sse_blocks_reset(w->blocks, &w->nblocks);
     w->have_finish = w->have_in = w->have_out = false;
     w->sse_done = false;
     w->failed = false;
@@ -620,39 +563,31 @@ static int awire_turn(wire_t *base, engine_t *e, turn_out_t *out) {
     req.body = w->base.last_body.data;
     req.body_len = w->base.last_body.len;
 
-    int rc = http_perform(&req);
-    int result;
-    if (rc == -1) {
-        blk_abort(&w->be);
-        result = g_stop_flag ? TURN_ABORTED : TURN_FATAL;
-        if (result == TURN_FATAL) out->error_rec = http_transport_error(&req);
-    } else if (rc == 1) {
-        out->error_rec = http_status_error(&req, false);
-        result = TURN_FATAL;
-    } else if (w->failed) {
-        out->error_rec = rec_error(EC_API_ERROR, w->fail_msg, true);
-        result = TURN_FATAL;
-    } else if (stream && !(req.content_type.data &&
-                          strncasecmp(req.content_type.data, "application/json",
-                                      strlen("application/json")) == 0)) {
-        sse_eof(&w->sse);
-        if (!w->sse_done) {
-            out->error_rec =
-                rec_error(EC_API_ERROR, "stream ended without message_stop", true);
-            result = TURN_FATAL;
+    int result = wire_http_verdict(http_perform(&req), &req, &w->be, w->failed,
+                                   w->fail_msg, false, out);
+    if (!result) {
+        if (stream && !(req.content_type.data &&
+                        strncasecmp(req.content_type.data, "application/json",
+                                    strlen("application/json")) == 0)) {
+            sse_eof(&w->sse);
+            if (!w->sse_done) {
+                out->error_rec =
+                    rec_error(EC_API_ERROR, "stream ended without message_stop", true);
+                result = TURN_FATAL;
+            } else {
+                result = ant_finish_stream(w, e, out);
+            }
         } else {
-            result = ant_finish_stream(w, e, out);
-        }
-    } else {
-        cJSON *body = cJSON_ParseWithLength(req.resp.data ? req.resp.data : "",
-                                            req.resp.len);
-        if (!body) {
-            out->error_rec = rec_error(EC_HTTP_ERROR,
-                                       "endpoint returned a non-json body", true);
-            result = TURN_FATAL;
-        } else {
-            result = ant_body_map(w, e, body, out);
-            cJSON_Delete(body);
+            cJSON *body = cJSON_ParseWithLength(req.resp.data ? req.resp.data : "",
+                                                req.resp.len);
+            if (!body) {
+                out->error_rec = rec_error(EC_HTTP_ERROR,
+                                           "endpoint returned a non-json body", true);
+                result = TURN_FATAL;
+            } else {
+                result = ant_body_map(w, e, body, out);
+                cJSON_Delete(body);
+            }
         }
     }
 
@@ -677,7 +612,7 @@ static void awire_destroy(wire_t *base) {
     buf_free(&w->msgbuf);
     blk_free(&w->be);
     sse_free(&w->sse);
-    ant_blocks_reset(w);
+    sse_blocks_reset(w->blocks, &w->nblocks);
     buf_free(&base->last_body);
     free(w);
 }

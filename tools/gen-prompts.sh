@@ -10,7 +10,8 @@
 #
 # Symbol of src/prompts/a/b/c.txt: prompt_a_b_c (every non-alphanumeric
 # becomes _). Exactly one trailing newline of each file is stripped -
-# internal newlines stay. An empty file becomes an empty string.
+# internal newlines stay. An empty file (or one holding nothing but the
+# trailing newline an editor insists on) becomes an empty string.
 
 set -u
 cd "$(dirname "$0")/.." || exit 2
@@ -73,7 +74,10 @@ while IFS= read -r f; do
                 L[++n] = line
             }
             END {
-                if (n == 0) { print "    \"\";"; exit }
+                if (n == 0 || (n == 1 && L[1] == "" && endsnl == 1)) {
+                    print "    \"\";"
+                    exit
+                }
                 for (i = 1; i < n; i++) printf "    \"%s\\n\"\n", L[i]
                 if (endsnl == 1) printf "    \"%s\\n\";\n", L[n]
                 else printf "    \"%s\";\n", L[n]

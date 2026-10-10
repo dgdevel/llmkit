@@ -292,14 +292,8 @@ static int agent_handle(void *ctx, const char *method, cJSON *params,
                         cJSON *id, cJSON **result_out, char **errmsg_out) {
     agent_state_t *a = ctx;
     (void)id;
-    (void)errmsg_out;
-    if (!strcmp(method, "initialize")) {
-        *result_out = rpc_initialize_result(params, "llmkit-agent-as-tool");
-        return 0;
-    }
-    if (!strcmp(method, "notifications/initialized") ||
-        !strcmp(method, "ping"))
-        return 2;
+    int rc = rpc_common(method, params, "llmkit-agent-as-tool", result_out);
+    if (rc >= 0) return rc;
     if (!strcmp(method, "tools/list")) {
         cJSON *res = cJSON_CreateObject();
         cJSON *tools = cJSON_CreateArray();

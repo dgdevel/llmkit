@@ -60,6 +60,14 @@ char *buf_steal(buf_t *b, size_t *len_out) {
     return p;
 }
 
+void ptr_push(void ***v, size_t *n, size_t *cap, void *item) {
+    if (*n == *cap) {
+        *cap = *cap ? *cap * 2 : 8;
+        *v = realloc(*v, *cap * sizeof **v);
+    }
+    (*v)[(*n)++] = item;
+}
+
 void buf_append_jstr(buf_t *b, const char *s) {
     cJSON *it = cJSON_CreateString(s ? s : "");
     char *p = cJSON_PrintUnformatted(it);
