@@ -1140,6 +1140,17 @@ static void write_file(const char *path, const char *content) {
     fclose(f);
 }
 
+/* the file's bytes, NUL terminated: "" when it cannot be read */
+static void slurp_file(const char *path, char *got, size_t cap) {
+    size_t n = 0;
+    FILE *f = fopen(path, "rb");
+    if (f) {
+        n = fread(got, 1, cap - 1, f);
+        fclose(f);
+    }
+    got[n] = '\0';
+}
+
 static void test_mcp_stdio(void) {
     write_file("/tmp/llmkit-test-fake-mcp.py", FAKE_MCP_PY);
     cap_t cap = { 0 };
@@ -1566,7 +1577,7 @@ static void test_builtin(void) {
           "builtin: file_read offset past end");
     free(t);
 
-    /* edit: stated line 5, real line 2 (within tolerance 3), multi line
+    /* edit: stated line 5, real line 2 (within tolerance 5), multi line
        replacement keeps the new block's relative indentation */
     t = bc_call("file_edit",
                 "{\"path\":\"/tmp/llmkit-test-builtin/notes.txt\","
@@ -1600,22 +1611,121 @@ static void test_builtin(void) {
           "builtin: file_edit in a crlf file");
     free(t);
     {
-        char got[128] = "";
-        FILE *cf = fopen("/tmp/llmkit-test-builtin/crlf.txt", "rb");
-        if (cf) {
-            size_t n = fread(got, 1, sizeof got - 1, cf);
-            got[n] = '\0';
-            fclose(cf);
-        }
+        char got[128];
+        slurp_file("/tmp/llmkit-test-builtin/crlf.txt", got, sizeof got);
         check(!strcmp(got, "crlf one\r\nsecond\r\n"),
               "builtin: crlf terminators preserved");
     }
 
+    /* the tolerance reaches five lines and stops there */
+    write_file("/tmp/llmkit-test-builtin/tol.txt",
+               "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\n");
+    t = bc_call("file_edit",
+                "{\"path\":\"/tmp/llmkit-test-builtin/tol.txt\","
+                "\"oldString\":\"one\",\"newString\":\"ONE\","
+                "\"line_number\":6}", &ie);
+    check(!ie && t && strstr(t, "replaced line 1"),
+          "builtin: file_edit matches five lines away");
+    free(t);
+    t = bc_call("file_edit",
+                "{\"path\":\"/tmp/llmkit-test-builtin/tol.txt\","
+                "\"oldString\":\"one\",\"newString\":\"ONE\","
+                "\"line_number\":7}", &ie);
+    check(ie && t && strstr(t, "not found"),
+          "builtin: file_edit stops at five lines");
+    free(t);
+
+    /* whitespace drift in an oldString still lands: the file indents with
+       a tab where the argument used spaces, and doubles a space inside
+       the line */
+    write_file("/tmp/llmkit-test-builtin/ws.txt",
+               "def f():\n\tif x:\treturn 1\n\treturn 2\n");
+    t = bc_call("file_edit",
+                "{\"path\":\"/tmp/llmkit-test-builtin/ws.txt\","
+                "\"oldString\":\"    if x: return 1\","
+                "\"newString\":\"    if y: return 9\","
+                "\"line_number\":2}", &ie);
+    check(!ie && t && strstr(t, "replaced line 2"),
+          "builtin: file_edit tolerates tab/space drift");
+    free(t);
+    t = bc_call("file_edit",
+                "{\"path\":\"/tmp/llmkit-test-builtin/ws.txt\","
+                "\"oldString\":\"def  f():\",\"newString\":\"def g():\","
+                "\"line_number\":1}", &ie);
+    check(!ie && t && strstr(t, "replaced line 1"),
+          "builtin: file_edit tolerates doubled spaces");
+    free(t);
+    {   /* the new block lands on the file's own tab indent, its text kept
+           verbatim */
+        char got[128];
+        slurp_file("/tmp/llmkit-test-builtin/ws.txt", got, sizeof got);
+        check(!strcmp(got, "def g():\n\tif y: return 9\n\treturn 2\n"),
+              "builtin: file_edit drift keeps the file's indent");
+    }
+    /* whitespace only: tokens that differ in shape are still no match */
+    t = bc_call("file_edit",
+                "{\"path\":\"/tmp/llmkit-test-builtin/ws.txt\","
+                "\"oldString\":\"def g ():\",\"newString\":\"x\","
+                "\"line_number\":1}", &ie);
+    check(ie && t && strstr(t, "not found"),
+          "builtin: file_edit does not glue tokens apart");
+    free(t);
+
+    /* a literal match wins over a relaxed one even when the relaxed
+       candidate sits closer to line_number */
+    write_file("/tmp/llmkit-test-builtin/lit.txt", "foo  bar\nfoo bar\n");
+    t = bc_call("file_edit",
+                "{\"path\":\"/tmp/llmkit-test-builtin/lit.txt\","
+                "\"oldString\":\"foo bar\",\"newString\":\"FOO\","
+                "\"line_number\":1}", &ie);
+    check(!ie && t && strstr(t, "replaced line 2"),
+          "builtin: file_edit prefers the literal match");
+    free(t);
+    {
+        char got[64];
+        slurp_file("/tmp/llmkit-test-builtin/lit.txt", got, sizeof got);
+        check(!strcmp(got, "foo  bar\nFOO\n"),
+              "builtin: file_edit left the relaxed line alone");
+    }
+
+    /* blank lines padded around the block are dropped, and the replaced
+       span counts the real lines only */
+    write_file("/tmp/llmkit-test-builtin/pad.txt", "a\nb\n");
+    t = bc_call("file_edit",
+                "{\"path\":\"/tmp/llmkit-test-builtin/pad.txt\","
+                "\"oldString\":\" \\na\\nb\\n\\n\",\"newString\":\"A\\nB\","
+                "\"line_number\":1}", &ie);
+    check(!ie && t && strstr(t, "replaced lines 1-2"),
+          "builtin: file_edit drops padded blank lines");
+    free(t);
+    {
+        char got[64];
+        slurp_file("/tmp/llmkit-test-builtin/pad.txt", got, sizeof got);
+        check(!strcmp(got, "A\nB\n"),
+              "builtin: file_edit padded block replaced whole");
+    }
+
+    /* a blank line that really is in the file stays in the replaced span */
+    write_file("/tmp/llmkit-test-builtin/keep.txt", "a\n\nb\n");
+    t = bc_call("file_edit",
+                "{\"path\":\"/tmp/llmkit-test-builtin/keep.txt\","
+                "\"oldString\":\"a\\n\\nb\",\"newString\":\"A\\n\\nB\","
+                "\"line_number\":1}", &ie);
+    check(!ie && t && strstr(t, "replaced lines 1-3"),
+          "builtin: file_edit keeps an inner blank line");
+    free(t);
+
     t = bc_call("files_list", "{\"path\":\"/tmp/llmkit-test-builtin\","
                               "\"regex\":\"notes\"}", &ie);
-    check(!ie && t && !strncmp(t, "rw- ", 4) && strstr(t, " 3 lines ") &&
-              strstr(t, notes),
-          "builtin: files_list line format");
+    {   /* [permissions] [size] [path] [line count] */
+        char perm[8] = "", sz[40] = "", pgot[512] = "";
+        int lgot = 0;
+        int nf = t ? sscanf(t, "%7s %39s %511[^,], %d lines", perm, sz, pgot,
+                            &lgot) : 0;
+        check(!ie && nf == 4 && !strcmp(perm, "rw-") && !strcmp(pgot, notes) &&
+                  lgot == 3 && strstr(t, ", 3 lines\n"),
+              "builtin: files_list line format");
+    }
     free(t);
 
     /* files_list holds at the directory's own entries unless asked to
@@ -1635,6 +1745,14 @@ static void test_builtin(void) {
                               "\"recurse_subdirectories\":true}", &ie);
     check(!ie && t && strstr(t, "sub/deep.txt"),
           "builtin: files_list descends when asked");
+    free(t);
+    /* the line count sits at the end of the line, and a directory (no
+       line count to give) ends at its path */
+    t = bc_call("files_list", "{\"path\":\"/tmp/llmkit-test-builtin\","
+                              "\"regex\":\"sub$|notes\"}", &ie);
+    check(!ie && t && strstr(t, "/sub\n") && !strstr(t, "sub,") &&
+              strstr(t, "notes.txt, 3 lines\n"),
+          "builtin: files_list names the line count last");
     free(t);
 
     t = bc_call("files_search", "{\"path\":\"/tmp/llmkit-test-builtin\","

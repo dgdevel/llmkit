@@ -93,18 +93,20 @@ subdirectories too. Paths are answered relative when the
 given path is relative, absolute when it is absolute:
 
 ```
-${permissions} ${size} ${path}
+${permissions} ${size} ${path}${, lines}
 ```
 
 - `permissions` is `rwx` with `-` for no permission (read/write/execute
   for the current user)
-- `size` is human readable (`512b`, `5Kb`, `5.4Kb`, `15Kb`, `1Mb`);
-  textual files also carry their line count:
+- `size` is human readable (`512b`, `5Kb`, `5.4Kb`, `15Kb`, `1Mb`)
+- `lines` is the entry's line count, last on the line; textual files
+  carry one, a directory carries none:
 
 ```
-rw- 5Kb, 6 lines ./path/to/file.txt
+rw- 5Kb ./path/to/file.txt, 6 lines
 r-x 15Kb ./path/to/binary/executable
 r-- 1Mb ./this/is/read/only/file.bin
+rwx 4Kb ./path/to/directory
 ```
 
 A file counts as textual when it holds no NUL bytes and is strict utf-8;
@@ -119,7 +121,7 @@ per file) whose lines match is listed with the matching line numbers,
 comma separated:
 
 ```
-${permissions} ${size}${, lines} ${path}
+${permissions} ${size} ${path}${, lines}
 Matching lines: ${line numbers}
 ```
 
@@ -142,12 +144,18 @@ never overwritten).
 ### file_edit(path, oldString, newString, line_number)
 
 Searches `oldString` around `line_number` (1-based) with a tolerance of
-3 lines - the closest match by distance wins, and a `line_number` of 0
+5 lines - the closest match by distance wins, and a `line_number` of 0
 means "search the whole file". Matching compares each line with leading
-and trailing whitespace ignored. The replacement's indentation is
-adjusted to the replaced block: the new block keeps its internal relative
-indentation and is shifted so its first line lands on the column of the
-first replaced line. Line endings are preserved (`\n` and `\r\n`).
+and trailing whitespace ignored. Should that find nothing, the search is
+retried with internal whitespace runs collapsed to a single space (a tab
+standing in for spaces, a doubled space for one) and, again, with blank
+lines padded onto either end of the block dropped. A literal match
+anywhere wins over a relaxed one, and the closest candidate wins inside
+one pass. The replacement's indentation is adjusted to the replaced
+block: the new block keeps its internal relative indentation and is
+shifted so its first line lands on the column of the first replaced
+line, `newString`'s own text written verbatim. Line endings are
+preserved (`\n` and `\r\n`).
 
 ### process_exec(cmdline)
 

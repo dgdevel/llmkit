@@ -561,9 +561,9 @@ static void entry_line(buf_t *out, const char *path, const struct stat *st,
     char perm[4], hs[48];
     perms_of(path, perm);
     human_size((unsigned long long)st->st_size, hs, sizeof hs);
-    buf_appendf(out, "%s %s", perm, hs);
+    buf_appendf(out, "%s %s %s", perm, hs, path);
     if (has_lines) buf_appendf(out, ", %llu lines", lines);
-    buf_appendf(out, " %s\n", path);
+    buf_append_byte(out, '\n');
 }
 
 static void emit_entry(walk_ctx_t *w, const char *path,
@@ -2610,6 +2610,83 @@ static bool line_eq_trim(const fline_t *a, const char *bs, size_t blen) {
     return a_len == b_len && !memcmp(a->s + al, bs + bl, a_len);
 }
 
+/* one normalized byte of a line: a leading or trailing whitespace run
+   vanishes, an internal run collapses to a single space */
+typedef struct {
+    const char *s;
+    size_t n, i;
+    bool emitted;
+} norm_t;
+
+static bool norm_next(norm_t *p, unsigned char *c) {
+    while (p->i < p->n) {
+        if (is_ws(p->s[p->i])) {
+            while (p->i < p->n && is_ws(p->s[p->i])) p->i++;
+            if (p->i >= p->n) return false; /* trailing run: dropped */
+            if (!p->emitted) continue;      /* leading run: dropped */
+            *c = ' ';
+            return true;
+        }
+        *c = (unsigned char)p->s[p->i++];
+        p->emitted = true;
+        return true;
+    }
+    return false;
+}
+
+/* the relaxed comparison: how the whitespace inside a line is spelled out
+   (a tab for spaces, two spaces for one) no longer matters */
+static bool line_eq_ws(const char *as, size_t alen, const char *bs,
+                       size_t blen) {
+    norm_t a = { as, alen, 0, false }, b = { bs, blen, 0, false };
+    for (;;) {
+        unsigned char ca = 0, cb = 0;
+        bool ha = norm_next(&a, &ca), hb = norm_next(&b, &cb);
+        if (ha != hb) return false;
+        if (!ha) return true;
+        if (ca != cb) return false;
+    }
+}
+
+/* a line holding nothing but whitespace */
+static bool line_blank(const fline_t *l) {
+    return lead_ws(l->s, l->len) == l->len;
+}
+
+/* does the nol-line block starting at fl[idx] match the argument's lines? */
+static bool block_match(const fline_t *fl, long long idx, size_t nfl,
+                        const fline_t *ol, size_t nol, bool collapse) {
+    if (idx < 0 || (size_t)idx + nol > nfl) return false;
+    for (size_t k = 0; k < nol; k++) {
+        const fline_t *a = &fl[(size_t)idx + k];
+        if (collapse) {
+            if (!line_eq_ws(a->s, a->len, ol[k].s, ol[k].len)) return false;
+        } else if (!line_eq_trim(a, ol[k].s, ol[k].len)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/* start line of the first matching block: around line_number (1-based,
+   +/-5 tolerance, nearest candidate first), or the whole file when
+   line_number is 0 */
+static long long block_find(const fline_t *fl, size_t nfl, long long line_number,
+                            const fline_t *ol, size_t nol, bool collapse) {
+    static const long long order[11] = { 0, -1, 1, -2, 2, -3, 3, -4, 4, -5, 5 };
+    if (line_number > 0) {
+        for (size_t ci = 0; ci < 11; ci++) {
+            long long idx = line_number - 1 + order[ci];
+            if (block_match(fl, idx, nfl, ol, nol, collapse)) return idx;
+        }
+        return -1;
+    }
+    for (size_t i = 0; i + nol <= nfl; i++)
+        if (block_match(fl, (long long)i, nfl, ol, nol, collapse))
+            return (long long)i;
+    return -1;
+}
+
 static void tool_file_edit(const cJSON *args, buf_t *out, bool *is_error) {
     const char *path = NULL, *olds = NULL, *news = NULL;
     long long line_number = 0;
@@ -2672,27 +2749,28 @@ static void tool_file_edit(const cJSON *args, buf_t *out, bool *is_error) {
     fline_t *nl = NULL;
     size_t nnl = split_arg_lines(news, &nl);
 
-    /* candidate start lines: line_number with +/-3 tolerance, closest first;
-       line_number 0 (absent) searches the whole file */
-    long long order[7] = { 0, -1, 1, -2, 2, -3, 3 };
-    size_t ncand = line_number > 0 ? 7 : (nfl ? nfl : 1);
+    /* matching passes, in order: the block as sent, the block as sent with
+       internal whitespace runs collapsed, then each of those with the
+       block's padded blank leading and trailing lines dropped. A literal
+       match anywhere beats a relaxed one; inside a pass, the candidate
+       closest to line_number wins. */
+    size_t sk = 0, sn = nol;
+    while (sn && line_blank(&ol[sk])) {
+        sk++;
+        sn--;
+    }
+    while (sn && line_blank(&ol[sk + sn - 1])) sn--;
+    bool stripped = sn && (sk != 0 || sn != nol);
+    size_t npass = stripped ? 4 : 2;
+
     long long found = -1;
-    for (size_t ci = 0; ci < ncand && found < 0; ci++) {
-        long long idx;
-        if (line_number > 0) {
-            long long d = order[ci];
-            idx = line_number - 1 + d;
-        } else {
-            idx = (long long)ci;
-        }
-        if (idx < 0 || (size_t)idx + nol > nfl) continue;
-        bool ok = true;
-        for (size_t k = 0; k < nol; k++)
-            if (!line_eq_trim(&fl[idx + k], ol[k].s, ol[k].len)) {
-                ok = false;
-                break;
-            }
-        if (ok) found = idx;
+    size_t mnl = nol;
+    for (size_t pass = 0; pass < npass && found < 0; pass++) {
+        bool use_stripped = pass >= 2;
+        const fline_t *cl = use_stripped ? ol + sk : ol;
+        size_t cn = use_stripped ? sn : nol;
+        found = block_find(fl, nfl, line_number, cl, cn, pass % 2 == 1);
+        if (found >= 0) mnl = cn;
     }
     if (found < 0) {
         free(fl);
@@ -2702,7 +2780,7 @@ static void tool_file_edit(const cJSON *args, buf_t *out, bool *is_error) {
         buf_clear(out);
         if (line_number > 0)
             buf_appendf(out,
-                        "oldString not found at line %lld (tolerance 3) in %s",
+                        "oldString not found at line %lld (tolerance 5) in %s",
                         line_number, path);
         else
             buf_appendf(out, "oldString not found in %s", path);
@@ -2723,7 +2801,7 @@ static void tool_file_edit(const cJSON *args, buf_t *out, bool *is_error) {
     /* the replaced block runs to end of file when it consumed the last
        original line; then (and only then) may the last new line go
        without a terminator */
-    bool block_at_eof = (size_t)found + nol == nfl;
+    bool block_at_eof = (size_t)found + mnl == nfl;
     for (size_t i = 0; i < nfl; i++) {
         if (i == (size_t)found) {
             for (size_t j = 0; j < nnl; j++) {
@@ -2751,8 +2829,8 @@ static void tool_file_edit(const cJSON *args, buf_t *out, bool *is_error) {
                 /* terminator: inherit the corresponding original line's,
                    lines past the replaced block inherit its last line's;
                    every new line except a final one needs one */
-                const fline_t *src = (j < nol) ? &fl[found + j]
-                                               : &fl[found + nol - 1];
+                const fline_t *src = (j < mnl) ? &fl[found + j]
+                                               : &fl[found + mnl - 1];
                 if (block_at_eof && j + 1 == nnl)
                     buf_append(&nb, src->end, src->endlen);
                 else if (src->endlen == 0)
@@ -2760,7 +2838,7 @@ static void tool_file_edit(const cJSON *args, buf_t *out, bool *is_error) {
                 else
                     buf_append(&nb, src->end, src->endlen);
             }
-            i += nol - 1; /* skip the replaced originals */
+            i += mnl - 1; /* skip the replaced originals */
             continue;
         }
         buf_append(&nb, fl[i].s, fl[i].len);
@@ -2781,13 +2859,13 @@ static void tool_file_edit(const cJSON *args, buf_t *out, bool *is_error) {
         return;
     }
     buf_clear(out);
-    if (nol == 1)
+    if (mnl == 1)
         buf_appendf(out, "replaced line %llu in %s",
                     (unsigned long long)(found + 1), path);
     else
         buf_appendf(out, "replaced lines %llu-%llu in %s",
                     (unsigned long long)(found + 1),
-                    (unsigned long long)(found + nol), path);
+                    (unsigned long long)(found + mnl), path);
     free(fl);
     free(ol);
     free(nl);
