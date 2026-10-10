@@ -1,8 +1,10 @@
 /* builtin.c - llmkit builtin-mcp: a stdio mcp server offering generic-use
-   tools (web search/fetch, file list/search/read/create/edit). No state,
-   no config: `llmkit builtin-mcp` serves json-rpc on stdin/stdout. All
-   tool and argument descriptions start empty and live in the DESCRIPTIONS
-   block right below - edit the strings there. */
+   tools (web search/fetch, file list/search/read/create/edit, process
+   exec/status). No config: `llmkit builtin-mcp` serves json-rpc on
+   stdin/stdout. All tool and argument descriptions start empty and live in
+   the DESCRIPTIONS block right below - edit the strings there. Everything
+   is stateless except the process tools: their spawned-process table (pids,
+   exit codes and one temp output file each) lives until the server exits. */
 #include "llmkit.h"
 
 #include <ctype.h>
@@ -12,10 +14,13 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <time.h>
 
 #ifdef _WIN32
 #include <direct.h>
+#include <fcntl.h>
 #include <io.h>
+#include <windows.h>
 #ifndef R_OK
 #define R_OK 4
 #define W_OK 2
@@ -25,6 +30,10 @@
 #define BM_MKDIR(p) _mkdir(p)
 #define BM_LSTAT(p, s) stat((p), (s))
 #else
+#include <fcntl.h>
+#include <signal.h>
+#include <strings.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #define BM_ACCESS access
 #define BM_MKDIR(p) mkdir((p), 0777)
@@ -95,6 +104,12 @@ static const arg_def_t ARGS_file_edit[] = {
     {"newString", "string", "", true},
     {"line_number", "integer", "", true},
 };
+static const arg_def_t ARGS_process_exec[] = {
+    {"cmdline", "string", "", true},
+};
+static const arg_def_t ARGS_process_status[] = {
+    {"pid", "integer", "", true},
+};
 
 static const tool_def_t TOOLS[] = {
     {"web_search", "", ARGS_web_search, 1},
@@ -104,6 +119,8 @@ static const tool_def_t TOOLS[] = {
     {"file_read", "", ARGS_file_read, 3},
     {"file_create", "", ARGS_file_create, 3},
     {"file_edit", "", ARGS_file_edit, 4},
+    {"process_exec", "", ARGS_process_exec, 1},
+    {"process_status", "", ARGS_process_status, 1},
 };
 enum { TOOLS_N = sizeof TOOLS / sizeof TOOLS[0] };
 
@@ -645,6 +662,361 @@ static bool ensure_parent_dirs(const char *path) {
         }
     }
     return BM_MKDIR(tmp) == 0 || errno == EEXIST;
+}
+
+/* ================= process handling ================= */
+
+/* process_exec runs a command line through the shell and waits 10s;
+   process_status reports on a pid it spawned. Every process owns one
+   record for the lifetime of the server: the pid, the exit code once
+   reaped, and the output. stdout and stderr arrive on one pipe (merged
+   the annotate-output.sh way - line races between the two streams are
+   accepted), a detached reader thread stamps each line "HH:MM:SS: "
+   when it reads it, appends it to a per-process temp file and rotates
+   a three-line tail. */
+
+#define BM_PROC_WAIT_MS 10000  /* process_exec completion wait */
+#define BM_PROC_TAIL 3         /* lines quoted in the reply */
+#define BM_PROC_LINE_CAP 65536 /* one line's byte cap (newline floods) */
+
+typedef struct proc_rec {
+    struct proc_rec *next;
+    long pid;
+    bool exited;               /* reaped; exit_code is valid */
+    int exit_code;
+    bool eof;                  /* reader drained the pipe */
+    unsigned long long nlines; /* annotated lines in the temp file */
+    char *tail[BM_PROC_TAIL];  /* the last lines, oldest first */
+    int ntail;
+    char *out_path;            /* the temp file with the output */
+    FILE *out;                 /* reader-owned while the reader lives */
+    int from_fd;               /* the merged pipe, reader-owned */
+    pthread_mutex_t m;         /* guards the fields the reader fills */
+#ifdef _WIN32
+    void *hproc; /* HANDLE; kept for the entry's lifetime */
+#endif
+} proc_rec_t;
+
+static proc_rec_t *g_procs; /* every process this server spawned */
+
+/* wall clock HH:MM:SS, the annotate-output.sh default prefix */
+static void hms_now(char out[9]) {
+    time_t t = time(NULL);
+    struct tm *tm = localtime(&t);
+    if (!tm) {
+        snprintf(out, 9, "00:00:00");
+        return;
+    }
+    snprintf(out, 9, "%02d:%02d:%02d", tm->tm_hour, tm->tm_min, tm->tm_sec);
+}
+
+/* stamp one output line and record it: temp file, counter, tail */
+static void proc_emit(proc_rec_t *p, const char *s, size_t n) {
+    char ts[9];
+    hms_now(ts);
+    buf_t ln;
+    buf_init(&ln);
+    buf_appendf(&ln, "%s: ", ts);
+    for (size_t i = 0; i < n; i++) /* NUL bytes would cut the json reply */
+        buf_append_byte(&ln, s[i] ? s[i] : '?');
+    if (p->out) {
+        fwrite(ln.data, 1, ln.len, p->out);
+        fputc('\n', p->out);
+    }
+    pthread_mutex_lock(&p->m);
+    if (p->ntail == BM_PROC_TAIL) {
+        free(p->tail[0]);
+        memmove(p->tail, p->tail + 1, sizeof(char *) * (BM_PROC_TAIL - 1));
+        p->ntail--;
+    }
+    p->tail[p->ntail++] = buf_steal(&ln, NULL);
+    p->nlines++;
+    pthread_mutex_unlock(&p->m);
+}
+
+/* first writer of the exit code wins (reader thread vs proc_reap) */
+static void proc_set_exit(proc_rec_t *p, int code) {
+    pthread_mutex_lock(&p->m);
+    if (!p->exited) {
+        p->exited = true;
+        p->exit_code = code;
+    }
+    pthread_mutex_unlock(&p->m);
+}
+
+#ifndef _WIN32
+/* wait status to exit code, shell convention for the signaled case */
+static int wait_code(int st) {
+    if (WIFEXITED(st)) return WEXITSTATUS(st);
+    if (WIFSIGNALED(st)) return 128 + WTERMSIG(st);
+    return 1; /* unreachable in practice, kept total */
+}
+#endif
+
+/* detached: drain the merged pipe, one annotated line per newline. the
+   process is reaped here too once its output ends, so no zombie survives
+   even when it is never queried again */
+static void *proc_reader(void *arg) {
+    proc_rec_t *p = arg;
+    buf_t pend; /* the line currently arriving */
+    buf_init(&pend);
+    char chunk[8192];
+    for (;;) {
+        ssize_t n = read(p->from_fd, chunk, sizeof chunk);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) break; /* end of output (or unreadable pipe) */
+        size_t start = 0;
+        for (size_t i = 0; i < (size_t)n; i++) {
+            if (chunk[i] != '\n') continue;
+            size_t len = i - start;
+            if (len && chunk[start + len - 1] == '\r') len--;
+            proc_emit(p, chunk + start, len);
+            start = i + 1;
+        }
+        buf_append(&pend, chunk + start, (size_t)n - start);
+        while (pend.len > BM_PROC_LINE_CAP) { /* a flood without newlines */
+            proc_emit(p, pend.data, BM_PROC_LINE_CAP);
+            size_t keep = pend.len - BM_PROC_LINE_CAP;
+            memmove(pend.data, pend.data + BM_PROC_LINE_CAP, keep);
+            pend.len = keep;
+            pend.data[keep] = '\0';
+        }
+    }
+    if (pend.len) { /* final line without its newline */
+        if (pend.data[pend.len - 1] == '\r') pend.len--;
+        proc_emit(p, pend.data, pend.len);
+    }
+    buf_free(&pend);
+    close(p->from_fd);
+    p->from_fd = -1;
+    if (p->out) {
+        fclose(p->out);
+        p->out = NULL;
+    }
+#ifdef _WIN32
+    if (p->hproc) {
+        DWORD code = 0;
+        if (WaitForSingleObject((HANDLE)p->hproc, INFINITE) == WAIT_OBJECT_0 &&
+            GetExitCodeProcess((HANDLE)p->hproc, &code))
+            proc_set_exit(p, (int)code);
+    }
+#else
+    {
+        int st = 0;
+        if (waitpid((pid_t)p->pid, &st, 0) == (pid_t)p->pid)
+            proc_set_exit(p, wait_code(st));
+    }
+#endif
+    pthread_mutex_lock(&p->m);
+    p->eof = true;
+    pthread_mutex_unlock(&p->m);
+    return NULL;
+}
+
+/* one temp file per process, holding the full annotated output; the
+   reply names it once it holds more than the quoted tail */
+static FILE *proc_mktemp(char *path, size_t sz) {
+#ifdef _WIN32
+    static unsigned seq;
+    char dir[264];
+    DWORD dn = GetTempPathA(sizeof dir, dir);
+    if (!dn || dn >= sizeof dir) return NULL;
+    for (int i = 0; i < 4096; i++) {
+        snprintf(path, sz, "%sllmkit-proc-%lu-%u.tmp", dir,
+                 (unsigned long)GetCurrentProcessId(), ++seq);
+        HANDLE h = CreateFileA(path, GENERIC_WRITE, 0, NULL, CREATE_NEW,
+                               FILE_ATTRIBUTE_NORMAL, NULL);
+        if (h != INVALID_HANDLE_VALUE) {
+            int fd = _open_osfhandle((intptr_t)h, _O_BINARY | _O_NOINHERIT);
+            if (fd < 0) {
+                CloseHandle(h);
+                return NULL;
+            }
+            return fdopen(fd, "wb");
+        }
+        DWORD e = GetLastError();
+        if (e != ERROR_FILE_EXISTS && e != ERROR_ACCESS_DENIED) return NULL;
+    }
+    return NULL;
+#else
+    const char *dir = getenv("TMPDIR");
+    if (!dir || !*dir) dir = "/tmp";
+    if (snprintf(path, sz, "%s/llmkit-proc-XXXXXX", dir) >= (int)sz &&
+        snprintf(path, sz, "/tmp/llmkit-proc-XXXXXX") >= (int)sz)
+        return NULL; /* an overlong TMPDIR falls back, then gives up */
+    int fd = mkstemp(path);
+    if (fd < 0) return NULL;
+    return fdopen(fd, "wb");
+#endif
+}
+
+#ifdef _WIN32
+
+/* %ComSpec% /c <cmdline>, stdin on NUL, stdout and stderr on one pipe */
+static int proc_spawn(const char *cmdline, proc_rec_t *p) {
+    p->hproc = NULL;
+    p->from_fd = -1;
+    SECURITY_ATTRIBUTES sa;
+    sa.nLength = sizeof sa;
+    sa.lpSecurityDescriptor = NULL;
+    sa.bInheritHandle = TRUE;
+    HANDLE out_r = NULL, out_w = NULL;
+    HANDLE in_r = CreateFileA("NUL", GENERIC_READ,
+                              FILE_SHARE_READ | FILE_SHARE_WRITE, &sa,
+                              OPEN_EXISTING, 0, NULL);
+    if (in_r == INVALID_HANDLE_VALUE || !CreatePipe(&out_r, &out_w, &sa, 0)) {
+        if (in_r != INVALID_HANDLE_VALUE) CloseHandle(in_r);
+        if (out_r) CloseHandle(out_r);
+        if (out_w) CloseHandle(out_w);
+        return -1;
+    }
+    fflush(NULL);
+    const char *sh = getenv("ComSpec");
+    if (!sh || !*sh) sh = "cmd.exe";
+    wchar_t wsh[280], wcl[4096];
+    if (MultiByteToWideChar(CP_ACP, 0, sh, -1, wsh, 280) == 0 ||
+        MultiByteToWideChar(CP_UTF8, 0, cmdline, -1, wcl,
+                            (int)(sizeof wcl / sizeof *wcl) - 300) == 0) {
+        CloseHandle(in_r);
+        CloseHandle(out_r);
+        CloseHandle(out_w);
+        return -1;
+    }
+    wchar_t cmd[4096];
+    /* cmd /c strips the first and last quote of the tail when it starts
+       with one (cmd /? rule 2): a leading-quoted cmdline gets an extra
+       outer pair so the stripped quotes are the spare ones */
+    if (wcl[0] == L'"')
+        _snwprintf(cmd, 4096, L"\"%ls\" /c \"%ls\"", wsh, wcl);
+    else
+        _snwprintf(cmd, 4096, L"\"%ls\" /c %ls", wsh, wcl);
+
+    STARTUPINFOEXW si;
+    memset(&si, 0, sizeof si);
+    si.StartupInfo.cb = sizeof si;
+    si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    si.StartupInfo.hStdInput = in_r;
+    si.StartupInfo.hStdOutput = out_w;
+    si.StartupInfo.hStdError = out_w; /* stderr merges into stdout */
+    SIZE_T asz = 0;
+    InitializeProcThreadAttributeList(NULL, 1, 0, &asz);
+    si.lpAttributeList = HeapAlloc(GetProcessHeap(), 0, asz);
+    HANDLE inherit[2] = { in_r, out_w };
+    BOOL ok = si.lpAttributeList &&
+              InitializeProcThreadAttributeList(si.lpAttributeList, 1, 0,
+                                                &asz) &&
+              UpdateProcThreadAttribute(
+                  si.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+                  inherit, sizeof inherit, NULL, NULL);
+    PROCESS_INFORMATION pi;
+    memset(&pi, 0, sizeof pi);
+    if (ok)
+        ok = CreateProcessW(NULL, cmd, NULL, NULL, TRUE,
+                            EXTENDED_STARTUPINFO_PRESENT, NULL, NULL,
+                            &si.StartupInfo, &pi);
+    if (si.lpAttributeList) {
+        DeleteProcThreadAttributeList(si.lpAttributeList);
+        HeapFree(GetProcessHeap(), 0, si.lpAttributeList);
+    }
+    CloseHandle(in_r); /* child ends: owned by the child now */
+    CloseHandle(out_w);
+    if (!ok) {
+        CloseHandle(out_r);
+        return -1;
+    }
+    CloseHandle(pi.hThread);
+    p->hproc = pi.hProcess; /* the failure paths below leave the child to
+                               the caller's kill-and-wipe cleanup */
+    p->from_fd = _open_osfhandle((intptr_t)out_r, _O_BINARY | _O_NOINHERIT);
+    if (p->from_fd < 0) {
+        CloseHandle(out_r);
+        return -1;
+    }
+    p->pid = (long)GetProcessId(pi.hProcess);
+    return 0;
+}
+
+/* non-blocking check; records the code when the process ended */
+static void proc_reap(proc_rec_t *p) {
+    pthread_mutex_lock(&p->m);
+    bool done = p->exited;
+    pthread_mutex_unlock(&p->m);
+    if (done || !p->hproc) return;
+    DWORD code = 0;
+    if (WaitForSingleObject((HANDLE)p->hproc, 0) == WAIT_OBJECT_0 &&
+        GetExitCodeProcess((HANDLE)p->hproc, &code))
+        proc_set_exit(p, (int)code);
+}
+
+#else /* posix */
+
+/* /bin/sh -c <cmdline>, stdin on /dev/null, stdout and stderr on one pipe */
+static int proc_spawn(const char *cmdline, proc_rec_t *p) {
+    int out_pipe[2];
+    if (pipe(out_pipe)) return -1;
+    fflush(NULL);
+    pid_t pid = fork();
+    if (pid < 0) {
+        close(out_pipe[0]);
+        close(out_pipe[1]);
+        return -1;
+    }
+    if (pid == 0) {
+        /* stdin must not be ours (the json-rpc channel): the child reads
+           /dev/null instead; both output streams merge into the pipe */
+        int nul = open("/dev/null", O_RDONLY);
+        if (nul < 0) _exit(127);
+        dup2(nul, 0);
+        dup2(out_pipe[1], 1);
+        dup2(out_pipe[1], 2);
+        close(out_pipe[0]);
+        close(out_pipe[1]);
+        /* nothing else is inherited: other servers' pipes and any open
+           sockets belong to the parent, not to this process */
+        long maxfd = sysconf(_SC_OPEN_MAX);
+        if (maxfd < 0) maxfd = 16384;
+        for (int fd = 3; fd < maxfd; fd++) close(fd);
+        execl("/bin/sh", "sh", "-c", cmdline, (char *)NULL);
+        _exit(127);
+    }
+    close(out_pipe[1]);
+    p->pid = (long)pid;
+    p->from_fd = out_pipe[0];
+    return 0;
+}
+
+/* non-blocking check; records the code when the process ended */
+static void proc_reap(proc_rec_t *p) {
+    pthread_mutex_lock(&p->m);
+    bool done = p->exited;
+    pthread_mutex_unlock(&p->m);
+    if (done) return;
+    int st = 0;
+    if (waitpid((pid_t)p->pid, &st, WNOHANG) == 0) return; /* running */
+    proc_set_exit(p, wait_code(st));
+}
+
+#endif
+
+/* the shared reply body: state line, tail, temp file, advice */
+static void proc_report(buf_t *out, proc_rec_t *p) {
+    pthread_mutex_lock(&p->m);
+    if (p->exited)
+        buf_appendf(out, "Exit code: %d\n", p->exit_code);
+    else
+        buf_appendf(out, "PID %ld is still running.\n", p->pid);
+    buf_append_str(out, "Last three output lines:\n");
+    for (int i = 0; i < p->ntail; i++) {
+        buf_append_str(out, p->tail[i]);
+        buf_append_byte(out, '\n');
+    }
+    if (p->nlines > BM_PROC_TAIL)
+        buf_appendf(out,
+                    "Process output available in %s (currently %llu lines)\n",
+                    p->out_path ? p->out_path : "?", p->nlines);
+    if (!p->exited)
+        buf_append_str(out, "Use process_status to monitor it.\n");
+    pthread_mutex_unlock(&p->m);
 }
 
 /* ================= html dom (readability input) ================= */
@@ -2181,9 +2553,118 @@ static void tool_file_edit(const cJSON *args, buf_t *out, bool *is_error) {
     buf_free(&basews);
 }
 
+/* ---- process tools ---- */
+
+static void tool_process_exec(const cJSON *args, buf_t *out, bool *is_error) {
+    const char *cmdline = NULL;
+    if (!need_str(args, "cmdline", &cmdline, out)) {
+        *is_error = true;
+        return;
+    }
+    if (!strlen(cmdline)) {
+        buf_clear(out);
+        buf_append_str(out, "cmdline must not be empty");
+        *is_error = true;
+        return;
+    }
+    proc_rec_t *p = calloc(1, sizeof *p);
+    char path[BM_PATH_MAX];
+    if (!p) {
+        buf_clear(out);
+        buf_append_str(out, "process_exec failed: out of memory");
+        *is_error = true;
+        return;
+    }
+    p->from_fd = -1;
+    p->out = proc_mktemp(path, sizeof path);
+    if (!p->out) {
+        buf_clear(out);
+        buf_append_str(out, "process_exec failed: cannot create temp output file");
+        *is_error = true;
+        free(p);
+        return;
+    }
+    p->out_path = strdup(path);
+    pthread_mutex_init(&p->m, NULL);
+    if (proc_spawn(cmdline, p) || thread_start_detached(proc_reader, p) != 0) {
+        /* nothing is watching the child yet: kill, reap, wipe */
+#ifdef _WIN32
+        if (p->hproc) {
+            TerminateProcess((HANDLE)p->hproc, 1);
+            CloseHandle((HANDLE)p->hproc);
+        }
+#else
+        if (p->pid > 0) {
+            kill((pid_t)p->pid, SIGTERM);
+            waitpid((pid_t)p->pid, NULL, 0);
+        }
+#endif
+        if (p->from_fd >= 0) close(p->from_fd);
+        fclose(p->out);
+        remove(p->out_path);
+        free(p->out_path);
+        pthread_mutex_destroy(&p->m);
+        free(p);
+        buf_clear(out);
+        buf_appendf(out, "process_exec failed: cannot spawn '%s'", cmdline);
+        *is_error = true;
+        return;
+    }
+    p->next = g_procs;
+    g_procs = p;
+    /* wait for completion, 10s, polled */
+    double t0 = mono_now();
+    for (;;) {
+        proc_reap(p);
+        if (p->exited) break;
+        if (mono_now() - t0 >= BM_PROC_WAIT_MS / 1000.0) break;
+        msleep(50);
+    }
+    if (p->exited) {
+        /* the reader still holds what the pipe buffered: give it a
+           moment, bounded - a grandchild may hold the pipe open forever */
+        double t1 = mono_now();
+        pthread_mutex_lock(&p->m);
+        bool eof = p->eof;
+        pthread_mutex_unlock(&p->m);
+        while (!eof && mono_now() - t1 < 2.0) {
+            msleep(25);
+            pthread_mutex_lock(&p->m);
+            eof = p->eof;
+            pthread_mutex_unlock(&p->m);
+        }
+    }
+    proc_report(out, p);
+    sanitize_utf8(out);
+}
+
+static void tool_process_status(const cJSON *args, buf_t *out, bool *is_error) {
+    long long pid = 0;
+    if (!need_int(args, "pid", &pid, out)) {
+        *is_error = true;
+        return;
+    }
+    proc_rec_t *p = NULL;
+    for (proc_rec_t *it = g_procs; it; it = it->next)
+        if ((long long)it->pid == pid) {
+            p = it;
+            break;
+        }
+    if (!p) { /* a pid this server did not spawn gets no output */
+        buf_clear(out);
+        buf_appendf(out, "PID %lld was not spawned by this server", pid);
+        *is_error = true;
+        return;
+    }
+    proc_reap(p);
+    proc_report(out, p);
+    sanitize_utf8(out);
+}
+
 static const tool_fn TOOL_FNS[TOOLS_N] = {
     tool_web_search, tool_web_fetch,  tool_files_list, tool_files_search,
-    tool_file_read,  tool_file_create, tool_file_edit,
+    tool_file_read,  tool_file_create, tool_file_edit, tool_process_exec,
+    tool_process_status,
 };
 
 /* ================= json-rpc handler ================= */

@@ -1479,14 +1479,15 @@ static void test_builtin(void) {
             ? cJSON_GetObjectItemCaseSensitive(
                   cJSON_GetObjectItemCaseSensitive(r, "result"), "tools")
             : NULL;
-        check(cJSON_IsArray(tools) && cJSON_GetArraySize(tools) == 7,
-              "builtin: seven tools listed");
-        const char *want[7] = { "web_search",   "web_fetch",  "files_list",
-                                "files_search", "file_read",  "file_create",
-                                "file_edit" };
+        check(cJSON_IsArray(tools) && cJSON_GetArraySize(tools) == 9,
+              "builtin: nine tools listed");
+        const char *want[9] = { "web_search",   "web_fetch",   "files_list",
+                                "files_search", "file_read",   "file_create",
+                                "file_edit",    "process_exec",
+                                "process_status" };
         bool names_ok = true, descs_empty = true, args_empty = true;
         if (cJSON_IsArray(tools))
-            for (int i = 0; i < 7; i++) {
+            for (int i = 0; i < 9; i++) {
                 const cJSON *t = cJSON_GetArrayItem(tools, i);
                 const cJSON *nm = cJSON_GetObjectItemCaseSensitive(t, "name");
                 if (!cJSON_IsString(nm) || strcmp(nm->valuestring, want[i]))
@@ -1610,6 +1611,98 @@ static void test_builtin(void) {
     check(ie && t && strstr(t, "invalid regex"),
           "builtin: bad regex is an error");
     free(t);
+
+    /* process tools: completed reply, timestamps, tail, temp file */
+    t = bc_call("process_exec", "{\"cmdline\":\"echo one; echo two\"}", &ie);
+    check(!ie && t && strstr(t, "Exit code: 0\n") &&
+              strstr(t, "Last three output lines:\n") &&
+              strstr(t, ": one\n") && strstr(t, ": two\n") &&
+              !strstr(t, "still running") &&
+              !strstr(t, "Process output available"),
+          "builtin: process_exec completed reply with stamped lines");
+    free(t);
+
+    t = bc_call("process_exec",
+                "{\"cmdline\":\"echo a; echo b; echo c; echo d; echo e\"}",
+                &ie);
+    check(!ie && t && strstr(t, "Exit code: 0") &&
+              strstr(t, "Process output available in") &&
+              strstr(t, "(currently 5 lines)") &&
+              !strstr(t, ": a\n") && strstr(t, ": d\n") && strstr(t, ": e\n"),
+          "builtin: process_exec quotes the tail, names the temp file");
+    {   /* the temp file holds all five stamped lines */
+        char path[512] = "";
+        char *pin = t ? strstr(t, "Process output available in ") : NULL;
+        if (pin)
+            sscanf(pin + 27, "%511s", path);
+        FILE *pf = path[0] ? fopen(path, "r") : NULL;
+        unsigned lines = 0;
+        bool stamped = true;
+        if (pf) {
+            char lb[128];
+            while (fgets(lb, sizeof lb, pf)) {
+                lines++;
+                if (!(lb[2] == ':' && lb[5] == ':' && lb[8] == ':' &&
+                      lb[0] >= '0'))
+                    stamped = false;
+            }
+            fclose(pf);
+        }
+        check(pf && lines == 5 && stamped,
+              "builtin: process temp file has all stamped lines");
+    }
+    free(t);
+
+    t = bc_call("process_exec", "{\"cmdline\":\"exit 7\"}", &ie);
+    check(!ie && t && strstr(t, "Exit code: 7"),
+          "builtin: process_exec exit code");
+    free(t);
+
+    t = bc_call("process_exec", "{\"cmdline\":\"\"}", &ie);
+    check(ie && t && strstr(t, "must not be empty"),
+          "builtin: process_exec empty cmdline is an error");
+    free(t);
+
+    t = bc_call("process_status", "{\"pid\":999999999}", &ie);
+    check(ie && t && strstr(t, "was not spawned"),
+          "builtin: process_status foreign pid is an error");
+    free(t);
+
+    /* the 10s wait ends with the running reply; process_status then
+       follows the same pid to completion */
+    t = bc_call("process_exec", "{\"cmdline\":\"echo started; sleep 11\"}",
+                &ie);
+    check(!ie && t && strstr(t, "is still running") &&
+              strstr(t, "Use process_status to monitor it.") &&
+              strstr(t, ": started\n"),
+          "builtin: process_exec 10s wait reports still running");
+    long pid = -1;
+    if (t) {
+        char *pp = strstr(t, "PID ");
+        if (pp) pid = strtol(pp + 4, NULL, 10);
+    }
+    free(t);
+    check(pid > 0, "builtin: running reply carries the pid");
+    if (pid > 0) {
+        char pargs[64];
+        snprintf(pargs, sizeof pargs, "{\"pid\":%ld}", pid);
+        t = bc_call("process_status", pargs, &ie);
+        check(!ie && t && strstr(t, "is still running"),
+              "builtin: process_status of a running pid");
+        free(t);
+        bool done = false;
+        char *fin = NULL;
+        for (int i = 0; i < 10 && !done; i++) {
+            msleep(500);
+            fin = bc_call("process_status", pargs, &ie);
+            if (!ie && fin && strstr(fin, "Exit code: 0")) done = true;
+            else free(fin), fin = NULL;
+        }
+        check(done && fin && strstr(fin, "Exit code: 0") &&
+                  strstr(fin, ": started\n"),
+              "builtin: process_status sees the completion");
+        free(fin);
+    }
 
     /* duckduckgo parser on a canned results page */
     {

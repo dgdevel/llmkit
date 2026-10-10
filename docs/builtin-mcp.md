@@ -1,8 +1,8 @@
 # builtin-mcp
 
-`llmkit builtin-mcp` is a stateless mcp server on stdio exposing a set of
-generic-use tools: web search, web fetch and five file operations. No
-arguments, no config file:
+`llmkit builtin-mcp` is an mcp server on stdio exposing a set of
+generic-use tools: web search, web fetch, five file operations and two
+process operations. No arguments, no config file:
 
 ```sh
 $ llmkit builtin-mcp < jsonrpc-on-stdin   # serves until eof
@@ -11,6 +11,11 @@ $ llmkit builtin-mcp < jsonrpc-on-stdin   # serves until eof
 It speaks the same json-rpc surface as `agent-as-tool` and `mcp-proxy`
 (initialize / notifications/initialized / ping / tools/list / tools/call)
 in all current protocol revisions up to `2026-07-28`.
+
+Everything is stateless except the process tools: the server keeps one
+record per spawned process (pid, exit state and one output temp file)
+for its own lifetime, so `process_status` can report on any pid it
+spawned.
 
 ## Attaching it to a conversation
 
@@ -41,6 +46,8 @@ Every one of them lives in one block at the top of `src/builtin.c`
 | `file_read` | `path: string, lines_offset: int, lines_length: int` | the requested lines |
 | `file_create` | `path: string, content: string, overwrite: bool = false` | confirmation |
 | `file_edit` | `path: string, oldString: string, newString: string, line_number: int` | confirmation |
+| `process_exec` | `cmdline: string` | exit code or pid + output tail |
+| `process_status` | `pid: int` | same report for one spawned pid |
 
 ### web_search(keywords)
 
@@ -129,6 +136,59 @@ and trailing whitespace ignored. The replacement's indentation is
 adjusted to the replaced block: the new block keeps its internal relative
 indentation and is shifted so its first line lands on the column of the
 first replaced line. Line endings are preserved (`\n` and `\r\n`).
+
+### process_exec(cmdline)
+
+Runs `cmdline` through the shell (posix: `/bin/sh -c`, windows:
+`%ComSpec% /c`) with stdin connected to the null device, and waits up
+to 10 seconds for it to finish. stdout and stderr arrive merged into
+one stream and every line is stamped with a wall-clock timestamp as it
+is read - the `annotate-output.sh` style, line races between the two
+streams accepted:
+
+```
+HH:MM:SS: the line
+```
+
+The reply for a finished process:
+
+```
+Exit code: ${code}
+Last three output lines:
+${stamped line}
+${stamped line}
+${stamped line}
+```
+
+The reply for one still running after the wait:
+
+```
+PID ${pid} is still running.
+Last three output lines:
+...
+Use process_status to monitor it.
+```
+
+`Last three output lines` carries whatever the process printed so far,
+at most three of them. The full stamped output is appended to one temp
+file per process (`$TMPDIR`, else `/tmp`, on posix; the user temp dir
+on windows) for the lifetime of the server, and once more than three
+lines exist the reply names it:
+
+```
+Process output available in ${path} (currently ${n} lines)
+```
+
+`currently`, because the count keeps growing until the process ends
+and its output drains. Exit codes follow the shell convention:
+a normal exit reports its status, a signal death reports `128 + signal`,
+a command the shell cannot find reports 127.
+
+### process_status(pid)
+
+The same report for a pid spawned by this server - running or finished,
+whichever its current state is. A pid this server did not spawn is an
+error and reports no output.
 
 ## Regex flavor
 

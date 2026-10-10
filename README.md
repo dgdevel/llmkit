@@ -9,7 +9,7 @@ A single static-purpose executable for llm interaction from the shell and from o
 | `llmkit runner` | runs an llm conversation: jsonl records on stdin, jsonl records on stdout |
 | `llmkit agent-as-tool <seed.jsonl>` | exposes one agent conversation as a single `invoke` tool on a stdio mcp interface |
 | `llmkit mcp-proxy <config.jsonl>` | exposes a curated view (rename, redescribe, hide) of upstream mcp servers on stdio |
-| `llmkit builtin-mcp` | serves the built-in generic-use mcp tools (web search/fetch, file list/search/read/create/edit) on stdio |
+| `llmkit builtin-mcp` | serves the built-in generic-use mcp tools (web search/fetch, file list/search/read/create/edit, process exec/status) on stdio |
 | `llmkit mcp-repl <flags>` | the interactive tool console for one mcp server: tab-completed `name(args)` calls, one timing line each |
 | `llmkit prettyprint <conversation.jsonl>` | renders a recorded conversation jsonl with the repl's typography (stdin without a file) |
 | `llmkit proxy <flags>` | a plain-http llm endpoint that forwards to one upstream and prints the passing conversation prettyprint-style |
@@ -92,7 +92,7 @@ Tools: add a `tools` record before the `user` record -
 
 `llmkit call --mcp-proxy cfg.jsonl --terminal-tool fs.confirm` marks tools the same way from the command line; the answer is then the tool's text. `llmkit agent-as-tool` seeds honor the attribute too: the `invoke` reply is the terminal tool's answer.
 
-No external tool server at hand? `llmkit builtin-mcp` is one: seven generic-use tools (web search and fetch, file list/search/read/create/edit) served from the same binary.
+No external tool server at hand? `llmkit builtin-mcp` is one: nine generic-use tools (web search and fetch, file list/search/read/create/edit, process exec and status) served from the same binary.
 ```sh
 llmkit mcp-repl --stdio 'llmkit builtin-mcp'
 ```
