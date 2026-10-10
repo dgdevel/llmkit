@@ -16,7 +16,8 @@ in all current protocol revisions up to `2026-07-28`.
 Everything is stateless except the process tools: the server keeps one
 record per spawned process (pid, exit state and one output temp file)
 for its own lifetime, so `process_status` and `process_wait` can report
-on any pid it spawned.
+on any pid it spawned. Any other pid on the machine can be checked too,
+without the output.
 
 ## Attaching it to a conversation
 
@@ -52,7 +53,7 @@ empty description.
 | `file_create` | `path: string, content: string, overwrite: bool = false` | confirmation |
 | `file_edit` | `path: string, oldString: string, newString: string, line_number: int` | confirmation |
 | `process_exec` | `cmdline: string` | exit code or pid + output tail |
-| `process_status` | `pid: int` | same report for one spawned pid |
+| `process_status` | `pid: int` | same report for one spawned pid; any other pid: running state |
 | `process_wait` | `pid: int, timeout: int` | waits, then the same report |
 | `skills_search` | `keywords: string` | matching skills as records |
 | `skills_read` | `name: string` | the skill's SKILL.md text |
@@ -195,8 +196,21 @@ a command the shell cannot find reports 127.
 ### process_status(pid)
 
 The same report for a pid spawned by this server - running or finished,
-whichever its current state is. A pid this server did not spawn is an
-error and reports no output.
+whichever its current state is. Any other pid on the machine is checked
+against the os instead (posix: `kill(pid, 0)`, windows:
+`OpenProcess`), and answers without the output parts:
+
+```
+PID ${pid} is still running.
+Use process_wait to wait for it.
+No exit code or output: this pid was not spawned by this server.
+```
+
+or `PID ${pid} is not running.` with the same last line when it is
+gone. Exit code and output belong to the process's parent, so neither
+exists here; a pid that died but was never reaped still counts as
+running, and a pid that never existed looks the same as a dead one. A
+`pid` of 0 or less is an error.
 
 ### process_wait(pid, timeout)
 
@@ -204,8 +218,9 @@ Waits for a pid spawned by this server to terminate or for `timeout`
 whole seconds to pass - whichever happens first - then answers the same
 report as `process_status`: the exit code and output tail when the
 process ended, the running state otherwise. `timeout` is clamped by
-validation to 0..600; 0 means one immediate check, and a pid this
-server did not spawn is the same error as in `process_status`.
+validation to 0..600; 0 means one immediate check. A pid this server
+did not spawn gets the state-only report from `process_status` after
+the same bounded wait.
 
 ### skills_search(keywords)
 

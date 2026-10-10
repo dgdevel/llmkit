@@ -870,8 +870,9 @@ static size_t split_kw(char *s, char **out, size_t max) {
 /* ================= process handling ================= */
 
 /* process_exec runs a command line through the shell and waits 10s;
-   process_status reports on a pid it spawned; process_wait blocks on
-   one until it exits or a timeout passes. Every process owns one
+   process_status reports on a pid it spawned - or, minus the output,
+   on any other pid in the os; process_wait blocks on one until it
+   exits or a timeout passes. Every process owns one
    record for the lifetime of the server: the pid, the exit code once
    reaped, and the output. stdout and stderr arrive on one pipe (merged
    the annotate-output.sh way - line races between the two streams are
@@ -1222,6 +1223,39 @@ static void proc_report(buf_t *out, proc_rec_t *p) {
     if (!p->exited)
         buf_append_str(out, "Use process_status to monitor it.\n");
     pthread_mutex_unlock(&p->m);
+}
+
+/* whether a pid exists on this machine, whoever spawned it. a zombie
+   still counts: only its parent can tell the difference, and a
+   permission wall (eperm / access denied) proves one is there */
+static bool pid_exists(long long pid) {
+    if (pid <= 0) return false;
+#ifdef _WIN32
+    HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE,
+                           (DWORD)pid);
+    if (!h) return GetLastError() == ERROR_ACCESS_DENIED;
+    DWORD code = 0;
+    bool alive = GetExitCodeProcess(h, &code) && code == STILL_ACTIVE;
+    CloseHandle(h);
+    return alive;
+#else
+    return kill((pid_t)pid, 0) == 0 || errno == EPERM;
+#endif
+}
+
+/* the reply for a pid this server did not spawn: the state alone. the
+   exit code and the pipes belong to whoever spawned it, so neither is
+   reportable here */
+static void proc_report_foreign(buf_t *out, long long pid, bool alive) {
+    if (alive) {
+        buf_appendf(out, "PID %lld is still running.\n", pid);
+        buf_append_str(out, "Use process_wait to wait for it.\n");
+    } else {
+        buf_appendf(out, "PID %lld is not running.\n", pid);
+    }
+    buf_append_str(out,
+                   "No exit code or output: this pid was not spawned by "
+                   "this server.\n");
 }
 
 /* ================= html dom (readability input) ================= */
@@ -2857,14 +2891,17 @@ static void tool_process_status(const cJSON *args, buf_t *out, bool *is_error) {
         return;
     }
     proc_rec_t *p = proc_find(pid);
-    if (!p) { /* a pid this server did not spawn gets no output */
+    if (p) { /* this server spawned it: the full report */
+        proc_reap(p);
+        proc_report(out, p);
+    } else if (pid > 0) { /* any other pid in the os, no output */
+        proc_report_foreign(out, pid, pid_exists(pid));
+    } else {
         buf_clear(out);
-        buf_appendf(out, "PID %lld was not spawned by this server", pid);
+        buf_append_str(out, "pid must be a positive process id");
         *is_error = true;
         return;
     }
-    proc_reap(p);
-    proc_report(out, p);
     sanitize_utf8(out);
 }
 
@@ -2885,20 +2922,29 @@ static void tool_process_wait(const cJSON *args, buf_t *out, bool *is_error) {
         return;
     }
     proc_rec_t *p = proc_find(pid);
-    if (!p) { /* a pid this server did not spawn gets no output */
+    if (p) { /* this server spawned it: the full report */
+        double t0 = mono_now();
+        for (;;) {
+            proc_reap(p);
+            if (p->exited) break;
+            if (mono_now() - t0 >= (double)timeout) break;
+            msleep(50);
+        }
+        proc_report(out, p);
+    } else if (pid > 0) { /* any other pid in the os, no output */
+        bool alive = pid_exists(pid);
+        double t0 = mono_now();
+        while (alive && mono_now() - t0 < (double)timeout) {
+            msleep(50);
+            alive = pid_exists(pid);
+        }
+        proc_report_foreign(out, pid, alive);
+    } else {
         buf_clear(out);
-        buf_appendf(out, "PID %lld was not spawned by this server", pid);
+        buf_append_str(out, "pid must be a positive process id");
         *is_error = true;
         return;
     }
-    double t0 = mono_now();
-    for (;;) {
-        proc_reap(p);
-        if (p->exited) break;
-        if (mono_now() - t0 >= (double)timeout) break;
-        msleep(50);
-    }
-    proc_report(out, p);
     sanitize_utf8(out);
 }
 

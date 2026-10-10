@@ -1682,9 +1682,26 @@ static void test_builtin(void) {
           "builtin: process_exec empty cmdline is an error");
     free(t);
 
+    /* foreign pids: state only, no output. the test process itself is
+       running, 999999999 is gone, 0 is not a process id */
+    char fown[64];
+    snprintf(fown, sizeof fown, "{\"pid\":%ld}", (long)getpid());
+    t = bc_call("process_status", fown, &ie);
+    check(!ie && t && strstr(t, "is still running") &&
+              strstr(t, "not spawned by this server") &&
+              !strstr(t, "Last three output lines"),
+          "builtin: process_status of a foreign running pid");
+    free(t);
+
     t = bc_call("process_status", "{\"pid\":999999999}", &ie);
-    check(ie && t && strstr(t, "was not spawned"),
-          "builtin: process_status foreign pid is an error");
+    check(!ie && t && strstr(t, "is not running") &&
+              strstr(t, "not spawned by this server"),
+          "builtin: process_status of a foreign dead pid");
+    free(t);
+
+    t = bc_call("process_status", "{\"pid\":0}", &ie);
+    check(ie && t && strstr(t, "positive process id"),
+          "builtin: process_status of pid 0 is an error");
     free(t);
 
     /* the 10s wait ends with the running reply; process_status then
@@ -1723,18 +1740,45 @@ static void test_builtin(void) {
         free(fin);
     }
 
-    /* process_wait: a bad timeout or a foreign pid is an error, then a
-       live pid shows both ends - the timeout expiring while it runs,
-       and the termination beating a longer one */
-    t = bc_call("process_wait", "{\"pid\":999999999,\"timeout\":1}", &ie);
-    check(ie && t && strstr(t, "was not spawned"),
-          "builtin: process_wait foreign pid is an error");
-    free(t);
-
+    /* process_wait: a bad timeout is an error, then a live pid shows
+       both ends - the timeout expiring while it runs, and the
+       termination beating a longer one */
     t = bc_call("process_wait", "{\"pid\":999999999,\"timeout\":-1}", &ie);
     check(ie && t && strstr(t, "timeout must be between"),
           "builtin: process_wait out-of-range timeout is an error");
     free(t);
+
+    t = bc_call("process_wait", "{\"pid\":0,\"timeout\":1}", &ie);
+    check(ie && t && strstr(t, "positive process id"),
+          "builtin: process_wait of pid 0 is an error");
+    free(t);
+
+    /* a foreign pid this time: forked here, never through process_exec
+       - the wait sees it running, then gone, with no output */
+    pid_t fpid = fork();
+    if (fpid == 0) { /* quiet for longer than the first timeout */
+        sleep(3);
+        _exit(0);
+    }
+    check(fpid > 0, "builtin: process_wait foreign pid setup");
+    if (fpid > 0) {
+        char fargs[64];
+        snprintf(fargs, sizeof fargs, "{\"pid\":%d,\"timeout\":1}", (int)fpid);
+        t = bc_call("process_wait", fargs, &ie);
+        check(!ie && t && strstr(t, "is still running") &&
+                  strstr(t, "not spawned by this server") &&
+                  !strstr(t, "Last three output lines"),
+              "builtin: process_wait foreign pid timeout expiry");
+        free(t);
+        kill(fpid, SIGKILL);
+        waitpid(fpid, NULL, 0); /* reaped, so no zombie masks the exit */
+        snprintf(fargs, sizeof fargs, "{\"pid\":%d,\"timeout\":30}", (int)fpid);
+        t = bc_call("process_wait", fargs, &ie);
+        check(!ie && t && strstr(t, "is not running") &&
+                  strstr(t, "not spawned by this server"),
+              "builtin: process_wait foreign pid termination");
+        free(t);
+    }
 
     t = bc_call("process_exec", "{\"cmdline\":\"echo waiting; sleep 12\"}",
                 &ie);

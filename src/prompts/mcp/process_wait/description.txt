@@ -1,1 +1,1 @@
-Wait for a spawned process to terminate
+Wait for a process to terminate
