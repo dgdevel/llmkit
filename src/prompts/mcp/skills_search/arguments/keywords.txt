@@ -1,1 +1,1 @@
-Space-separated keywords, case-insensitive; a skill matches when its text contains any of them
+Space-separated keywords, case-insensitive
