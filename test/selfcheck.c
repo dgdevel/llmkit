@@ -1618,6 +1618,25 @@ static void test_builtin(void) {
           "builtin: files_list line format");
     free(t);
 
+    /* files_list holds at the directory's own entries unless asked to
+       descend */
+    t = bc_call("file_create",
+                "{\"path\":\"/tmp/llmkit-test-builtin/sub/deep.txt\","
+                "\"content\":\"deep\\n\"}", &ie);
+    check(!ie && t, "builtin: file_create nested parent dirs");
+    free(t);
+    t = bc_call("files_list", "{\"path\":\"/tmp/llmkit-test-builtin\","
+                              "\"regex\":\"deep\"}", &ie);
+    check(!ie && t && !strstr(t, "deep.txt"),
+          "builtin: files_list stays on the top level by default");
+    free(t);
+    t = bc_call("files_list", "{\"path\":\"/tmp/llmkit-test-builtin\","
+                              "\"regex\":\"deep\","
+                              "\"recurse_subdirectories\":true}", &ie);
+    check(!ie && t && strstr(t, "sub/deep.txt"),
+          "builtin: files_list descends when asked");
+    free(t);
+
     t = bc_call("files_search", "{\"path\":\"/tmp/llmkit-test-builtin\","
                                 "\"regex\":\"alpha|x$\"}", &ie);
     check(!ie && t && strstr(t, "notes.txt") &&

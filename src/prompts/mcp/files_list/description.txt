@@ -1,1 +1,1 @@
-List a filesystem tree recursively. Only entries whose path matches the regex anywhere are kept.
+List a filesystem tree: the entries of a directory, subdirectories included when recurse_subdirectories is set. Only entries whose path matches the regex anywhere are kept.

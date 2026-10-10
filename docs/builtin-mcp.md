@@ -47,7 +47,7 @@ empty description.
 |---|---|---|
 | `web_search` | `keywords: string` | search results block |
 | `web_fetch` | `url: string` | the page as markdown |
-| `files_list` | `path: string, regex: string` | one line per entry |
+| `files_list` | `path: string, regex: string, recurse_subdirectories: bool = false` | one line per entry |
 | `files_search` | `path: string, regex: string` | entries plus matching line numbers |
 | `file_read` | `path: string, lines_offset: int, lines_length: int` | the requested lines |
 | `file_create` | `path: string, content: string, overwrite: bool = false` | confirmation |
@@ -83,11 +83,13 @@ tool response is the markdown of the page, title first as a `#` heading.
 Pages that are not html (by content type) or have no readable content are
 errors.
 
-### files_list(path, regex)
+### files_list(path, regex, recurse_subdirectories=false)
 
-Lists the tree under `path` recursively (alphabetical, pre-order:
-directories are listed before their contents), keeping only entries whose
-path matches the regex anywhere. Paths are answered relative when the
+Lists the tree under `path` (alphabetical, pre-order: directories are
+listed before their contents), keeping only entries whose path matches
+the regex anywhere. A `path` that is a directory lists its own entries
+only, unless `recurse_subdirectories` is true, which descends into the
+subdirectories too. Paths are answered relative when the
 given path is relative, absolute when it is absolute:
 
 ```
@@ -111,9 +113,10 @@ the line count.
 
 ### files_search(path, regex)
 
-Same walk as `files_list`, but the regex matches line *content*: every
-textual file under `path` (16Mb cap per file) whose lines match is listed
-with the matching line numbers, comma separated:
+Same walk as `files_list` with `recurse_subdirectories` set, but the
+regex matches line *content*: every textual file under `path` (16Mb cap
+per file) whose lines match is listed with the matching line numbers,
+comma separated:
 
 ```
 ${permissions} ${size}${, lines} ${path}

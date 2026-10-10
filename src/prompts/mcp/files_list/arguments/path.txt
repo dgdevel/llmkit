@@ -1,1 +1,1 @@
-Root of the walk: a directory is walked recursively, a single file is listed once.
+Starting point, root of the walk
