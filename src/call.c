@@ -402,6 +402,30 @@ cJSON *call_build_tools(const call_cfg_t *c, const char *exe_path) {
     return t;
 }
 
+/* the agent surface's tools record: the proxies' record plus the
+   built-in generic-use server (`llmkit builtin-mcp` on stdio), one
+   record owning the whole server set */
+cJSON *call_build_agent_tools(const call_cfg_t *c, const char *exe_path) {
+    cJSON *t = call_build_tools(c, exe_path);
+    if (!t) {
+        t = cJSON_CreateObject();
+        if (!t) return NULL;
+        cJSON_AddStringToObject(t, "type", "tools");
+        cJSON_AddArrayToObject(t, "tools");
+    }
+    buf_t cl;
+    buf_init(&cl);
+    call_shell_quote(&cl, exe_path);
+    buf_append_str(&cl, " builtin-mcp");
+    cJSON *srv = cJSON_CreateObject();
+    cJSON_AddStringToObject(srv, "type", "stdio");
+    cJSON_AddStringToObject(srv, "name", "builtin");
+    cJSON_AddStringToObject(srv, "command_line", cl.data);
+    buf_free(&cl);
+    cJSON_AddItemToArray(cJSON_GetObjectItemCaseSensitive(t, "tools"), srv);
+    return t;
+}
+
 cJSON *call_build_user(const char *prompt) {
     return text_record("user", prompt);
 }

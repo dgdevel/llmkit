@@ -20,6 +20,9 @@ static int usage(FILE *out) {
           "                         text on stdout\n"
           "  repl <flags>           interactive chat: type the turns, see\n"
           "                         thinking and tool calls as they happen\n"
+          "  agent <flags>          the repl with the built-in mcp tools,\n"
+          "                         AGENTS.md instructions and an optional\n"
+          "                         --conversation-store\n"
           "  mcp-repl <flags>       interactive tool console for one mcp\n"
           "                         server: tab-completed calls, one\n"
           "                         timing line each\n"
@@ -68,6 +71,7 @@ int main(int argc, char **argv) {
     }
     if (!strcmp(cmd, "call")) return cmd_call(argc, argv);
     if (!strcmp(cmd, "repl")) return cmd_repl(argc, argv);
+    if (!strcmp(cmd, "agent")) return cmd_agent_repl(argc, argv);
     if (!strcmp(cmd, "mcp-repl")) return cmd_mcp_repl(argc, argv);
     if (!strcmp(cmd, "prettyprint")) {
         if (argc > 3) return usage(stderr);

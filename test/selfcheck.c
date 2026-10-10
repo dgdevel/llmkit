@@ -3,6 +3,7 @@
    state machine (flush/steering/drop rule/max rounds/sigint), mcp client
    (fake child servers), mcp proxy, call (argv compilation, scripted runs). */
 #include "llmkit.h"
+#include "prompts.gen.h"
 
 #include <signal.h>
 #include <stdlib.h>
@@ -103,7 +104,8 @@ typedef struct fwire {
 } fwire_t;
 
 /* the system text the engine carries at its first turn, captured by
-   fwire_turn (one buffer, read right after the session under test) */
+   fwire_turn (one buffer, read right after the session under test);
+   multi-block system records join with \n - the openai wire's join */
 static char g_seen_system[512];
 
 static void capture_system(const engine_t *e) {
@@ -111,12 +113,18 @@ static void capture_system(const engine_t *e) {
     if (!e || !e->system) return;
     const cJSON *content =
         cJSON_GetObjectItemCaseSensitive(e->system, "content");
-    const cJSON *c = cJSON_IsArray(content) ? content->child : NULL;
-    if (!c) return;
-    const cJSON *tx = cJSON_GetObjectItemCaseSensitive(c, "text");
-    if (cJSON_IsString(tx))
-        snprintf(g_seen_system, sizeof g_seen_system, "%s",
-                 tx->valuestring ? tx->valuestring : "");
+    if (!cJSON_IsArray(content)) return;
+    buf_t b;
+    buf_init(&b);
+    for (const cJSON *c = content->child; c; c = c->next) {
+        const cJSON *tx = cJSON_GetObjectItemCaseSensitive(c, "text");
+        if (!cJSON_IsString(tx) || !tx->valuestring) continue;
+        if (b.len) buf_append_byte(&b, '\n');
+        buf_append_str(&b, tx->valuestring);
+    }
+    snprintf(g_seen_system, sizeof g_seen_system, "%s",
+             b.data ? b.data : "");
+    buf_free(&b);
 }
 
 static int fwire_turn(wire_t *base, engine_t *e, turn_out_t *out) {
@@ -3093,6 +3101,334 @@ static void test_repl(void) {
     }
 }
 
+/* ================= agent (repl surface + extras) ================= */
+
+static repl_out_t repl_session_opt(call_cfg_t *c, const repl_opts_t *o,
+                                   const char *script, size_t sn) {
+    repl_out_t r = { NULL, 0, 0 };
+    int fd = pipe_feed(script, sn);
+    check(fd >= 0, "agent: pipe feed");
+    char *ob = NULL;
+    size_t on = 0;
+    FILE *out = open_memstream(&ob, &on);
+    r.rc = repl_run_ex(c, o, fd, out, "/x", script_factory);
+    fclose(out);
+    close(fd);
+    r.ob = ob;
+    r.on = on;
+    return r;
+}
+
+static void test_agent(void) {
+    call_cfg_t c;
+    char err[256];
+    char cwd[1024];
+    check(getcwd(cwd, sizeof cwd) != NULL, "agent: getcwd");
+
+    /* ---- the one extra flag: extraction, compaction, errors ---- */
+    {
+        char *av[] = {"--openai", "http://x", "--conversation-store",
+                      "/tmp/s.jsonl", "--model", "m"};
+        const char *store = NULL;
+        int n = repl_store_extract(6, av, &store, err, sizeof err);
+        check(n == 4, "agent: store extraction compacts the range");
+        check_str(av[0], "--openai", "agent: compaction keeps argv order");
+        check_str(av[3], "m", "agent: compaction drops only the flag pair");
+        check_str(store, "/tmp/s.jsonl", "agent: store path extracted");
+        char *av2[] = {"--openai", "--conversation-store"};
+        check(repl_store_extract(2, av2, &store, err, sizeof err) == -1 &&
+              strstr(err, "missing value") != NULL,
+              "agent: missing store value is a usage error");
+        char *av3[] = {"--conversation-store", "a", "--conversation-store",
+                       "b"};
+        check(repl_store_extract(4, av3, &store, err, sizeof err) == -1 &&
+              strstr(err, "given twice") != NULL,
+              "agent: store flag twice is a usage error");
+    }
+    {
+        /* the repl surface does not know the flag */
+        char *av[] = {"--openai", "http://x", "--conversation-store", "s"};
+        check(call_parse_ex(4, av, &c, err, sizeof err, false) == 1 &&
+              strstr(err, "unknown flag '--conversation-store'") != NULL,
+              "agent: --conversation-store is agent-only");
+    }
+
+    /* ---- the tools record: proxies first, the built-in server last ---- */
+    {
+        char *av[] = {"--openai", "http://x", "--mcp-proxy", "/tmp/fs.jsonl"};
+        check(call_parse_ex(4, av, &c, err, sizeof err, false) == 0,
+              "agent: proxy vector parses");
+        cJSON *t = call_build_agent_tools(&c, "/bin");
+        buf_t b;
+        buf_init(&b);
+        buf_append_tree(&b, t);
+        cJSON_Delete(t);
+        check_str(b.data,
+                  "{\"type\":\"tools\",\"tools\":[{\"type\":\"stdio\","
+                  "\"name\":\"fs\",\"command_line\":\"'/bin' mcp-proxy "
+                  "'/tmp/fs.jsonl'\"},{\"type\":\"stdio\",\"name\":"
+                  "\"builtin\",\"command_line\":\"'/bin' builtin-mcp\"}]}",
+                  "agent: tools record carries proxies and the built-in");
+        buf_free(&b);
+        call_cfg_free(&c);
+
+        char *av2[] = {"--openai", "http://x"};
+        check(call_parse_ex(2, av2, &c, err, sizeof err, false) == 0,
+              "agent: bare vector parses");
+        t = call_build_agent_tools(&c, "/bin");
+        buf_init(&b);
+        buf_append_tree(&b, t);
+        cJSON_Delete(t);
+        check_str(b.data,
+                  "{\"type\":\"tools\",\"tools\":[{\"type\":\"stdio\","
+                  "\"name\":\"builtin\",\"command_line\":\"'/bin' "
+                  "builtin-mcp\"}]}",
+                  "agent: without proxies the built-in rides alone");
+        buf_free(&b);
+        call_cfg_free(&c);
+    }
+
+    /* ---- sessions: the agent default prompt, AGENTS.md, builtin ---- */
+    system("rm -rf /tmp/llmkit-test-agent");
+    system("mkdir -p /tmp/llmkit-test-agent/empty");
+    {
+        fturn_t turns[] = {
+            { .recs = (const char *[]){
+                  "{\"type\":\"response\",\"text\":\"ok\",\"partial\":false}"},
+              .nrecs = 1, .kind = TURN_FINAL, .abort_after = -1 },
+        };
+        repl_opts_t o = { .default_prompt = prompt_system_prompts_agent,
+                          .builtin_mcp = true,
+                          .agents_md = true };
+        check(chdir("/tmp/llmkit-test-agent/empty") == 0,
+              "agent: chdir to the clean dir");
+        g_factory_wire = fwire_new(turns, 1);
+        repl_cfg(&c, PROTO_OPENAI);
+        repl_out_t r = repl_session_opt(&c, &o, "hi\n", 3);
+        check(r.rc == EXIT_OK, "agent: session exits 0");
+        check_str(g_seen_system,
+                  "You are a helpful assistant with tool access. Use the "
+                  "built-in tools when they help: search or fetch the web "
+                  "for current information, work with the files of the "
+                  "workspace, run commands when the task needs them.\n",
+                  "agent: the bundled agent prompt is compiled in");
+        /* the built-in server is attached: the fake exe fails to spawn,
+           a non required server's connect_failed renders, the turn runs */
+        check(strstr(r.ob, "! connect_failed: mcp server 'builtin':") !=
+                  NULL,
+              "agent: the built-in server is attached (connect attempted)");
+        check(strstr(r.ob, "ok\n") != NULL, "agent: the turn still ran");
+        repl_session_free(&r);
+        call_cfg_free(&c);
+
+        /* AGENTS.md: second system block after the prompt, prefixed */
+        write_file("/tmp/llmkit-test-agent/empty/AGENTS.md",
+                   "Keep answers short.\n");
+        g_factory_wire = fwire_new(turns, 1);
+        repl_cfg(&c, PROTO_OPENAI);
+        r = repl_session_opt(&c, &o, "hi\n", 3);
+        check(r.rc == EXIT_OK, "agent: AGENTS.md session exits 0");
+        check_str(g_seen_system,
+                  "You are a helpful assistant with tool access. Use the "
+                  "built-in tools when they help: search or fetch the web "
+                  "for current information, work with the files of the "
+                  "workspace, run commands when the task needs them.\n"
+                  "\n"
+                  "##### Content of AGENTS.md #####\n"
+                  "Keep answers short.\n",
+                  "agent: AGENTS.md rides as the second system block");
+        repl_session_free(&r);
+        call_cfg_free(&c);
+
+        /* an explicit --system-prompt stays the first block */
+        g_factory_wire = fwire_new(turns, 1);
+        repl_cfg(&c, PROTO_OPENAI);
+        c.system = strdup("custom");
+        r = repl_session_opt(&c, &o, "hi\n", 3);
+        check(r.rc == EXIT_OK, "agent: override session exits 0");
+        check_str(g_seen_system,
+                  "custom\n##### Content of AGENTS.md #####\n"
+                  "Keep answers short.\n",
+                  "agent: AGENTS.md follows an explicit prompt too");
+        repl_session_free(&r);
+        call_cfg_free(&c);
+    }
+    check(chdir(cwd) == 0, "agent: chdir back");
+
+    /* ---- the conversation store: append, byte-exact records ---- */
+    {
+        fturn_t turns[] = {
+            { .recs = (const char *[]){
+                  "{\"type\":\"response\",\"text\":\"Wor\",\"partial\":true}",
+                  "{\"type\":\"response\",\"text\":\"ld\",\"partial\":true}",
+                  "{\"type\":\"response\",\"text\":\"\",\"partial\":"
+                  "false,\"finish_reason\":\"stop\"}"},
+              .nrecs = 3, .kind = TURN_FINAL, .abort_after = -1 },
+            { .recs = (const char *[]){
+                  "{\"type\":\"thinking\",\"text\":\"hmm\",\"partial\":true}",
+                  "{\"type\":\"thinking\",\"text\":\"\",\"partial\":false,"
+                  "\"signature\":\"s\"}",
+                  "{\"type\":\"response\",\"text\":\"Two\",\"partial\":"
+                  "false}"},
+              .nrecs = 3, .kind = TURN_FINAL, .abort_after = -1 },
+            { .recs = (const char *[]){
+                  "{\"type\":\"response\",\"text\":\"Three\",\"partial\":"
+                  "false}"},
+              .nrecs = 1, .kind = TURN_FINAL, .abort_after = -1 },
+        };
+        repl_opts_t o = { .store = "/tmp/llmkit-test-agent/store.jsonl" };
+        g_factory_wire = fwire_new(turns, 3);
+        repl_cfg(&c, PROTO_OPENAI);
+        repl_out_t r = repl_session_opt(&c, &o, "one\ntwo\n", 7);
+        check(r.rc == EXIT_OK, "agent: store session exits 0");
+        buf_t want;
+        buf_init(&want);
+        golden_rule(&want, '=');
+        buf_append_str(&want, "one\n");
+        golden_rule(&want, '-');
+        buf_append_str(&want, "World\n");
+        golden_timing(&want);
+        golden_rule(&want, '=');
+        buf_append_str(&want, "two\n");
+        golden_rule(&want, '-');
+        buf_append_str(&want, "hmm\n");
+        golden_rule(&want, '-');
+        buf_append_str(&want, "Two\n");
+        golden_timing(&want);
+        char *norm = repl_norm(r.ob);
+        check_str(norm, want.data, "agent: store session renders as repl");
+        free(norm);
+        buf_free(&want);
+        repl_session_free(&r);
+        call_cfg_free(&c);
+        /* the store: completed records only, one jsonl line each */
+        FILE *sf = fopen("/tmp/llmkit-test-agent/store.jsonl", "r");
+        check(sf != NULL, "agent: the store file exists");
+        if (sf) {
+            char line[512];
+            bool ok = true;
+            const char *want_lines[] = {
+                "{\"type\":\"user\",\"content\":[{\"type\":\"text\","
+                "\"text\":\"one\"}]}",
+                "{\"type\":\"response\",\"text\":\"Wor\",\"partial\":true}",
+                "{\"type\":\"response\",\"text\":\"ld\",\"partial\":true}",
+                "{\"type\":\"response\",\"text\":\"\",\"partial\":"
+                "false,\"finish_reason\":\"stop\"}",
+                "{\"type\":\"user\",\"content\":[{\"type\":\"text\","
+                "\"text\":\"two\"}]}",
+                "{\"type\":\"thinking\",\"text\":\"hmm\",\"partial\":true}",
+                "{\"type\":\"thinking\",\"text\":\"\",\"partial\":false,"
+                "\"signature\":\"s\"}",
+                "{\"type\":\"response\",\"text\":\"Two\",\"partial\":false}",
+            };
+            for (size_t i = 0; i < sizeof want_lines / sizeof want_lines[0];
+                 i++) {
+                if (!fgets(line, sizeof line, sf)) {
+                    ok = false;
+                    break;
+                }
+                line[strcspn(line, "\n")] = '\0';
+                if (strcmp(line, want_lines[i])) {
+                    ok = false;
+                    break;
+                }
+            }
+            check(ok, "agent: the store carries the conversation verbatim");
+            check(fgets(line, sizeof line, sf) == NULL,
+                  "agent: the store has nothing beyond the turn records");
+            fclose(sf);
+        }
+
+        /* ---- resume: the store replays fully, then the prompt ---- */
+        g_factory_wire = fwire_new(turns, 3);
+        repl_cfg(&c, PROTO_OPENAI);
+        r = repl_session_opt(&c, &o, "", 0);
+        check(r.rc == EXIT_OK, "agent: replay-only session exits 0");
+        buf_init(&want);
+        golden_rule(&want, '=');
+        buf_append_str(&want, "one\n");
+        golden_rule(&want, '-');
+        buf_append_str(&want, "World\n");
+        golden_rule(&want, '=');
+        buf_append_str(&want, "two\n");
+        golden_rule(&want, '-');
+        buf_append_str(&want, "hmm\n");
+        golden_rule(&want, '-');
+        buf_append_str(&want, "Two\n");
+        char *norm2 = repl_norm(r.ob);
+        check_str(norm2, want.data,
+                  "agent: an existing store replays before the prompt");
+        free(norm2);
+        buf_free(&want);
+        repl_session_free(&r);
+        call_cfg_free(&c);
+
+        /* ---- resume and continue: history rides the transcript ---- */
+        {
+            fturn_t turn3[] = {
+                { .recs = (const char *[]){
+                      "{\"type\":\"response\",\"text\":\"Three\","
+                      "\"partial\":false}"},
+                  .nrecs = 1, .kind = TURN_FINAL, .abort_after = -1 },
+            };
+            g_factory_wire = fwire_new(turn3, 1);
+            repl_cfg(&c, PROTO_OPENAI);
+            r = repl_session_opt(&c, &o, "back\n", 5);
+            check(r.rc == EXIT_OK, "agent: resume session exits 0");
+            check(strstr(r.ob, "World") != NULL &&
+                      strstr(r.ob, "Three") != NULL,
+                  "agent: replay then the new turn, in order");
+            {
+                size_t rules = 0;
+                char *norm3 = repl_norm(r.ob);
+                for (const char *q = norm3; (q = strstr(q, "@=\n")) != NULL;
+                     q++)
+                    rules++;
+                check(rules == 3, "agent: replayed users keep their blocks");
+                free(norm3);
+            }
+            repl_session_free(&r);
+            call_cfg_free(&c);
+        }
+        {
+            int lines = 0;
+            char linebuf[512];
+            FILE *sf2 = fopen("/tmp/llmkit-test-agent/store.jsonl", "r");
+            check(sf2 != NULL, "agent: resumed store opens");
+            while (sf2 && fgets(linebuf, sizeof linebuf, sf2)) lines++;
+            check(lines == 10, "agent: the resumed store grew by two lines");
+            if (sf2) fclose(sf2);
+        }
+
+        /* ---- a malformed store is the invalid_record tier ---- */
+        write_file("/tmp/llmkit-test-agent/bad.jsonl", "{\"type\":\"user\"");
+        repl_opts_t bad = { .store = "/tmp/llmkit-test-agent/bad.jsonl" };
+        g_factory_wire = fwire_new(turns, 3);
+        repl_cfg(&c, PROTO_OPENAI);
+        r = repl_session_opt(&c, &bad, "hi\n", 3);
+        check(r.rc == EXIT_INVALID_RECORD,
+              "agent: malformed store exits 2 before any turn");
+        check(strstr(r.ob, "! invalid_record:") != NULL,
+              "agent: the malformed store's error line rendered");
+        check(strstr(r.ob, "World") == NULL,
+              "agent: no turn ran over a malformed store");
+        repl_session_free(&r);
+        call_cfg_free(&c);
+
+        /* ---- a store that cannot be opened is the io tier ---- */
+        repl_opts_t dir = { .store = "/tmp/llmkit-test-agent" };
+        g_factory_wire = fwire_new(turns, 3);
+        repl_cfg(&c, PROTO_OPENAI);
+        r = repl_session_opt(&c, &dir, "hi\n", 3);
+        check(r.rc == EXIT_IO_ERROR, "agent: an unopenable store exits 7");
+        check(strstr(r.ob, "! io_error:") != NULL,
+              "agent: the unopenable store's error line rendered");
+        repl_session_free(&r);
+        call_cfg_free(&c);
+    }
+    system("rm -rf /tmp/llmkit-test-agent");
+}
+
 /* ================= mcp-repl (design sec.16) ================= */
 
 /* the golden token of a call's timing line: the measured span normalized
@@ -4460,6 +4796,8 @@ int main(void) {
     test_call();
     fprintf(stderr, "selfcheck: repl\n");
     test_repl();
+    fprintf(stderr, "selfcheck: agent\n");
+    test_agent();
     fprintf(stderr, "selfcheck: mcp-repl\n");
     test_mcp_repl();
     fprintf(stderr, "selfcheck: terminal tools\n");

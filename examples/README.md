@@ -33,6 +33,8 @@ examples/
     |-- call-terminal-tool.sh     --terminal-tool ends it, exit 9, tool text
     |-- repl-minimal.sh           llmkit repl: the interactive chat
     |-- repl-scripted.sh          a piped session, one turn per line
+    |-- agent-store.sh            llmkit agent: built-in tools, AGENTS.md,
+    |                             a conversation store that resumes
     |-- mcp-repl.sh               a piped mcp-repl session over builtin-mcp
     |-- prettyprint.sh             a saved transcript rendered repl-style
     `-- proxy.sh                   llmkit proxy in front of ollama, one watched request

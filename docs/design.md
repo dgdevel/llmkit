@@ -26,6 +26,7 @@ details in sec.5 and sec.6. Where this document picks a ceiling, it is marked
 16. [mcp-repl](#16-mcp-repl)
 17. [prettyprint](#17-prettyprint)
 18. [llm-proxy](#18-llm-proxy)
+19. [agent](#19-agent)
 
 ## 1. technology choices
 
@@ -917,3 +918,43 @@ the same sink fed record by record instead of from a file - and
 blocks the next connection; per-connection threads the day a real
 client needs it. No ipv6 listen, no tls terminate, no request-body
 rewrite ever.
+
+
+## 19. agent
+
+Tenth entry point: `llmkit agent` (requirements sec.16). No new file -
+`src/repl.c` hosts it, the session loop and the display sink are
+literally the repl's; the extras hang off one `repl_opts_t` that
+`repl_run_ex` consumes and plain `repl_run` wraps with the repl
+defaults (the selfcheck drives both).
+
+- **the built-in server** - `call_build_agent_tools` (call.c, beside
+  the other argv->record builders) is `call_build_tools` plus one
+  stdio entry, name `builtin`, command line `'<self_exe>' builtin-mcp`
+  through `call_shell_quote`. `repl_run_ex` applies it after
+  `call_compile` - engine config snapshots replace, so the one record
+  owns proxies and built-in alike, `validate_tools`'s duplicate-name
+  rule included.
+- **AGENTS.md** - read from the working directory, BOM stripped,
+  UTF-8-checked, then one `system` record with two text blocks: the
+  effective prompt first, `##### Content of AGENTS.md #####` plus the
+  file second. Applied through the ordinary
+  `engine_apply_config_record` replace - no engine or wire change; the
+  multi-block system record was already the catalogue's shape.
+- **the store** - the write side is ten lines in the display sink
+  (`store_persist`): every transcript record the engine emits, one
+  `cJSON_PrintUnformatted` line per record, flushed per line, partials
+  included - a streamed block's text only exists whole as the
+  partial-plus-empty-final sequence, so the store is byte-honestly the
+  runner's stdout stream (minus config and control records). The read
+  side folds each line through `tlist_ingest` into the live transcript
+  and through `pretty_live` (pretty.c's record-by-record renderer, the
+  proxy's import) onto stdout - the replay is prettyprint's display,
+  free. A dangling trailing partial closes at load; the next turn
+  starts a fresh block. The `--conversation-store` flag is pulled from
+  the argv range before the shared parse (`repl_store_extract`), so
+  `call_parse_ex` stays the one parser and repl/call never see the
+  flag.
+`ponytail:` the store is one append-only jsonl file, no schema version,
+no lock file, no compaction - `prettyprint` reads it and a resumed
+session replays it, which is the whole feature.

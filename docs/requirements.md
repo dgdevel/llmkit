@@ -33,6 +33,7 @@ applies. Rules marked *(proposed)* are working desiderata, not yet frozen.
    - [cli surface](#cli-surface-2) - [session model](#session-model-1) - [call syntax](#call-syntax) - [display](#display-1) - [interrupts and exit codes](#interrupts-and-exit-codes-1)
 14. [llmkit prettyprint](#14-llmkit-prettyprint)
 15. [llmkit proxy](#15-llmkit-proxy)
+16. [llmkit agent](#16-llmkit-agent)
 
 ## 1. cli conventions
 
@@ -1405,3 +1406,99 @@ Deliberately not offered: tls on the listen side, ipv6 listen
 addresses, request paths other than the protocol's canonical one,
 non-POST methods, and any rewriting of the passing bytes - the proxy
 is a viewer, not a gateway.
+
+
+## 16. llmkit agent
+
+Sixteenth command: the repl's agentic sibling. The session model is
+[llmkit repl](#12-llmkit-repl)'s verbatim - same loop, same display,
+same interrupts, same exit codes - with three additions: the built-in
+mcp tools ride the conversation, the working directory's `AGENTS.md` is
+injected after the system prompt, and an optional `--conversation-store`
+persists the conversation and resumes it. Everything in sec.12 applies
+here except where this section says otherwise. Everything in this
+section is *(proposed)*.
+
+```
+llmkit agent (--anthropic | --openai | --openai-responses) <api_base>
+             [--key <token>] [--model <name>] [--max-tokens <n>]
+             [--reasoning-effort <value>]
+             [--system-prompt <text>]
+             [--header <name=value>]... [--mcp-proxy <config>]...
+             [--terminal-tool <name.tool>]...
+             [--conversation-store <file>]
+```
+
+### cli surface
+
+Every flag of [llmkit repl](#12-llmkit-repl) keeps its meaning, count,
+repeat rules, usage-error catalog and two error tiers, `--prompt`
+included in its nonexistence. One flag is added:
+
+- `--conversation-store <file>` - optional, given at most once; a
+  second occurrence or a missing value is a usage error (stderr, exit 1).
+  Given to `repl` or `call` it is an unknown flag - the surface is the
+  agent's own.
+
+### the built-in tools
+
+The command line compiles to repl's leading records, plus one `tools`
+record change: the built-in generic-use server (docs/builtin-mcp.md -
+`llmkit builtin-mcp` on stdio, name `builtin`) is appended to the
+`--mcp-proxy` servers' record, one record owning the whole server set.
+The built-in server is not `required`: a failed connect is the
+non-fatal `connect_failed`, rendered, and the session continues without
+its tools. The server name participates in the duplicate-name rule: an
+`--mcp-proxy` config whose derived name is `builtin` collides and is
+the `invalid_record` tier, exit 2.
+
+### system prompt and AGENTS.md
+
+Without `--system-prompt` the session starts from the bundled agent
+prompt (`src/prompts/system_prompts/agent.txt`, the built-in tools'
+usage guidance); the flag's text replaces it as in repl. When the
+working directory contains an `AGENTS.md`, its content is injected as a
+second `system` content block, after the prompt's own block, prefixed
+with the line `##### Content of AGENTS.md #####` - two blocks in one
+record, the record catalogue's shape for separated system entries (the
+anthropic wire sends them as two native system blocks; openai flavors
+join blocks with `\n`). A leading BOM is an editor artifact, not
+content; an `AGENTS.md` that is not valid UTF-8 is the `invalid_record`
+tier, exit 2. No `AGENTS.md`, no injection.
+
+### the conversation store
+
+Without `--conversation-store` the session is repl's: the transcript
+lives in memory and dies with the process. With it:
+
+- **format** - the store is the conversation as jsonl, the runner's
+  record catalogue: one line per `user`, `thinking`, `response`,
+  `tool_request`, `tool_response` and `error` record, streaming
+  partials included (a streamed block exists whole only as partial
+  chunks plus its empty-text final; the sequence is what folds back).
+  Config and control records are not conversation and never stored.
+  The store is append-only during a session, flushed per line.
+- **resume** - the session starts by reading the store, when the file
+  exists: the records fold into the new transcript (the conversation
+  continues with its whole history) and replay fully on stdout, in
+  `prettyprint`'s display (sec.14 - the repl's shapes applied to
+  records, per-block usage lines instead of timing lines), before the
+  first prompt is offered. A store that ends mid-block (an interrupted
+  turn's trailing partial) has that block closed; the next turn starts
+  a fresh one.
+- **errors** - a store line that is malformed json, an unknown record
+  or an invalid `user` record, or a byte-rule violation, ends the
+  session before any turn: `! invalid_record`, exit 2. A store that
+  cannot be opened for reading is a fresh conversation (no file) or
+  `! io_error`, exit 7 (anything else); one that cannot be opened for
+  appending is `! io_error`, exit 7. A write failure during the session
+  is noted and rendered at its end (`! io_error`, exit 7 when the
+  session would otherwise exit 0); the session itself is not cut.
+- **what a resume loses** - an interrupted turn's trailing partial is
+  stored and shown on replay, but unsigned thinking rides the same
+  rules as always; timing lines are display, not records, and are not
+  stored.
+
+Deliberately not offered: store compaction or rotation, more than one
+store per session, flags overriding the `AGENTS.md` path or the
+built-in server's name, and everything on repl's own not-offered list.

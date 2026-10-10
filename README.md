@@ -5,6 +5,7 @@ A single static-purpose executable for llm interaction from the shell and from o
 | command | what it does |
 |---|---|
 | `llmkit repl <flags>` | the interactive chat: type the turns, watch thinking and tool calls render live |
+| `llmkit agent <flags>` | the repl with the built-in mcp tools, `AGENTS.md` instructions and an optional `--conversation-store` to persist and resume the conversation |
 | `llmkit call <flags>` | one prompt in, one answer out: plain text on stdout, the shell one-liner front-end |
 | `llmkit runner` | runs an llm conversation: jsonl records on stdin, jsonl records on stdout |
 | `llmkit agent-as-tool <seed.jsonl>` | exposes one agent conversation as a single `invoke` tool on a stdio mcp interface |
@@ -37,6 +38,19 @@ The user asks simple arithmetic.
 ```
 
 Every separator line is stamped with the wall clock, and each turn that finishes its answer prints its timing: time to first token (prompt processing), thinking generation, response generation.
+
+For work that needs hands there is `llmkit agent`: the same chat with the [built-in mcp tools](docs/builtin-mcp.md) attached - web search and fetch, file tools, process tools, skills - and the working directory's `AGENTS.md` injected after the system prompt. `--conversation-store <file>` persists the conversation as jsonl and resumes it: an existing store replays in full before the first prompt, then the session continues where it left off.
+
+```sh
+$ llmkit agent --openai http://localhost:11434/v1 --model llama3.1 \
+      --conversation-store ~/chats/project.jsonl
+[10:31:04] =====================================================================
+list the failing tests and fix them
+[10:31:05] ---------------------------------------------------------------------
+builtin.files_search {"path":".","regex":"FAIL"}
+[10:31:06] ---------------------------------------------------------------------
+...
+```
 
 On the tool side of the house there is `llmkit mcp-repl`: a repl dedicated to one mcp server, the tool-debugging front-end. No model in the loop - the command line names one server (`--stdio`, `--http`, `--sse`), the connection's `tools/list` becomes the vocabulary, and every line is one direct call:
 

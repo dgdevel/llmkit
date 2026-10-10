@@ -668,6 +668,9 @@ int call_parse(int argc, char **argv, call_cfg_t *c, char *err, size_t errsz);
 cJSON *call_build_llm(const call_cfg_t *c);
 cJSON *call_build_system(const call_cfg_t *c); /* NULL when absent */
 cJSON *call_build_tools(const call_cfg_t *c, const char *exe_path); /* NULL */
+/* call_build_tools plus the built-in server (`llmkit builtin-mcp` on
+   stdio, name "builtin") appended - the agent surface's one record */
+cJSON *call_build_agent_tools(const call_cfg_t *c, const char *exe_path);
 cJSON *call_build_user(const char *prompt);
 /* quote for the shell spawn_shell uses (posix sh / windows cmd.exe) */
 void call_shell_quote(buf_t *b, const char *s);
@@ -769,10 +772,30 @@ int mcp_repl_run(const mcp_repl_cfg_t *c, int in_fd, FILE *out);
 /* ================= repl.c ================= */
 
 cJSON *repl_build_options(void); /* stream_interval 0 (requirements sec.12) */
+
+/* the agent session's extras over the repl surface (design sec.12) */
+typedef struct repl_opts {
+    const char *default_prompt; /* the bundled default when --system-prompt
+                                   is absent; NULL = no default */
+    bool builtin_mcp;           /* attach the built-in mcp server */
+    bool agents_md;             /* inject ./AGENTS.md as a second system
+                                   content block, after the prompt */
+    const char *store;          /* conversation store path; NULL = none */
+} repl_opts_t;
+
 /* run the chat session: records compiled from c, input lines from in_fd,
    rendered transcript on out. Returns the exit code (design sec.12). */
 int repl_run(const call_cfg_t *c, int in_fd, FILE *out, const char *exe_path,
              wire_t *(*factory)(engine_t *));
+/* repl_run with the agent extras: the default prompt, the built-in mcp
+   server, AGENTS.md injection, conversation store load/persist */
+int repl_run_ex(const call_cfg_t *c, const repl_opts_t *o, int in_fd,
+                FILE *out, const char *exe_path,
+                wire_t *(*factory)(engine_t *));
+/* pull --conversation-store <path> out of the agent flag range, in
+   place; returns the compacted flag count, or -1 with err filled */
+int repl_store_extract(int argc, char **argv, const char **store,
+                       char *err, size_t errsz);
 
 /* ================= pretty.c ================= */
 
@@ -826,6 +849,7 @@ int cmd_proxy(const char *config_path);
 int cmd_builtin(void);
 int cmd_call(int argc, char **argv);
 int cmd_repl(int argc, char **argv);
+int cmd_agent_repl(int argc, char **argv); /* llmkit agent */
 int cmd_mcp_repl(int argc, char **argv);
 int cmd_prettyprint(const char *path); /* NULL or "-": stdin */
 int cmd_llmproxy(int argc, char **argv);
