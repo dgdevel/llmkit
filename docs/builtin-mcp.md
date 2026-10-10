@@ -1,8 +1,9 @@
 # builtin-mcp
 
 `llmkit builtin-mcp` is an mcp server on stdio exposing a set of
-generic-use tools: web search, web fetch, five file operations and two
-process operations. No arguments, no config file:
+generic-use tools: web search, web fetch, five file operations, two
+process operations and two agent-skill operations. No arguments, no
+config file:
 
 ```sh
 $ llmkit builtin-mcp < jsonrpc-on-stdin   # serves until eof
@@ -52,6 +53,8 @@ empty description.
 | `file_edit` | `path: string, oldString: string, newString: string, line_number: int` | confirmation |
 | `process_exec` | `cmdline: string` | exit code or pid + output tail |
 | `process_status` | `pid: int` | same report for one spawned pid |
+| `skills_search` | `keywords: string` | matching skills as records |
+| `skills_read` | `name: string` | the skill's SKILL.md text |
 
 ### web_search(keywords)
 
@@ -193,6 +196,33 @@ a command the shell cannot find reports 127.
 The same report for a pid spawned by this server - running or finished,
 whichever its current state is. A pid this server did not spawn is an
 error and reports no output.
+
+### skills_search(keywords)
+
+Scans the agent skills - `<cwd>/.agents/skills` first, then
+`$HOME/.agents/skills` (`USERPROFILE` on windows) - and matches every
+`<skill>/SKILL.md` whose text contains any of the space-separated
+keywords, case-insensitively. A skill's score is the total number of
+keyword occurrences in its file; results are sorted by score, highest
+first, ties keeping scan order (local root before the global one, each
+alphabetical). Every match is one record taken from the frontmatter,
+separated by a blank line:
+
+```
+name: Name of the skill
+description: Description of the skill
+```
+
+A missing frontmatter name falls back to the skill's directory name. No
+match answers `no matching skills`; when neither root exists the tool is
+an error.
+
+### skills_read(name)
+
+Searches the same roots in the same order and answers the full text of
+the first `<skill>/SKILL.md` whose directory name or frontmatter name
+equals `name` - the local root shadows the global one. An unknown name
+is an error.
 
 ## Regex flavor
 

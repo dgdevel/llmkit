@@ -1497,15 +1497,16 @@ static void test_builtin(void) {
             ? cJSON_GetObjectItemCaseSensitive(
                   cJSON_GetObjectItemCaseSensitive(r, "result"), "tools")
             : NULL;
-        check(cJSON_IsArray(tools) && cJSON_GetArraySize(tools) == 9,
-              "builtin: nine tools listed");
-        const char *want[9] = { "web_search",   "web_fetch",   "files_list",
-                                "files_search", "file_read",   "file_create",
-                                "file_edit",    "process_exec",
-                                "process_status" };
+        check(cJSON_IsArray(tools) && cJSON_GetArraySize(tools) == 11,
+              "builtin: eleven tools listed");
+        const char *want[11] = { "web_search",   "web_fetch",   "files_list",
+                                 "files_search", "file_read",   "file_create",
+                                 "file_edit",    "process_exec",
+                                 "process_status", "skills_search",
+                                 "skills_read" };
         bool names_ok = true, descs_set = true, args_set = true;
         if (cJSON_IsArray(tools))
-            for (int i = 0; i < 9; i++) {
+            for (int i = 0; i < 11; i++) {
                 const cJSON *t = cJSON_GetArrayItem(tools, i);
                 const cJSON *nm = cJSON_GetObjectItemCaseSensitive(t, "name");
                 if (!cJSON_IsString(nm) || strcmp(nm->valuestring, want[i]))
@@ -1720,6 +1721,71 @@ static void test_builtin(void) {
                   strstr(fin, ": started\n"),
               "builtin: process_status sees the completion");
         free(fin);
+    }
+
+    /* skills tools: fixed roots (<cwd>/.agents/skills, $HOME/.agents/
+       skills), so the test chdirs into a scratch tree and overrides HOME */
+    {
+        system("rm -rf /tmp/llmkit-test-skills");
+        system("mkdir -p /tmp/llmkit-test-skills/cwd/.agents/skills/beta "
+               "/tmp/llmkit-test-skills/home/.agents/skills/alpha");
+        write_file("/tmp/llmkit-test-skills/home/.agents/skills/alpha/SKILL.md",
+                   "---\nname: alpha\ndescription: the alpha skill\n---\n\n"
+                   "body mentions zebra once\n");
+        write_file("/tmp/llmkit-test-skills/cwd/.agents/skills/beta/SKILL.md",
+                   "---\nname: beta\ndescription: >-\n  the beta skill\n"
+                   "---\n\nzebra zebra zebra\n");
+        char cwdbuf[4096];
+        const char *oldcwd =
+            getcwd(cwdbuf, sizeof cwdbuf) ? cwdbuf : "/tmp";
+        const char *oldhome = getenv("HOME");
+        chdir("/tmp/llmkit-test-skills/cwd");
+        setenv("HOME", "/tmp/llmkit-test-skills/home", 1);
+
+        t = bc_call("skills_search", "{\"keywords\":\"zebra\"}", &ie);
+        check(!ie && t && strstr(t, "name: beta") && strstr(t, "name: alpha") &&
+                  strstr(t, "description: the beta skill") &&
+                  strstr(t, "description: the alpha skill") &&
+                  strstr(t, "name: beta") < strstr(t, "name: alpha"),
+              "builtin: skills_search orders by match count");
+        free(t);
+
+        t = bc_call("skills_search", "{\"keywords\":\"  \"}", &ie);
+        check(ie && t && strstr(t, "keywords must not be empty"),
+              "builtin: skills_search empty keywords is an error");
+        free(t);
+
+        t = bc_call("skills_search", "{\"keywords\":\"nomatch\"}", &ie);
+        check(!ie && t && !strcmp(t, "no matching skills"),
+              "builtin: skills_search without matches");
+        free(t);
+
+        t = bc_call("skills_read", "{\"name\":\"alpha\"}", &ie);
+        check(!ie && t && strstr(t, "zebra once") &&
+                  strstr(t, "description: the alpha skill"),
+              "builtin: skills_read by frontmatter name");
+        free(t);
+
+        /* the local root shadows the global one on a name clash */
+        system("mkdir -p /tmp/llmkit-test-skills/cwd/.agents/skills/alpha");
+        write_file("/tmp/llmkit-test-skills/cwd/.agents/skills/alpha/SKILL.md",
+                   "local alpha body\n");
+        t = bc_call("skills_read", "{\"name\":\"alpha\"}", &ie);
+        check(!ie && t && !strcmp(t, "local alpha body\n"),
+              "builtin: skills_read prefers the local root");
+        free(t);
+
+        t = bc_call("skills_read", "{\"name\":\"missing\"}", &ie);
+        check(ie && t && strstr(t, "no skill named"),
+              "builtin: skills_read unknown name is an error");
+        free(t);
+
+        if (oldhome)
+            setenv("HOME", oldhome, 1);
+        else
+            unsetenv("HOME");
+        chdir(oldcwd);
+        system("rm -rf /tmp/llmkit-test-skills");
     }
 
     /* duckduckgo parser on a canned results page */
