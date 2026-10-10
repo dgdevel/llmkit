@@ -1516,16 +1516,17 @@ static void test_builtin(void) {
             ? cJSON_GetObjectItemCaseSensitive(
                   cJSON_GetObjectItemCaseSensitive(r, "result"), "tools")
             : NULL;
-        check(cJSON_IsArray(tools) && cJSON_GetArraySize(tools) == 12,
-              "builtin: twelve tools listed");
-        const char *want[12] = { "web_search",   "web_fetch",   "files_list",
+        check(cJSON_IsArray(tools) && cJSON_GetArraySize(tools) == 13,
+              "builtin: thirteen tools listed");
+        const char *want[13] = { "web_search",   "web_fetch",   "files_list",
                                  "files_search", "file_read",   "file_create",
-                                 "file_edit",    "process_exec",
-                                 "process_status", "process_wait",
-                                 "skills_search", "skills_read" };
+                                 "file_edit",    "file_analyze",
+                                 "process_exec", "process_status",
+                                 "process_wait", "skills_search",
+                                 "skills_read" };
         bool names_ok = true, descs_set = true, args_set = true;
         if (cJSON_IsArray(tools))
-            for (int i = 0; i < 12; i++) {
+            for (int i = 0; i < 13; i++) {
                 const cJSON *t = cJSON_GetArrayItem(tools, i);
                 const cJSON *nm = cJSON_GetObjectItemCaseSensitive(t, "name");
                 if (!cJSON_IsString(nm) || strcmp(nm->valuestring, want[i]))
@@ -1830,6 +1831,92 @@ static void test_builtin(void) {
                               "\"regex\":\"[a-\"}", &ie);
     check(ie && t && strstr(t, "invalid regex"),
           "builtin: bad regex is an error");
+    free(t);
+
+    /* file_analyze: a file's structure, one line per element - comments
+       and string literals must not look like structure */
+    write_file("/tmp/llmkit-test-builtin/shape.c",
+               "/* not a struct: class Point { */\n"
+               "#include <stdio.h>\n"
+               "\n"
+               "typedef struct point {\n"
+               "    int x;\n"
+               "    char *name;\n"
+               "} point_t;\n"
+               "\n"
+               "static int helper(int a) {\n"
+               "    char *s = \"struct not_a_struct {\";\n"
+               "    return a + 1;\n"
+               "}\n");
+    t = bc_call("file_analyze",
+                "{\"path\":\"/tmp/llmkit-test-builtin/shape.c\"}", &ie);
+    check(!ie && t && strstr(t, "  [c]  12 lines\n") &&
+              strstr(t, "struct point\n") && strstr(t, "int x\n") &&
+              strstr(t, "char *name\n") &&
+              strstr(t, "static int helper(int a)\n") &&
+              !strstr(t, "class Point") && !strstr(t, "not_a_struct"),
+          "builtin: file_analyze c aggregates, members, signatures");
+    free(t);
+
+    write_file("/tmp/llmkit-test-builtin/doc.md",
+               "# Title\n"
+               "\n"
+               "text\n"
+               "\n"
+               "## Section ###\n"
+               "\n"
+               "```\n"
+               "# not a heading\n"
+               "```\n"
+               "\n"
+               "### Sub\n");
+    t = bc_call("file_analyze",
+                "{\"path\":\"/tmp/llmkit-test-builtin/doc.md\"}", &ie);
+    check(!ie && t && strstr(t, "  [markdown]  11 lines\n") &&
+              strstr(t, "Title\n") && strstr(t, "Section\n") &&
+              strstr(t, "Sub\n") && !strstr(t, "not a heading"),
+          "builtin: file_analyze markdown heading tree");
+    free(t);
+
+    write_file("/tmp/llmkit-test-builtin/mod.py",
+               "class Foo(Base):\n"
+               "    def __init__(self, a):\n"
+               "        pass\n"
+               "\n"
+               "async def main():\n"
+               "    pass\n");
+    t = bc_call("file_analyze",
+                "{\"path\":\"/tmp/llmkit-test-builtin/mod.py\"}", &ie);
+    check(!ie && t && strstr(t, "  [python]  6 lines\n") &&
+              strstr(t, "class Foo(Base)\n") &&
+              strstr(t, "def __init__(self, a)\n") &&
+              strstr(t, "async def main()\n"),
+          "builtin: file_analyze python classes and defs");
+    free(t);
+
+    write_file("/tmp/llmkit-test-builtin/plain.md", "just text\n");
+    t = bc_call("file_analyze",
+                "{\"path\":\"/tmp/llmkit-test-builtin/plain.md\"}", &ie);
+    check(!ie && t && strstr(t, "(nothing found)"),
+          "builtin: file_analyze empty structure");
+    free(t);
+
+    t = bc_call("file_analyze",
+                "{\"path\":\"/tmp/llmkit-test-builtin/notes.txt\"}", &ie);
+    check(ie && t && strstr(t, "unknown file type") &&
+              strstr(t, "markdown") && strstr(t, "python"),
+          "builtin: file_analyze refuses an unknown type");
+    free(t);
+
+    t = bc_call("file_analyze", "{\"path\":\"/tmp/llmkit-test-builtin\"}",
+                &ie);
+    check(ie && t && strstr(t, "is a directory"),
+          "builtin: file_analyze refuses a directory");
+    free(t);
+
+    t = bc_call("file_analyze", "{}", &ie);
+    check(ie && t && strstr(t, "missing required argument 'path'"),
+          "builtin: file_analyze needs a path");
     free(t);
 
     /* process tools: completed reply, timestamps, tail, temp file */

@@ -1,0 +1,1 @@
+Show the structure of a local text file of a known type without reading it whole.

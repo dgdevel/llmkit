@@ -10,17 +10,16 @@ You are an agent. Follow main workflow.
 4. Present output - see Output section
 
 ## Worflow Intent `Research`
-1. Research on project for relevant context items, use `files_list`, `files_search` and `files_read` for it
+1. Research on project for relevant context items, use `files_list`, `files_search`, `file_analyze` and `files_read` for it
 2. Search skills for acquired relevant knowledge (`skills_search` and `skills_read`)
 2. Use `web_search` and `web_fetch`, up to 5 search rounds, only if needed
 3. Tell user findings, ask user for possible implementation follow-up
 
 ## Workflow Intent `Implementation`
-1. Need library/dependency? Follow Research workflow, `process_exec` to install
-2. Gather context reading files
-3. Prepare edit plan (list of `file_edit` and `file_create`)
-4. Apply edit plan
-5. Validate if available
+1. follow Research workflow to gather context
+2. Prepare edit plan (list of `file_edit` and `file_create`)
+3. Apply edit plan
+4. Validate if available
 
 ## Workflow Intent `Investigation`
 1. Analyze project files and process request, use `process_exec` without disrupting user system
@@ -33,5 +32,6 @@ Pattern: `[thing] [action] [reason]. [next step].`
 # Best Practices
 Prefer relative paths if no system-wide access is needed.
 `file_read` use max 15-lines line_range; extend range only if needed (you are memory constrained).
+Work smart, not hard: use `file_analyze` before `file_read` so you know the line numbers that you need to read.
 Limit `file_edit` window size to changed lines; split edits in multiple calls with 1-5 line changes per call, no split for new lines to add.
 

@@ -1,7 +1,7 @@
 # builtin-mcp
 
 `llmkit builtin-mcp` is an mcp server on stdio exposing a set of
-generic-use tools: web search, web fetch, five file operations, three
+generic-use tools: web search, web fetch, six file operations, three
 process operations and two agent-skill operations. No arguments, no
 config file:
 
@@ -52,6 +52,7 @@ empty description.
 | `file_read` | `path: string, lines_offset: int, lines_length: int` | the requested lines |
 | `file_create` | `path: string, content: string, overwrite: bool = false` | confirmation |
 | `file_edit` | `path: string, oldString: string, newString: string, line_number: int` | confirmation |
+| `file_analyze` | `path: string` | the file's structure, one line per element |
 | `process_exec` | `cmdline: string` | exit code or pid + output tail |
 | `process_status` | `pid: int` | same report for one spawned pid; any other pid: running state |
 | `process_wait` | `pid: int, timeout: int` | waits, then the same report |
@@ -159,6 +160,34 @@ block: the new block keeps its internal relative indentation and is
 shifted so its first line lands on the column of the first replaced
 line, `newString`'s own text written verbatim. Line endings are
 preserved (`\n` and `\r\n`).
+
+### file_analyze(path)
+
+Shows the structure of a text file of a known type instead of its whole
+content - cheaper than `file_read` when only the shape of a file matters.
+The type comes from the extension: markdown files (`.md`, `.markdown`,
+`.mdown`) come back as their heading tree, c-family sources (`.c .h .cpp
+.cc .cxx .hpp .hh .hxx .java .cs .js .jsx .ts .tsx`) as their structs
+with typed members, full function signatures and typedefs, python files
+(`.py`, `.pyi`) as their classes and defs with parameter lists. One line
+per element: its line number, an indent per nesting level, then the
+element, under a header naming the path, the kind and the line count:
+
+```
+src/builtin.c  [c]  4052 lines
+   65  struct arg_def
+   66    const char *name
+   67    const char *type
+   68    const char *desc
+   69    bool required
+  798  static bool next_line(const char *s, size_t len, size_t *i, const char **ls, size_t *ll)
+```
+
+Comments and string literals are ignored, so nothing inside them can
+look like structure. A file with no elements answers `(nothing found)`;
+at most 1000 elements are returned, marked `... [truncated]` past that.
+Directories, non textual files, files over the 64Mb read cap and unknown
+types are errors - an unknown type lists the known ones.
 
 ### process_exec(cmdline)
 
