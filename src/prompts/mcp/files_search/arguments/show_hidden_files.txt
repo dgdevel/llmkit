@@ -1,0 +1,1 @@
+true to also search dot-prefixed (hidden) files, default false

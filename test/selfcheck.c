@@ -1542,6 +1542,30 @@ static void test_builtin(void) {
         check(names_ok, "builtin: tool names in order");
         check(descs_set, "builtin: tool descriptions ride along");
         check(args_set, "builtin: tools declare input schemas");
+        { /* the file walkers declare their optional hidden switch */
+            bool hidden_ok = true;
+            for (int i = 2; i <= 3; i++) {
+                const cJSON *t = cJSON_GetArrayItem(tools, i);
+                const cJSON *schema =
+                    cJSON_GetObjectItemCaseSensitive(t, "inputSchema");
+                const cJSON *props = cJSON_GetObjectItemCaseSensitive(
+                    schema, "properties");
+                const cJSON *sh = cJSON_GetObjectItemCaseSensitive(
+                    props, "show_hidden_files");
+                const cJSON *ty = cJSON_GetObjectItemCaseSensitive(sh, "type");
+                const cJSON *req =
+                    cJSON_GetObjectItemCaseSensitive(schema, "required");
+                if (!cJSON_IsString(ty) || strcmp(ty->valuestring, "boolean"))
+                    hidden_ok = false;
+                cJSON *it = NULL;
+                cJSON_ArrayForEach(it, req)
+                    if (cJSON_IsString(it) &&
+                        !strcmp(it->valuestring, "show_hidden_files"))
+                        hidden_ok = false;
+            }
+            check(hidden_ok,
+                  "builtin: show_hidden_files is an optional boolean");
+        }
         cJSON_Delete(r);
         buf_free(&io.out);
     }
@@ -1760,6 +1784,46 @@ static void test_builtin(void) {
     check(!ie && t && strstr(t, "notes.txt") &&
               strstr(t, "Matching lines: 1, 3"),
           "builtin: files_search reports matching line numbers");
+    free(t);
+
+    /* dot-prefixed entries: out of the walk by default, in when asked */
+    write_file("/tmp/llmkit-test-builtin/.hidden.txt", "secret\n");
+    t = bc_call("file_create",
+                "{\"path\":\"/tmp/llmkit-test-builtin/.hiddendir/deep.txt\","
+                "\"content\":\"secret\\n\"}", &ie);
+    check(!ie && t, "builtin: file_create tucks a file in a dot dir");
+    free(t);
+    t = bc_call("files_list", "{\"path\":\"/tmp/llmkit-test-builtin\","
+                              "\"regex\":\"hidden\","
+                              "\"recurse_subdirectories\":true}", &ie);
+    check(!ie && t && !strstr(t, "hidden"),
+          "builtin: files_list leaves dot entries out by default");
+    free(t);
+    t = bc_call("files_list",
+                "{\"path\":\"/tmp/llmkit-test-builtin\","
+                "\"regex\":\"hidden\",\"show_hidden_files\":true,"
+                "\"recurse_subdirectories\":true}", &ie);
+    check(!ie && t && strstr(t, ".hidden.txt") && strstr(t, "/.hiddendir\n") &&
+              strstr(t, ".hiddendir/deep.txt"),
+          "builtin: files_list lists dot entries when asked");
+    free(t);
+    /* the root the caller names is never filtered, only what it holds */
+    t = bc_call("files_list", "{\"path\":\"/tmp/llmkit-test-builtin/.hiddendir\","
+                              "\"regex\":\"deep\"}", &ie);
+    check(!ie && t && strstr(t, "deep.txt"),
+          "builtin: files_list honors an explicit dot root");
+    free(t);
+    t = bc_call("files_search", "{\"path\":\"/tmp/llmkit-test-builtin\","
+                                "\"regex\":\"^secret$\"}", &ie);
+    check(!ie && t && !strstr(t, "hidden"),
+          "builtin: files_search skips dot files by default");
+    free(t);
+    t = bc_call("files_search",
+                "{\"path\":\"/tmp/llmkit-test-builtin\","
+                "\"regex\":\"^secret$\",\"show_hidden_files\":true}", &ie);
+    check(!ie && t && strstr(t, ".hidden.txt") &&
+              strstr(t, ".hiddendir/deep.txt"),
+          "builtin: files_search reads dot files when asked");
     free(t);
 
     t = bc_call("files_list", "{\"path\":\"/tmp/llmkit-test-builtin\","

@@ -87,10 +87,14 @@ static const arg_def_t ARGS_files_list[] = {
     {"regex", "string", prompt_mcp_files_list_arguments_regex, true},
     {"recurse_subdirectories", "boolean",
      prompt_mcp_files_list_arguments_recurse_subdirectories, false},
+    {"show_hidden_files", "boolean",
+     prompt_mcp_files_list_arguments_show_hidden_files, false},
 };
 static const arg_def_t ARGS_files_search[] = {
     {"path", "string", prompt_mcp_files_search_arguments_path, true},
     {"regex", "string", prompt_mcp_files_search_arguments_regex, true},
+    {"show_hidden_files", "boolean",
+     prompt_mcp_files_search_arguments_show_hidden_files, false},
 };
 static const arg_def_t ARGS_file_read[] = {
     {"path", "string", prompt_mcp_file_read_arguments_path, true},
@@ -132,9 +136,9 @@ static const arg_def_t ARGS_skills_read[] = {
 static const tool_def_t TOOLS[] = {
     {"web_search", prompt_mcp_web_search_description, ARGS_web_search, 1},
     {"web_fetch", prompt_mcp_web_fetch_description, ARGS_web_fetch, 1},
-    {"files_list", prompt_mcp_files_list_description, ARGS_files_list, 3},
+    {"files_list", prompt_mcp_files_list_description, ARGS_files_list, 4},
     {"files_search", prompt_mcp_files_search_description, ARGS_files_search,
-     2},
+     3},
     {"file_read", prompt_mcp_file_read_description, ARGS_file_read, 3},
     {"file_create", prompt_mcp_file_create_description, ARGS_file_create, 3},
     {"file_edit", prompt_mcp_file_edit_description, ARGS_file_edit, 4},
@@ -554,6 +558,7 @@ typedef struct walk_ctx {
     regex_t rx;   /* compiled pattern */
     bool content; /* files_search: pattern matches content lines */
     bool recurse; /* descend into subdirectories */
+    bool hidden;  /* show_hidden_files: keep dot-prefixed entries */
 } walk_ctx_t;
 
 static void entry_line(buf_t *out, const char *path, const struct stat *st,
@@ -635,6 +640,7 @@ static void walk_dir(walk_ctx_t *w, const char *dirpath, int depth) {
     struct dirent *de;
     while ((de = readdir(d))) {
         if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, "..")) continue;
+        if (!w->hidden && de->d_name[0] == '.') continue;
         if (n == cap) {
             cap = cap ? cap * 2 : 64;
             names = realloc(names, cap * sizeof *names);
@@ -2360,7 +2366,7 @@ static void tool_web_fetch(const cJSON *args, buf_t *out, bool *is_error) {
 /* shared body of files_list (pattern matches paths) and files_search
    (pattern matches line content) */
 static void tool_files(const cJSON *args, buf_t *out, bool *is_error,
-                       bool content, bool recurse) {
+                       bool content, bool recurse, bool hidden) {
     const char *path = NULL, *regex = NULL;
     if (!need_str(args, "path", &path, out) ||
         !need_str(args, "regex", &regex, out)) {
@@ -2381,7 +2387,7 @@ static void tool_files(const cJSON *args, buf_t *out, bool *is_error,
         *is_error = true;
         return;
     }
-    walk_ctx_t w = { out, rx, content, recurse };
+    walk_ctx_t w = { out, rx, content, recurse, hidden };
     char werr[256] = "";
     bool ok = walk_start(&w, path, werr, sizeof werr);
     regfree(&rx);
@@ -2393,11 +2399,12 @@ static void tool_files(const cJSON *args, buf_t *out, bool *is_error,
 }
 
 static void tool_files_list(const cJSON *a, buf_t *o, bool *e) {
-    tool_files(a, o, e, false, rec_bool(a, "recurse_subdirectories", false));
+    tool_files(a, o, e, false, rec_bool(a, "recurse_subdirectories", false),
+               rec_bool(a, "show_hidden_files", false));
 }
 
 static void tool_files_search(const cJSON *a, buf_t *o, bool *e) {
-    tool_files(a, o, e, true, true);
+    tool_files(a, o, e, true, true, rec_bool(a, "show_hidden_files", false));
 }
 
 static void tool_file_read(const cJSON *args, buf_t *out, bool *is_error) {

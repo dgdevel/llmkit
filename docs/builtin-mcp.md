@@ -47,8 +47,8 @@ empty description.
 |---|---|---|
 | `web_search` | `keywords: string` | search results block |
 | `web_fetch` | `url: string` | the page as markdown |
-| `files_list` | `path: string, regex: string, recurse_subdirectories: bool = false` | one line per entry |
-| `files_search` | `path: string, regex: string` | entries plus matching line numbers |
+| `files_list` | `path: string, regex: string, recurse_subdirectories: bool = false, show_hidden_files: bool = false` | one line per entry |
+| `files_search` | `path: string, regex: string, show_hidden_files: bool = false` | entries plus matching line numbers |
 | `file_read` | `path: string, lines_offset: int, lines_length: int` | the requested lines |
 | `file_create` | `path: string, content: string, overwrite: bool = false` | confirmation |
 | `file_edit` | `path: string, oldString: string, newString: string, line_number: int` | confirmation |
@@ -83,13 +83,15 @@ tool response is the markdown of the page, title first as a `#` heading.
 Pages that are not html (by content type) or have no readable content are
 errors.
 
-### files_list(path, regex, recurse_subdirectories=false)
+### files_list(path, regex, recurse_subdirectories=false, show_hidden_files=false)
 
 Lists the tree under `path` (alphabetical, pre-order: directories are
 listed before their contents), keeping only entries whose path matches
 the regex anywhere. A `path` that is a directory lists its own entries
 only, unless `recurse_subdirectories` is true, which descends into the
-subdirectories too. Paths are answered relative when the
+subdirectories too. Dot-prefixed (hidden) files and directories are left
+out, unless `show_hidden_files` is true; a hidden directory is neither
+listed nor descended into. Paths are answered relative when the
 given path is relative, absolute when it is absolute:
 
 ```
@@ -113,12 +115,13 @@ A file counts as textual when it holds no NUL bytes and is strict utf-8;
 everything else (including oversized files, over 64Mb) is listed without
 the line count.
 
-### files_search(path, regex)
+### files_search(path, regex, show_hidden_files=false)
 
 Same walk as `files_list` with `recurse_subdirectories` set, but the
 regex matches line *content*: every textual file under `path` (16Mb cap
 per file) whose lines match is listed with the matching line numbers,
-comma separated:
+comma separated. Dot-prefixed (hidden) files and directories are skipped
+unless `show_hidden_files` is true:
 
 ```
 ${permissions} ${size} ${path}${, lines}

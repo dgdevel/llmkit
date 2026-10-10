@@ -1,0 +1,1 @@
+true to also list dot-prefixed (hidden) entries, default false
