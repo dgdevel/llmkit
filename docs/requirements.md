@@ -1076,7 +1076,11 @@ redrawn.
   unstyled line of the turn's measured spans - time to first token
   since the request (prompt processing), accumulated thinking
   generation time, accumulated response generation time; time spent
-  executing tools is excluded. A turn that ends any other way
+  executing tools is excluded. When the turn's rounds reported
+  `usage`, the endpoint's token counts close the line - input, output
+  and their total, summed over every round of the turn (each round's
+  `usage` rides its last record); a turn whose rounds reported none
+  renders the spans alone. A turn that ends any other way
   (interrupted, fatal, terminal tool) renders no timing line.
 - Typography: bold and italic apply per the table above, only when the
   output terminal reports support for the attribute; each attribute
@@ -1116,7 +1120,7 @@ file2.log                                     <- bold
 [10:31:07] --------------------------------------------------
 The /tmp directory holds two files: file1.txt and
 file2.log.                                     <- plain
-[10:31:08] first token 0.84s | thinking 1.92s | response 0.71s
+[10:31:08] first token 0.84s | thinking 1.92s | response 0.71s | input 843 tok | output 96 tok | total 939 tok
 ```
 
 ### interrupts and exit codes
@@ -1162,10 +1166,11 @@ file2.log.                                     <- plain
 Deliberately not offered: `--prompt` in any form, slash commands (`/quit`
 and friends: Ctrl-D and Ctrl-C are the controls), transcript persistence
 or dumping (the transcript lives in memory and dies with the process;
-records are `runner` territory), usage or token displays, a banner,
-styling override flags, and everything on `call`'s own not-offered list:
-inference-option flags beyond `--max-tokens`, environment-variable or
-config-file indirection, record/jsonl output.
+records are `runner` territory), usage or token displays beyond the
+timing line's own totals, a banner, styling override flags, and
+everything on `call`'s own not-offered list: inference-option flags
+beyond `--max-tokens`, environment-variable or config-file indirection,
+record/jsonl output.
 
 
 ## 13. llmkit mcp-repl

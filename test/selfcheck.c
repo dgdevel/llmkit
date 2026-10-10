@@ -2906,6 +2906,50 @@ static void test_repl(void) {
         call_cfg_free(&c);
     }
 
+    /* ---- timing line: the turn's token totals, summed over rounds ---- */
+    {
+        fturn_t turns[] = {
+            { .recs = (const char *[]){
+                  "{\"type\":\"response\",\"text\":\"checking\","
+                  "\"partial\":false}",
+                  "{\"type\":\"tool_request\",\"tool\":\"fs.echo\","
+                  "\"arguments\":{\"x\":1},\"id\":\"c1\","
+                  "\"usage\":{\"input_tokens\":100,\"output_tokens\":20}}"},
+              .nrecs = 2, .kind = TURN_TOOLS, .abort_after = -1 },
+            { .recs = (const char *[]){
+                  "{\"type\":\"response\",\"text\":\"done\","
+                  "\"partial\":false,"
+                  "\"usage\":{\"input_tokens\":200,\"output_tokens\":30}}"},
+              .nrecs = 1, .kind = TURN_FINAL, .abort_after = -1 },
+        };
+        ftool_t tools[] = { { .tool = "fs.echo", .text = "tool out", .rc = 0 } };
+        g_ftools = (ftool_script_t){ tools, 1, 0 };
+        g_factory_wire = fwire_new(turns, 2);
+        repl_cfg(&c, PROTO_OPENAI);
+        repl_out_t r = repl_session_ft(&c, "hi\n", 3);
+        check(r.rc == EXIT_OK, "repl: token session exits 0");
+        check(strstr(r.ob, "| input 300 tok | output 50 tok "
+                           "| total 350 tok") != NULL,
+              "repl: timing line sums the turn's usage over its rounds");
+        repl_session_free(&r);
+        call_cfg_free(&c);
+
+        /* the same shape without usage: spans alone, no token segment */
+        fturn_t plain[] = {
+            { .recs = (const char *[]){
+                  "{\"type\":\"response\",\"text\":\"ok\",\"partial\":false}"},
+              .nrecs = 1, .kind = TURN_FINAL, .abort_after = -1 },
+        };
+        g_factory_wire = fwire_new(plain, 1);
+        repl_cfg(&c, PROTO_OPENAI);
+        r = repl_session(&c, "hi\n", 3);
+        check(r.rc == EXIT_OK, "repl: usage-less session exits 0");
+        check(strstr(r.ob, "| input ") == NULL,
+              "repl: no usage reported renders no token segment");
+        repl_session_free(&r);
+        call_cfg_free(&c);
+    }
+
     /* ---- empty input ignored: no user record, no turn ---- */
     {
         fturn_t turns[] = {

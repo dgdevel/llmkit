@@ -32,12 +32,12 @@ $ llmkit repl --openai http://localhost:11434/v1 --model llama3.1
 The user asks simple arithmetic.
 [10:31:05] ---------------------------------------------------------------------
 2 + 2 equals 4.
-[10:31:05] first token 0.31s | thinking 0.87s | response 0.22s
+[10:31:05] first token 0.31s | thinking 0.87s | response 0.22s | input 61 tok | output 12 tok | total 73 tok
 [10:31:09] =====================================================================
 >
 ```
 
-Every separator line is stamped with the wall clock, and each turn that finishes its answer prints its timing: time to first token (prompt processing), thinking generation, response generation.
+Every separator line is stamped with the wall clock, and each turn that finishes its answer prints its timing: time to first token (prompt processing), thinking generation, response generation - plus the turn's token totals (input, output and their sum) when the endpoint reports usage.
 
 For work that needs hands there is `llmkit agent`: the same chat with the [built-in mcp tools](docs/builtin-mcp.md) attached - web search and fetch, file tools, process tools, skills - and the working directory's `AGENTS.md` injected after the system prompt. `--conversation-store <file>` persists the conversation as jsonl and resumes it: an existing store replays in full before the first prompt, then the session continues where it left off.
 

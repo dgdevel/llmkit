@@ -25,7 +25,8 @@
 
 /* ================= display sink ================= */
 /* the shared framing state machine (pretty.c) plus the session's own
-   extras: the conversation store and the turn timing spans */
+   extras: the conversation store and the turn's timing spans and token
+   totals */
 
 typedef struct repl_sink {
     dspy_t d; /* the framing state (out, styles, rules) */
@@ -41,6 +42,11 @@ typedef struct repl_sink {
     double think_s;  /* thinking generation, accumulated over all blocks */
     double resp_s;   /* response generation, accumulated over all blocks */
     bool resp_done;  /* a response block completed this turn */
+    /* the turn's tokens as the endpoint reported them, summed over the
+       turn's model rounds: usage rides each round's last record */
+    double tok_in;   /* input tokens */
+    double tok_out;  /* output tokens */
+    bool have_usage; /* a record of this turn reported usage */
 } repl_sink_t;
 
 /* the store's write side: called from the sink for every emitted record
@@ -65,7 +71,8 @@ static void store_persist(repl_sink_t *s, const cJSON *rec) {
     cJSON_free(p);
 }
 
-/* the turn's timing spans, reset by the session loop at turn start */
+/* the turn's timing spans and token totals, reset by the session loop at
+   turn start */
 static void timing_reset(repl_sink_t *s) {
     s->t_turn = mono_now();
     s->t_first = 0;
@@ -74,19 +81,39 @@ static void timing_reset(repl_sink_t *s) {
     s->think_s = 0;
     s->resp_s = 0;
     s->resp_done = false;
+    s->tok_in = 0;
+    s->tok_out = 0;
+    s->have_usage = false;
+}
+
+/* the turn's token totals, summed round by round: usage rides the last
+   record of each model round (the wires' rule), so a turn whose tools
+   took several rounds reports several. Absent usage is simply not
+   counted - the rendering shows only what the endpoint reported */
+static void usage_accum(repl_sink_t *s, const cJSON *rec) {
+    const cJSON *u = cJSON_GetObjectItemCaseSensitive(rec, "usage");
+    if (!cJSON_IsObject(u)) return;
+    s->tok_in += rec_num(u, "input_tokens", 0.0);
+    s->tok_out += rec_num(u, "output_tokens", 0.0);
+    s->have_usage = true;
 }
 
 /* the turn's timing line, drawn when the response block completed: wall
    clock of the completion, then the three spans - first token since the
    request (prompt processing), thinking generation and response
-   generation, tool rounds excluded, accumulated over every block */
+   generation, tool rounds excluded, accumulated over every block - and
+   the turn's token totals when the endpoint reported any */
 static void render_timing(repl_sink_t *s) {
-    char ts[32] = "", line[192];
+    char ts[32] = "", tok[96] = "", line[256];
     stamp_now(ts, sizeof ts);
+    if (s->have_usage)
+        snprintf(tok, sizeof tok,
+                 " | input %.0f tok | output %.0f tok | total %.0f tok",
+                 s->tok_in, s->tok_out, s->tok_in + s->tok_out);
     int n = snprintf(line, sizeof line,
-                     "%sfirst token %.2fs | thinking %.2fs | response %.2fs\n",
+                     "%sfirst token %.2fs | thinking %.2fs | response %.2fs%s\n",
                      ts, s->t_first ? s->t_first - s->t_turn : 0.0, s->think_s,
-                     s->resp_s);
+                     s->resp_s, tok);
     if (n <= 0) return;
     dspy_ensure_nl(&s->d);
     dspy_write(&s->d, line,
@@ -96,6 +123,7 @@ static void render_timing(repl_sink_t *s) {
 static void repl_sink_fn(void *ctx, cJSON *rec) {
     repl_sink_t *s = ctx;
     store_persist(s, rec);
+    usage_accum(s, rec); /* the turn's totals, round by round */
     int k = rec_classify(rec);
     if (k == R_THINKING || k == R_RESPONSE) {
         const char *tx = rec_str(rec, "text");

@@ -629,8 +629,12 @@ No new wire, mcp or loop code.
   processing), thinking and response are the generation segments - each
   opens at a block's first token and closes at the block-close record,
   accumulated across every round of the turn, tool execution excluded.
-  A turn ending any other way (interrupted, fatal, terminal tool)
-  renders no timing line.
+  The turn's tokens follow the spans when its rounds reported `usage`:
+  ` | input <n> tok | output <n> tok | total <n> tok`, the rounds' totals
+  summed by the sink (usage rides each round's last record). A turn whose
+  rounds reported none ends with the spans, the same rule an empty block
+  follows. A turn ending any other way (interrupted, fatal, terminal
+  tool) renders no timing line.
 - **sink** - `call`'s discipline, one `fwrite` + `fflush` per record, with
   the block framing: a separator opens each block - the first record of
   its kind since the last block closed, and only when its text is
