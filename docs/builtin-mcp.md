@@ -1,7 +1,7 @@
 # builtin-mcp
 
 `llmkit builtin-mcp` is an mcp server on stdio exposing a set of
-generic-use tools: web search, web fetch, five file operations, two
+generic-use tools: web search, web fetch, five file operations, three
 process operations and two agent-skill operations. No arguments, no
 config file:
 
@@ -15,8 +15,8 @@ in all current protocol revisions up to `2026-07-28`.
 
 Everything is stateless except the process tools: the server keeps one
 record per spawned process (pid, exit state and one output temp file)
-for its own lifetime, so `process_status` can report on any pid it
-spawned.
+for its own lifetime, so `process_status` and `process_wait` can report
+on any pid it spawned.
 
 ## Attaching it to a conversation
 
@@ -53,6 +53,7 @@ empty description.
 | `file_edit` | `path: string, oldString: string, newString: string, line_number: int` | confirmation |
 | `process_exec` | `cmdline: string` | exit code or pid + output tail |
 | `process_status` | `pid: int` | same report for one spawned pid |
+| `process_wait` | `pid: int, timeout: int` | waits, then the same report |
 | `skills_search` | `keywords: string` | matching skills as records |
 | `skills_read` | `name: string` | the skill's SKILL.md text |
 
@@ -196,6 +197,15 @@ a command the shell cannot find reports 127.
 The same report for a pid spawned by this server - running or finished,
 whichever its current state is. A pid this server did not spawn is an
 error and reports no output.
+
+### process_wait(pid, timeout)
+
+Waits for a pid spawned by this server to terminate or for `timeout`
+whole seconds to pass - whichever happens first - then answers the same
+report as `process_status`: the exit code and output tail when the
+process ended, the running state otherwise. `timeout` is clamped by
+validation to 0..600; 0 means one immediate check, and a pid this
+server did not spawn is the same error as in `process_status`.
 
 ### skills_search(keywords)
 

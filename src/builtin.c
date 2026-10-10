@@ -116,6 +116,10 @@ static const arg_def_t ARGS_process_exec[] = {
 static const arg_def_t ARGS_process_status[] = {
     {"pid", "integer", prompt_mcp_process_status_arguments_pid, true},
 };
+static const arg_def_t ARGS_process_wait[] = {
+    {"pid", "integer", prompt_mcp_process_wait_arguments_pid, true},
+    {"timeout", "integer", prompt_mcp_process_wait_arguments_timeout, true},
+};
 static const arg_def_t ARGS_skills_search[] = {
     {"keywords", "string", prompt_mcp_skills_search_arguments_keywords, true},
 };
@@ -136,6 +140,8 @@ static const tool_def_t TOOLS[] = {
      1},
     {"process_status", prompt_mcp_process_status_description,
      ARGS_process_status, 1},
+    {"process_wait", prompt_mcp_process_wait_description,
+     ARGS_process_wait, 2},
     {"skills_search", prompt_mcp_skills_search_description, ARGS_skills_search,
      1},
     {"skills_read", prompt_mcp_skills_read_description, ARGS_skills_read, 1},
@@ -864,7 +870,8 @@ static size_t split_kw(char *s, char **out, size_t max) {
 /* ================= process handling ================= */
 
 /* process_exec runs a command line through the shell and waits 10s;
-   process_status reports on a pid it spawned. Every process owns one
+   process_status reports on a pid it spawned; process_wait blocks on
+   one until it exits or a timeout passes. Every process owns one
    record for the lifetime of the server: the pid, the exit code once
    reaped, and the output. stdout and stderr arrive on one pipe (merged
    the annotate-output.sh way - line races between the two streams are
@@ -873,6 +880,7 @@ static size_t split_kw(char *s, char **out, size_t max) {
    a three-line tail. */
 
 #define BM_PROC_WAIT_MS 10000  /* process_exec completion wait */
+#define BM_PROC_WAIT_MAX_S 600 /* process_wait timeout ceiling, seconds */
 #define BM_PROC_TAIL 3         /* lines quoted in the reply */
 #define BM_PROC_LINE_CAP 65536 /* one line's byte cap (newline floods) */
 
@@ -2835,18 +2843,20 @@ static void tool_process_exec(const cJSON *args, buf_t *out, bool *is_error) {
     sanitize_utf8(out);
 }
 
+/* the record of a pid this server spawned, NULL when there is none */
+static proc_rec_t *proc_find(long long pid) {
+    for (proc_rec_t *it = g_procs; it; it = it->next)
+        if ((long long)it->pid == pid) return it;
+    return NULL;
+}
+
 static void tool_process_status(const cJSON *args, buf_t *out, bool *is_error) {
     long long pid = 0;
     if (!need_int(args, "pid", &pid, out)) {
         *is_error = true;
         return;
     }
-    proc_rec_t *p = NULL;
-    for (proc_rec_t *it = g_procs; it; it = it->next)
-        if ((long long)it->pid == pid) {
-            p = it;
-            break;
-        }
+    proc_rec_t *p = proc_find(pid);
     if (!p) { /* a pid this server did not spawn gets no output */
         buf_clear(out);
         buf_appendf(out, "PID %lld was not spawned by this server", pid);
@@ -2854,6 +2864,40 @@ static void tool_process_status(const cJSON *args, buf_t *out, bool *is_error) {
         return;
     }
     proc_reap(p);
+    proc_report(out, p);
+    sanitize_utf8(out);
+}
+
+/* process_status plus a bounded wait: polls until the pid exits or the
+   timeout passes, then answers the same report */
+static void tool_process_wait(const cJSON *args, buf_t *out, bool *is_error) {
+    long long pid = 0, timeout = 0;
+    if (!need_int(args, "pid", &pid, out) ||
+        !need_int(args, "timeout", &timeout, out)) {
+        *is_error = true;
+        return;
+    }
+    if (timeout < 0 || timeout > BM_PROC_WAIT_MAX_S) {
+        buf_clear(out);
+        buf_appendf(out, "timeout must be between 0 and %d seconds",
+                    BM_PROC_WAIT_MAX_S);
+        *is_error = true;
+        return;
+    }
+    proc_rec_t *p = proc_find(pid);
+    if (!p) { /* a pid this server did not spawn gets no output */
+        buf_clear(out);
+        buf_appendf(out, "PID %lld was not spawned by this server", pid);
+        *is_error = true;
+        return;
+    }
+    double t0 = mono_now();
+    for (;;) {
+        proc_reap(p);
+        if (p->exited) break;
+        if (mono_now() - t0 >= (double)timeout) break;
+        msleep(50);
+    }
     proc_report(out, p);
     sanitize_utf8(out);
 }
@@ -3028,7 +3072,8 @@ static void tool_skills_read(const cJSON *args, buf_t *out, bool *is_error) {
 static const tool_fn TOOL_FNS[TOOLS_N] = {
     tool_web_search, tool_web_fetch,  tool_files_list, tool_files_search,
     tool_file_read,  tool_file_create, tool_file_edit, tool_process_exec,
-    tool_process_status, tool_skills_search, tool_skills_read,
+    tool_process_status, tool_process_wait, tool_skills_search,
+    tool_skills_read,
 };
 
 /* ================= json-rpc handler ================= */

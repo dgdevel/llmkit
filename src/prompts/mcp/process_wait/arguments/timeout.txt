@@ -1,0 +1,1 @@
+Maximum seconds to wait, 0 to 600

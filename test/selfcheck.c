@@ -1505,16 +1505,16 @@ static void test_builtin(void) {
             ? cJSON_GetObjectItemCaseSensitive(
                   cJSON_GetObjectItemCaseSensitive(r, "result"), "tools")
             : NULL;
-        check(cJSON_IsArray(tools) && cJSON_GetArraySize(tools) == 11,
-              "builtin: eleven tools listed");
-        const char *want[11] = { "web_search",   "web_fetch",   "files_list",
+        check(cJSON_IsArray(tools) && cJSON_GetArraySize(tools) == 12,
+              "builtin: twelve tools listed");
+        const char *want[12] = { "web_search",   "web_fetch",   "files_list",
                                  "files_search", "file_read",   "file_create",
                                  "file_edit",    "process_exec",
-                                 "process_status", "skills_search",
-                                 "skills_read" };
+                                 "process_status", "process_wait",
+                                 "skills_search", "skills_read" };
         bool names_ok = true, descs_set = true, args_set = true;
         if (cJSON_IsArray(tools))
-            for (int i = 0; i < 11; i++) {
+            for (int i = 0; i < 12; i++) {
                 const cJSON *t = cJSON_GetArrayItem(tools, i);
                 const cJSON *nm = cJSON_GetObjectItemCaseSensitive(t, "name");
                 if (!cJSON_IsString(nm) || strcmp(nm->valuestring, want[i]))
@@ -1721,6 +1721,45 @@ static void test_builtin(void) {
                   strstr(fin, ": started\n"),
               "builtin: process_status sees the completion");
         free(fin);
+    }
+
+    /* process_wait: a bad timeout or a foreign pid is an error, then a
+       live pid shows both ends - the timeout expiring while it runs,
+       and the termination beating a longer one */
+    t = bc_call("process_wait", "{\"pid\":999999999,\"timeout\":1}", &ie);
+    check(ie && t && strstr(t, "was not spawned"),
+          "builtin: process_wait foreign pid is an error");
+    free(t);
+
+    t = bc_call("process_wait", "{\"pid\":999999999,\"timeout\":-1}", &ie);
+    check(ie && t && strstr(t, "timeout must be between"),
+          "builtin: process_wait out-of-range timeout is an error");
+    free(t);
+
+    t = bc_call("process_exec", "{\"cmdline\":\"echo waiting; sleep 12\"}",
+                &ie);
+    check(!ie && t && strstr(t, "is still running"),
+          "builtin: process_wait setup: a pid left running");
+    pid = -1;
+    if (t) {
+        char *pp = strstr(t, "PID ");
+        if (pp) pid = strtol(pp + 4, NULL, 10);
+    }
+    free(t);
+    if (pid > 0) {
+        char pargs[64];
+        snprintf(pargs, sizeof pargs, "{\"pid\":%ld,\"timeout\":1}", pid);
+        t = bc_call("process_wait", pargs, &ie);
+        check(!ie && t && strstr(t, "is still running") &&
+                  strstr(t, ": waiting\n"),
+              "builtin: process_wait timeout expiry reports still running");
+        free(t);
+        snprintf(pargs, sizeof pargs, "{\"pid\":%ld,\"timeout\":30}", pid);
+        t = bc_call("process_wait", pargs, &ie);
+        check(!ie && t && strstr(t, "Exit code: 0") &&
+                  strstr(t, ": waiting\n") && !strstr(t, "still running"),
+              "builtin: process_wait sees the termination");
+        free(t);
     }
 
     /* skills tools: fixed roots (<cwd>/.agents/skills, $HOME/.agents/
