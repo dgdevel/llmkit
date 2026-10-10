@@ -13,6 +13,7 @@ Tell the list to the user and start working.
 Complete the item and update the todo list if needed.
 Repeat the pending activities to the user after each item.
 
+
 # Tools
 Work smart, not hard. use tools in order listed below.
 Tools are for:
@@ -21,6 +22,7 @@ Tools are for:
 - writing files: `file_write` and `file_edit`
 - search the internet: `web_search` and `web_fetch`
 - process management: `process_exec`, `process_wait` and `process_status`
+- reading skills: `skills_search` and `skills_read`
 
 ## Tools Instructions
 Prefer relative paths if no system-wide access is needed.
