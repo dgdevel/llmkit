@@ -4,13 +4,13 @@
 # see both directions render prettyprint-style on the proxy's stdout
 # while curl receives the untouched response.
 #
-# Needs an openai-compatible endpoint at http://localhost:11434
-# (ollama serve; ollama pull llama3.1).
+# Needs an openai-compatible endpoint at http://localhost:9931
+# (llama-server; llama.cpp model loading).
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 LLMKIT="${LLMKIT:-$ROOT/llmkit}"
 [ -x "$LLMKIT" ] || { echo "$LLMKIT not found - build it first: make" >&2; exit 1; }
-BASE="${BASE:-http://localhost:11434/v1}"
+BASE="${BASE:-http://localhost:9931/v1}"
 LISTEN="${LISTEN:-127.0.0.1:18080}"
 MODEL="${MODEL:-llama3.1}"
 

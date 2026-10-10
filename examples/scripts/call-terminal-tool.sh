@@ -6,14 +6,14 @@
 # code is 9 (design sec.12), so a set -e script has to accept it
 # explicitly. 0 means the model answered in plain text without calling
 # the tool; anything else is a real failure. Spawning the upstream needs
-# node/npx; the endpoint is the usual local ollama.
+# node/npx; the endpoint is the usual llama.cpp.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 LLMKIT="${LLMKIT:-$ROOT/llmkit}"
 [ -x "$LLMKIT" ] || { echo "$LLMKIT not found - build it first: make" >&2; exit 1; }
 
 set +e
-"$LLMKIT" call --openai http://localhost:11434/v1 \
+"$LLMKIT" call --openai http://localhost:9931/v1 \
     --model llama3.1 \
     --mcp-proxy "$ROOT/examples/mcp-proxy/expose.jsonl" \
     --terminal-tool expose.list_dir \

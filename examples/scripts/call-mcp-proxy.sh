@@ -7,13 +7,13 @@
 # yields expose.list_dir and expose.read_file (the renames are the
 # config's, see docs/records.md, the expose record). The flag is repeatable,
 # one config per server, each basename a unique server name. Spawning
-# the upstream needs node/npx; the endpoint is the usual local ollama.
+# the upstream needs node/npx; the endpoint is the usual llama.cpp.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 LLMKIT="${LLMKIT:-$ROOT/llmkit}"
 [ -x "$LLMKIT" ] || { echo "$LLMKIT not found - build it first: make" >&2; exit 1; }
 
-"$LLMKIT" call --openai http://localhost:11434/v1 \
+"$LLMKIT" call --openai http://localhost:9931/v1 \
     --model llama3.1 \
     --system-prompt "When tools can answer a question, use them instead of guessing." \
     --mcp-proxy "$ROOT/examples/mcp-proxy/expose.jsonl" \

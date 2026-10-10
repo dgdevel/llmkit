@@ -12,6 +12,6 @@ LLMKIT="${LLMKIT:-$ROOT/llmkit}"
 STORE="${STORE:-/tmp/llmkit-agent-demo.jsonl}"
 
 printf 'what is in this directory?\nsummarize the README in one line\n' |
-"$LLMKIT" agent --openai http://localhost:11434/v1 \
+"$LLMKIT" agent --openai http://localhost:9931/v1 \
     --model llama3.1 \
     --conversation-store "$STORE"

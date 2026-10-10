@@ -1,5 +1,5 @@
 {"type":"header","version":1}
-{"type":"llm","endpoint_protocol":"openai","api_base":"http://localhost:11434/v1","model":"llama3.1","inference_options":{"max_tokens":1024}}
+{"type":"llm","endpoint_protocol":"openai","api_base":"http://localhost:9931/v1","model":"llama3.1","inference_options":{"max_tokens":1024}}
 {"type":"user","content":[{"type":"text","text":"What files are in /tmp?"}]}
 {"type":"thinking","text":"The user wants a directory listing; I should call the fs tool.","partial":false,"signature":""}
 {"type":"response","text":"Let me check.","partial":false}

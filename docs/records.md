@@ -51,7 +51,7 @@ one; `inference_options` are per record, absent means defaults - a new
 minimal - a model-less llama.cpp style endpoint:
 
 ```
-{"type":"llm","endpoint_protocol":"openai","api_base":"http://localhost:11434/v1"}
+{"type":"llm","endpoint_protocol":"openai","api_base":"http://localhost:9931/v1"}
 ```
 
 complete - every field, anthropic flavor:

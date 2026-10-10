@@ -9,6 +9,6 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 LLMKIT="${LLMKIT:-$ROOT/llmkit}"
 [ -x "$LLMKIT" ] || { echo "$LLMKIT not found - build it first: make" >&2; exit 1; }
 
-exec "$LLMKIT" repl --openai http://localhost:11434/v1 \
+exec "$LLMKIT" repl --openai http://localhost:9931/v1 \
     --model llama3.1 \
     --system-prompt "You are a helpful assistant"

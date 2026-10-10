@@ -2,8 +2,8 @@
 # The smallest conversation that runs: one llm record, one user record.
 # stdin closes, so the conversation starts without a flush record.
 #
-# Needs an openai-compatible endpoint at http://localhost:11434
-# (ollama serve; ollama pull llama3.1) - edit examples/runner/minimal.jsonl
+# Needs an openai-compatible endpoint at http://localhost:9931
+# (llama-server; llama.cpp model loading) - edit examples/runner/minimal.jsonl
 # to point elsewhere.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

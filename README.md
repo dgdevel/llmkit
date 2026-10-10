@@ -17,7 +17,7 @@ A single static-purpose executable for llm interaction from the shell and from o
 
 Written in C11. Talks to any openai-compatible endpoint (chat completions and responses apis) and any anthropic-compatible endpoint. Tools are mcp servers: `stdio`, `http` (streamable http) and `sse` (legacy) transports, in all current protocol revisions up to `2026-07-28`.
 
-`repl` is the easies to use, `call` is aimed at use in scripting, `runner` is the full package for applications interaction. Other utilities are provided for interaction with mcps and debugging.
+`repl` is the easiest to use, `agent` give builtin tools to the `repl`, `call` is aimed at use in scripting, `runner` is the full package for applications interaction. Other utilities are provided for interaction with mcps and debugging.
 
 ## Examples
 
@@ -25,7 +25,7 @@ For talking to a model there is `llmkit repl`: the turns are typed, every line i
 The whole exchange renders as it happens - thinking italic, tool calls and their results bold, ascii rules framing each block - on terminals that support the typography, plain everywhere else. Ctrl-C stops the running turn without leaving (the session continues where the transcript left off) or clears the input line; a second Ctrl-C at a clear prompt exits 8, Ctrl-D exits cleanly. Piping stdin turns it into a scripted session with the same rendering, one turn per line.
 
 ```sh
-$ llmkit repl --openai http://localhost:11434/v1 --model llama3.1
+$ llmkit repl --openai http://localhost:9931/v1 --model llama3.1
 [10:31:04] =====================================================================
 > hello, what is 2+2?
 [10:31:04] ---------------------------------------------------------------------
@@ -42,7 +42,7 @@ Every separator line is stamped with the wall clock, and each turn that finishes
 For work that needs hands there is `llmkit agent`: the same chat with the [built-in mcp tools](docs/builtin-mcp.md) attached - web search and fetch, file tools, process tools, skills - and the working directory's `AGENTS.md` injected after the system prompt. `--conversation-store <file>` persists the conversation as jsonl and resumes it: an existing store replays in full before the first prompt, then the session continues where it left off.
 
 ```sh
-$ llmkit agent --openai http://localhost:11434/v1 --model llama3.1 \
+$ llmkit agent --openai http://localhost:9931/v1 --model llama3.1 \
       --conversation-store ~/chats/project.jsonl
 [10:31:04] =====================================================================
 list the failing tests and fix them
@@ -51,6 +51,8 @@ builtin.files_search {"path":".","regex":"FAIL"}
 [10:31:06] ---------------------------------------------------------------------
 ...
 ```
+`agent` is aimed at frugality, has no configuration file or automatic conversation memory, and target local llm users with very low token usage.
+
 
 On the tool side of the house there is `llmkit mcp-repl`: a repl dedicated to one mcp server, the tool-debugging front-end. No model in the loop - the command line names one server (`--stdio`, `--http`, `--sse`), the connection's `tools/list` becomes the vocabulary, and every line is one direct call:
 
@@ -75,7 +77,7 @@ Arguments are json literals, bound positionally onto the tool's schema (`add(1, 
 For one-shot use from the shell there is `llmkit call`: flags in, the answer as plain text on stdout, thinking omitted, no records to write -
 
 ```sh
-$ llmkit call --openai http://localhost:11434/v1 --model llama3.1 \
+$ llmkit call --openai http://localhost:9931/v1 --model llama3.1 \
       --system-prompt "You are a helpful assistant" \
       --prompt "hello, how are you?"
 I'm fine, thank you!
@@ -86,7 +88,7 @@ I'm fine, thank you!
 Anything past one prompt is `runner` territory.
 
 ```sh
-{ echo '{"type":"llm","endpoint_protocol":"openai","api_base":"http://localhost:11434/v1","model":"llama3.1","inference_options":{"max_tokens":1024}}'
+{ echo '{"type":"llm","endpoint_protocol":"openai","api_base":"http://localhost:9931/v1","model":"llama3.1","inference_options":{"max_tokens":1024}}'
   echo '{"type":"user","content":[{"type":"text","text":"hello"}]}'
 } | llmkit runner
 ```
@@ -118,9 +120,9 @@ A saved transcript reads back human again with `llmkit prettyprint`: the runner'
 To watch a live conversation instead of a recorded one there is `llmkit proxy`: it listens on plain http, forwards every POST to one fixed llm endpoint and renders whatever passes - requests and responses, streaming included - with the same typography on stdout. Point any client's base url at it:
 
 ```sh
-$ llmkit proxy --openai http://localhost:11434/v1
+$ llmkit proxy --openai http://localhost:9931/v1
 llmkit proxy: listening on http://127.0.0.1:8080 (plain tcp, no tls)
-llmkit proxy: forwarding to openai http://localhost:11434/v1/chat/completions
+llmkit proxy: forwarding to openai http://localhost:9931/v1/chat/completions
 ```
 
 The protocol flag names the language the upstream speaks (`--anthropic`, `--openai`, `--openai-responses`), so both directions parse: a request renders as the conversation it carries, a response renders live as it streams - partials, tool calls, thinking and the closing usage line, exactly the prettyprint view. The listening side is plain tcp only (no tls); the upstream may be https, curl carries that half. `--listen [host:]port` moves the endpoint, `--key` supplies auth the client did not send.
@@ -150,7 +152,7 @@ Runnable examples for every command live in [examples/](examples/) - see [docs/r
 - `--anthropic` / `--openai` / `--openai-responses` - the endpoint protocol,
   exactly one of the three
 - `<api_base>` - positional, the endpoint base url
-  (e.g. `http://localhost:11434/v1`)
+  (e.g. `http://localhost:9931/v1`)
 - `--key <token>` - the api key, once
 - `--model <name>` - the model name, once
 - `--max-tokens <n>` - positive integer, an inference knob, once

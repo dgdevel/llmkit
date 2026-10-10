@@ -37,7 +37,7 @@ examples/
     |                             a conversation store that resumes
     |-- mcp-repl.sh               a piped mcp-repl session over builtin-mcp
     |-- prettyprint.sh             a saved transcript rendered repl-style
-    `-- proxy.sh                   llmkit proxy in front of ollama, one watched request
+    `-- proxy.sh                   llmkit proxy in front of llama.cpp, one watched request
 ```
 
 ## prerequisites
@@ -47,8 +47,8 @@ make    # builds ./llmkit (needs libcjson and libcurl)
 ```
 
 The runner examples talk to an openai-compatible or anthropic-compatible
-endpoint. The shipped files assume a local ollama (`ollama serve`, then
-`ollama pull llama3.1`); edit the `llm` record of any example to point it
+endpoint. The shipped files assume a local llama.cpp (`llama server -m model.gguf`);
+edit the `llm` record of any example to point it
 elsewhere - see [../docs/records.md](../docs/records.md) for the
 field-by-field catalogue.
 `examples/runner/complete.jsonl` targets the real anthropic api and contains
@@ -82,7 +82,7 @@ Or by hand:
 
 ```sh
 llmkit runner < examples/runner/minimal.jsonl
-llmkit call --openai http://localhost:11434/v1 --model llama3.1 --prompt "hello"
+llmkit call --openai http://localhost:9931/v1 --model llama3.1 --prompt "hello"
 ```
 
 Every `.jsonl` file here is one record per line: jsonl is oneline by
