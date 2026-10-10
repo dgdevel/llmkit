@@ -3277,7 +3277,9 @@ static void test_repl(void) {
         call_cfg_free(&c);
     }
 
-    /* ---- timing line: the turn's token totals, summed over rounds ---- */
+    /* ---- timing line: the turn's token reading, the last round's usage
+       (each round re-sends the whole conversation; summing would
+       inflate past the endpoint's own numbers) ---- */
     {
         fturn_t turns[] = {
             { .recs = (const char *[]){
@@ -3299,9 +3301,9 @@ static void test_repl(void) {
         repl_cfg(&c, PROTO_OPENAI);
         repl_out_t r = repl_session_ft(&c, "hi\n", 3);
         check(r.rc == EXIT_OK, "repl: token session exits 0");
-        check(strstr(r.ob, "| input 300 tok | output 50 tok "
-                           "| total 350 tok") != NULL,
-              "repl: timing line sums the turn's usage over its rounds");
+        check(strstr(r.ob, "| input 200 tok | output 30 tok "
+                           "| total 230 tok") != NULL,
+              "repl: timing line takes the turn's last round usage");
         repl_session_free(&r);
         call_cfg_free(&c);
 
@@ -4933,7 +4935,8 @@ static void test_llm_proxy(void) {
         check_str(j.b.data,
                   "{\"type\":\"error\",\"code\":\"api_error\","
                   "\"message\":\"HTTP 401: bad key "
-                  "(invalid_request_error)\",\"fatal\":true}\n",
+                  "(invalid_request_error)\",\"fatal\":true,"
+                  "\"status\":401}\n",
                   "proxy: openai error shaping");
         buf_free(&j.b);
         buf_init(&j.b);
@@ -4941,7 +4944,8 @@ static void test_llm_proxy(void) {
                                jb_fn, &j);
         check_str(j.b.data,
                   "{\"type\":\"error\",\"code\":\"api_error\","
-                  "\"message\":\"HTTP 429: bad key\",\"fatal\":true}\n",
+                  "\"message\":\"HTTP 429: bad key\",\"fatal\":true,"
+                  "\"status\":429}\n",
                   "proxy: anthropic error shaping (no type suffix)");
         buf_free(&j.b);
     }

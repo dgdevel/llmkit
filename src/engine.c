@@ -631,8 +631,63 @@ int engine_pre_start_stop(engine_t *e) {
     return EXIT_INTERRUPTED;
 }
 
+/* ================= llm call retry (agent, sec.12) ================= */
+
+/* the fibonacci schedule without its initial numbers: attempt k waits
+   2,3,5,8,13,21,34,... seconds. Unbounded by design - the growing delay
+   is the only limit; SIGINT ends any wait */
+static double fib_delay_sec(long attempt) {
+    double a = 2, b = 3;
+    for (long i = 1; i < attempt; i++) {
+        double next = a + b;
+        a = b;
+        b = next;
+    }
+    return a;
+}
+
+/* a wait SIGINT can end: false when the user stopped the session before
+   the delay elapsed */
+static bool wait_stop_aware(double seconds) {
+    double deadline = mono_now() + seconds;
+    while (!g_stop_flag) {
+        double left = deadline - mono_now();
+        if (left <= 0) return true;
+        int ms = left < 0.2 ? (int)(left * 1000.0) : 200;
+        msleep(ms < 1 ? 1 : ms);
+    }
+    return false;
+}
+
+/* retryability of a failed llm round, judged from its error record.
+   Transport failures and streams that died mid-response carry no HTTP
+   status - always worth another attempt. A status decides the rest:
+   408, 429 and the 5xx family yes, every other 4xx no (the request
+   itself is wrong and would fail again). A 429's Retry-After rides the
+   record as seconds when the endpoint sent the delta-seconds form; the
+   caller waits at least that long. */
+static bool llm_error_retryable(const cJSON *rec, double *retry_after) {
+    *retry_after = 0;
+    if (!rec) return false;
+    const cJSON *st = cJSON_GetObjectItemCaseSensitive(rec, "status");
+    if (cJSON_IsNumber(st)) {
+        long s = (long)st->valuedouble;
+        if (s != 408 && s != 429 && s < 500) return false;
+        const cJSON *ra =
+            cJSON_GetObjectItemCaseSensitive(rec, "retry_after");
+        if (cJSON_IsNumber(ra) && ra->valuedouble >= 0)
+            *retry_after = ra->valuedouble;
+        return true;
+    }
+    const char *code = rec_str(rec, "code");
+    return code && (!strcmp(code, EC_CONNECT_FAILED) ||
+                    !strcmp(code, EC_HTTP_ERROR) ||
+                    !strcmp(code, EC_API_ERROR));
+}
+
 int engine_run(engine_t *e) {
     long turns = 0;
+    long retries = 0; /* consecutive retried llm calls; reset on success */
     if (!e->tool_exec) e->tool_exec = default_tool_exec;
     for (;;) {
         if (g_stop_flag) {
@@ -654,6 +709,32 @@ int engine_run(engine_t *e) {
         if (kind == TURN_FATAL) {
             const char *code = rec_str(out.error_rec, "code");
             int rc = exit_code_of(code);
+            double ra = 0;
+            if (e->llm_retry && llm_error_retryable(out.error_rec, &ra)) {
+                retries++;
+                double delay = fib_delay_sec(retries);
+                if (ra > delay) delay = ra; /* the endpoint's own floor */
+                /* shown, not fatal: the round is about to be retried */
+                char msg[896];
+                const char *m = rec_str(out.error_rec, "message");
+                snprintf(msg, sizeof msg,
+                         "%s%sretry %ld: next attempt in %.0fs",
+                         m ? m : "", (m && *m) ? " - " : "", retries, delay);
+                cJSON_ReplaceItemInObjectCaseSensitive(
+                    out.error_rec, "message", cJSON_CreateString(msg));
+                cJSON_ReplaceItemInObjectCaseSensitive(
+                    out.error_rec, "fatal", cJSON_CreateBool(false));
+                engine_emit_record(e, out.error_rec);
+                /* the retry resends the round's whole input: drop what the
+                   failed attempt streamed into the transcript (it stays on
+                   the display and in the store - cosmetic only) */
+                tlist_truncate(&e->tr, tr_before);
+                if (!wait_stop_aware(delay)) {
+                    engine_drain_input(e); /* drop rule for pre-stop records */
+                    return engine_stop_orderly(e);
+                }
+                continue;
+            }
             e->emit(e->emit_ctx, out.error_rec);
             engine_mcp_shutdown(e);
             return rc;
@@ -663,6 +744,7 @@ int engine_run(engine_t *e) {
             return engine_stop_orderly(e);
         }
         turns++;
+        retries = 0; /* the call went through: the schedule starts over */
 
         if (kind == TURN_TOOLS) {
             bool susp_int = false, susp_steer = false, term = false;

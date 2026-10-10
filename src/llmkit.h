@@ -196,6 +196,7 @@ typedef struct http_req {
     long status;
     buf_t content_type;
     char session_id[256]; /* Mcp-Session-Id response header, "" if none */
+    char retry_after[32]; /* Retry-After response header, "" if none */
     /* streaming: if set, response bytes go here instead of resp (resp still
        captures when on_data is NULL) */
     void (*on_data)(void *ctx, const char *bytes, size_t n);
@@ -495,6 +496,8 @@ struct engine {
     int wire_proto;
     bool keep_mcp; /* repl: sessions continue after engine_run endings;
                       mcp children die at engine_free only (sec.12) */
+    bool llm_retry; /* agent: retry failed llm calls on the fibonacci
+                       schedule 2,3,5,8,13,21,34,... seconds (sec.12) */
 
     /* seams for tests */
     tool_exec_fn tool_exec;
@@ -841,6 +844,7 @@ typedef struct repl_opts {
     bool agents_md;             /* inject ./AGENTS.md as a second system
                                    content block, after the prompt */
     const char *store;          /* conversation store path; NULL = none */
+    bool llm_retry;             /* retry failed llm calls, fibonacci delays */
 } repl_opts_t;
 
 /* run the chat session: records compiled from c, input lines from in_fd,

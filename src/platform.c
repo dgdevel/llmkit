@@ -560,6 +560,14 @@ static size_t hdr_cb(char *buf, size_t sz, size_t nm, void *ud) {
             memcpy(a->r->session_id, v, vn);
             a->r->session_id[vn] = '\0';
         }
+    } else if (n >= 13 && strncasecmp(buf, "Retry-After:", 12) == 0) {
+        const char *v = buf + 12;
+        size_t vn = n - 12;
+        trim_hdr_val(&v, &vn);
+        if (vn < sizeof a->r->retry_after) {
+            memcpy(a->r->retry_after, v, vn);
+            a->r->retry_after[vn] = '\0';
+        }
     }
     return n;
 }
@@ -703,6 +711,18 @@ cJSON *http_transport_error(http_req_t *req) {
     return rec_error(EC_HTTP_ERROR, msg, true);
 }
 
+/* the endpoint's status rides the record as a number (the retry policy
+   judges retryability from it), together with Retry-After's
+   delta-seconds form when the endpoint sent one */
+static void attach_http_status(cJSON *rec, http_req_t *req) {
+    cJSON_AddNumberToObject(rec, "status", (double)req->status);
+    if (!req->retry_after[0]) return;
+    char *end = NULL;
+    double ra = strtod(req->retry_after, &end);
+    if (end != req->retry_after && *end == '\0' && ra >= 0)
+        cJSON_AddNumberToObject(rec, "retry_after", ra);
+}
+
 cJSON *http_status_error(http_req_t *req, bool with_type) {
     cJSON *body =
         cJSON_ParseWithLength(req->resp.data ? req->resp.data : "", req->resp.len);
@@ -719,7 +739,9 @@ cJSON *http_status_error(http_req_t *req, bool with_type) {
                 snprintf(msg, sizeof msg, "HTTP %ld: %s", req->status,
                          m->valuestring);
             cJSON_Delete(body);
-            return rec_error(EC_API_ERROR, msg, true);
+            cJSON *rec = rec_error(EC_API_ERROR, msg, true);
+            attach_http_status(rec, req);
+            return rec;
         }
     }
     cJSON_Delete(body);
@@ -730,7 +752,9 @@ cJSON *http_status_error(http_req_t *req, bool with_type) {
         cut[n] = '\0';
     }
     snprintf(msg, sizeof msg, "HTTP %ld: %s", req->status, cut);
-    return rec_error(EC_HTTP_ERROR, msg, true);
+    cJSON *rec = rec_error(EC_HTTP_ERROR, msg, true);
+    attach_http_status(rec, req);
+    return rec;
 }
 
 void llm_http_setup(engine_t *e, const char *path, bool stream,

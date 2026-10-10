@@ -42,8 +42,10 @@ typedef struct repl_sink {
     double think_s;  /* thinking generation, accumulated over all blocks */
     double resp_s;   /* response generation, accumulated over all blocks */
     bool resp_done;  /* a response block completed this turn */
-    /* the turn's tokens as the endpoint reported them, summed over the
-       turn's model rounds: usage rides each round's last record */
+    /* the turn's tokens as the endpoint reported them: each model round
+       re-sends the whole conversation, so the reading that matches the
+       endpoint's own log is the LAST round's - input is the conversation's
+       size at the turn's end, output that round's generation */
     double tok_in;   /* input tokens */
     double tok_out;  /* output tokens */
     bool have_usage; /* a record of this turn reported usage */
@@ -86,15 +88,20 @@ static void timing_reset(repl_sink_t *s) {
     s->have_usage = false;
 }
 
-/* the turn's token totals, summed round by round: usage rides the last
-   record of each model round (the wires' rule), so a turn whose tools
-   took several rounds reports several. Absent usage is simply not
+/* the turn's token reading, round by round: usage rides the last record
+   of each model round (the wires' rule), so a turn whose tools took
+   several rounds reports several. Every round's input already counts the
+   whole conversation again - summing the rounds would inflate the turn
+   far past the endpoint's own numbers - so the LAST round's usage is
+   kept instead: input = the conversation's size at the turn's end,
+   output = the final round's generation, exactly what the endpoint
+   logged for the turn's last request. Absent usage is simply not
    counted - the rendering shows only what the endpoint reported */
 static void usage_accum(repl_sink_t *s, const cJSON *rec) {
     const cJSON *u = cJSON_GetObjectItemCaseSensitive(rec, "usage");
     if (!cJSON_IsObject(u)) return;
-    s->tok_in += rec_num(u, "input_tokens", 0.0);
-    s->tok_out += rec_num(u, "output_tokens", 0.0);
+    s->tok_in = rec_num(u, "input_tokens", 0.0);
+    s->tok_out = rec_num(u, "output_tokens", 0.0);
     s->have_usage = true;
 }
 
@@ -102,7 +109,7 @@ static void usage_accum(repl_sink_t *s, const cJSON *rec) {
    clock of the completion, then the three spans - first token since the
    request (prompt processing), thinking generation and response
    generation, tool rounds excluded, accumulated over every block - and
-   the turn's token totals when the endpoint reported any */
+   the turn's token reading when the endpoint reported any */
 static void render_timing(repl_sink_t *s) {
     char ts[32] = "", tok[96] = "", line[256];
     stamp_now(ts, sizeof ts);
@@ -379,6 +386,7 @@ int repl_run_ex(const call_cfg_t *c, const repl_opts_t *o, int in_fd,
     engine_t *e = engine_new(repl_sink_fn, &sink);
     if (factory) e->wire_factory = factory;
     e->keep_mcp = true; /* the session continues; engine_free tears down */
+    e->llm_retry = o->llm_retry; /* agent: fibonacci retry of llm calls */
 
     /* input first: every goto done below releases what it meets */
     bool tty = isatty(in_fd);
@@ -653,7 +661,8 @@ int cmd_agent_repl(int argc, char **argv) {
     repl_opts_t o = { .default_prompt = prompt_system_prompts_agent,
                       .builtin_mcp = true,
                       .agents_md = true,
-                      .store = store };
+                      .store = store,
+                      .llm_retry = true };
     int rc = repl_run_ex(&c, &o, STDIN_FILENO, stdout, exe, NULL);
     call_cfg_free(&c);
     return rc;
