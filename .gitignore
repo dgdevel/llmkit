@@ -4,3 +4,5 @@ test/selfcheck
 test/selfcheck.exe
 .*
 dist/
+src/prompts.gen.c
+src/prompts.gen.h

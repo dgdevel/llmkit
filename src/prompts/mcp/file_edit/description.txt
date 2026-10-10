@@ -1,0 +1,1 @@
+Edit a file by replacing the first occurrence of a string with another.

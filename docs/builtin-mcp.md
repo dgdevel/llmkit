@@ -32,10 +32,14 @@ way it spawns `mcp-proxy` children.
 
 ## The tools
 
-All descriptions (tool and argument) ship as empty strings by design.
-Every one of them lives in one block at the top of `src/builtin.c`
-(`DESCRIPTIONS - the one place to edit them`): change the string after the
-`=` sign and rebuild. An empty string is sent as an empty description.
+Every tool and argument description is one text file: tool descriptions
+in `src/prompts/mcp/<tool>/description.txt`, argument descriptions in
+`src/prompts/mcp/<tool>/arguments/<argument>.txt`. `tools/gen-prompts.sh`
+bundles them into the binary at build time (the generated
+`src/prompts.gen.c` / `src/prompts.gen.h` pair, rerun by the Makefile
+whenever a text or the script changes), so everything still ships as a
+single file. Edit the txt files and rebuild; an empty file is sent as an
+empty description.
 
 | tool | arguments | returns |
 |---|---|---|

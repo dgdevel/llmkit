@@ -1,11 +1,15 @@
 /* builtin.c - llmkit builtin-mcp: a stdio mcp server offering generic-use
    tools (web search/fetch, file list/search/read/create/edit, process
    exec/status). No config: `llmkit builtin-mcp` serves json-rpc on
-   stdin/stdout. All tool and argument descriptions start empty and live in
-   the DESCRIPTIONS block right below - edit the strings there. Everything
-   is stateless except the process tools: their spawned-process table (pids,
-   exit codes and one temp output file each) lives until the server exits. */
+   stdin/stdout. Tool and argument descriptions live in src/prompts/mcp/
+   <tool>/description.txt and .../arguments/<arg>.txt, bundled into the
+   binary at build time by tools/gen-prompts.sh (an empty txt is sent as
+   an empty description) - edit the txt files and rebuild. Everything is
+   stateless except the process tools: their spawned-process table (pids,
+   exit codes and one temp output file each) lives until the server
+   exits. */
 #include "llmkit.h"
+#include "prompts.gen.h"
 
 #include <ctype.h>
 #include <dirent.h>
@@ -52,10 +56,8 @@
 #endif
 
 /* ===================================================================== */
-/* ==== DESCRIPTIONS - the desc column of the tool tables below is ===== */
-/* ==== the one place to edit them. Every description starts empty  ==== */
-/* ==== (""): an empty string is sent as an empty description, a    ==== */
-/* ==== nonempty one verbatim.                                      ==== */
+/* ==== the desc column of the tool tables below is the one place  ===== */
+/* ==== referencing them: each name is a bundled src/prompts text. ==== */
 /* ===================================================================== */
 
 /* ================= tool table ================= */
@@ -75,52 +77,59 @@ typedef struct tool_def {
 } tool_def_t;
 
 static const arg_def_t ARGS_web_search[] = {
-    {"keywords", "string", "", true},
+    {"keywords", "string", prompt_mcp_web_search_arguments_keywords, true},
 };
 static const arg_def_t ARGS_web_fetch[] = {
-    {"url", "string", "", true},
+    {"url", "string", prompt_mcp_web_fetch_arguments_url, true},
 };
 static const arg_def_t ARGS_files_list[] = {
-    {"path", "string", "", true},
-    {"regex", "string", "", true},
+    {"path", "string", prompt_mcp_files_list_arguments_path, true},
+    {"regex", "string", prompt_mcp_files_list_arguments_regex, true},
 };
 static const arg_def_t ARGS_files_search[] = {
-    {"path", "string", "", true},
-    {"regex", "string", "", true},
+    {"path", "string", prompt_mcp_files_search_arguments_path, true},
+    {"regex", "string", prompt_mcp_files_search_arguments_regex, true},
 };
 static const arg_def_t ARGS_file_read[] = {
-    {"path", "string", "", true},
-    {"lines_offset", "integer", "", true},
-    {"lines_length", "integer", "", true},
+    {"path", "string", prompt_mcp_file_read_arguments_path, true},
+    {"lines_offset", "integer", prompt_mcp_file_read_arguments_lines_offset,
+     true},
+    {"lines_length", "integer", prompt_mcp_file_read_arguments_lines_length,
+     true},
 };
 static const arg_def_t ARGS_file_create[] = {
-    {"path", "string", "", true},
-    {"content", "string", "", true},
-    {"overwrite", "boolean", "", false},
+    {"path", "string", prompt_mcp_file_create_arguments_path, true},
+    {"content", "string", prompt_mcp_file_create_arguments_content, true},
+    {"overwrite", "boolean", prompt_mcp_file_create_arguments_overwrite,
+     false},
 };
 static const arg_def_t ARGS_file_edit[] = {
-    {"path", "string", "", true},
-    {"oldString", "string", "", true},
-    {"newString", "string", "", true},
-    {"line_number", "integer", "", true},
+    {"path", "string", prompt_mcp_file_edit_arguments_path, true},
+    {"oldString", "string", prompt_mcp_file_edit_arguments_oldString, true},
+    {"newString", "string", prompt_mcp_file_edit_arguments_newString, true},
+    {"line_number", "integer", prompt_mcp_file_edit_arguments_line_number,
+     true},
 };
 static const arg_def_t ARGS_process_exec[] = {
-    {"cmdline", "string", "", true},
+    {"cmdline", "string", prompt_mcp_process_exec_arguments_cmdline, true},
 };
 static const arg_def_t ARGS_process_status[] = {
-    {"pid", "integer", "", true},
+    {"pid", "integer", prompt_mcp_process_status_arguments_pid, true},
 };
 
 static const tool_def_t TOOLS[] = {
-    {"web_search", "", ARGS_web_search, 1},
-    {"web_fetch", "", ARGS_web_fetch, 1},
-    {"files_list", "", ARGS_files_list, 2},
-    {"files_search", "", ARGS_files_search, 2},
-    {"file_read", "", ARGS_file_read, 3},
-    {"file_create", "", ARGS_file_create, 3},
-    {"file_edit", "", ARGS_file_edit, 4},
-    {"process_exec", "", ARGS_process_exec, 1},
-    {"process_status", "", ARGS_process_status, 1},
+    {"web_search", prompt_mcp_web_search_description, ARGS_web_search, 1},
+    {"web_fetch", prompt_mcp_web_fetch_description, ARGS_web_fetch, 1},
+    {"files_list", prompt_mcp_files_list_description, ARGS_files_list, 2},
+    {"files_search", prompt_mcp_files_search_description, ARGS_files_search,
+     2},
+    {"file_read", prompt_mcp_file_read_description, ARGS_file_read, 3},
+    {"file_create", prompt_mcp_file_create_description, ARGS_file_create, 3},
+    {"file_edit", prompt_mcp_file_edit_description, ARGS_file_edit, 4},
+    {"process_exec", prompt_mcp_process_exec_description, ARGS_process_exec,
+     1},
+    {"process_status", prompt_mcp_process_status_description,
+     ARGS_process_status, 1},
 };
 enum { TOOLS_N = sizeof TOOLS / sizeof TOOLS[0] };
 

@@ -1,0 +1,1 @@
+List a filesystem tree recursively. Only entries whose path matches the regex anywhere are kept.

@@ -1005,7 +1005,9 @@ nothing connects or runs. The prompt channel is the terminal itself.
 - The command line compiles to the same leading records `call` compiles -
   one `llm` record (carrying `inference_options.max_tokens` when
   `--max-tokens` is given, `inference_options.reasoning_effort` when
-  `--reasoning-effort` is given), the optional `system` record, the optional
+  `--reasoning-effort` is given), the `system` record - the bundled default
+  prompt of `src/prompts/system_prompts/repl.txt` when `--system-prompt` is
+  absent, that flag's text otherwise - the optional
   `tools` record with `--terminal-tool` entries folded - plus one record
   `call` does not compile: an `options` record setting `stream_interval`
   to 0. Display latency is the point of a chat front-end: every streamed

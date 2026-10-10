@@ -15,9 +15,13 @@ endif
 SRC  = src/buf.c src/sse.c src/platform.c src/jsonl.c src/wire_openai.c \
        src/wire_anthropic.c src/engine.c src/mcp.c src/agent.c src/proxy.c \
        src/builtin.c src/call.c src/editor.c src/repl.c src/mcprepl.c \
-       src/pretty.c src/llmproxy.c src/vendor/linenoise/linenoise.c
+       src/pretty.c src/llmproxy.c src/prompts.gen.c \
+       src/vendor/linenoise/linenoise.c
 MAIN = src/main.c
 TEST = test/selfcheck.c
+
+# prompt texts bundled into the binary (the rule lives below `all`)
+PROMPTS_TXT = $(shell find src/prompts -type f -name '*.txt' 2>/dev/null)
 
 # the vendored openbsd regex (src/vendor/regex): windows only - mingw-w64
 # ships no <regex.h>, posix links the libc one. detected from the compiler
@@ -35,15 +39,22 @@ endif
 
 all: llmkit
 
+# prompt texts bundled into the binary: tools/gen-prompts.sh preprocesses
+# src/prompts/**/*.txt into src/prompts.gen.{c,h} (a changed txt or script
+# regenerates them before the next compilation). both targets share the
+# one recipe run: gen-prompts.sh writes the pair together.
+src/prompts.gen.c src/prompts.gen.h: $(PROMPTS_TXT) tools/gen-prompts.sh
+	tools/gen-prompts.sh
+
 # runs before every compilation (order-only: gates the build without
 # forcing a relink when nothing changed)
 check-ascii:
 	@tools/check-ascii.sh
 
-llmkit: $(MAIN) $(SRC) src/llmkit.h | check-ascii
+llmkit: $(MAIN) $(SRC) src/llmkit.h src/prompts.gen.h | check-ascii
 	$(CC) $(CFLAGS) -o $@ $(MAIN) $(SRC) $(LDLIBS)
 
-test/selfcheck: $(TEST) $(SRC) src/llmkit.h | check-ascii
+test/selfcheck: $(TEST) $(SRC) src/llmkit.h src/prompts.gen.h | check-ascii
 	@mkdir -p test
 	$(CC) $(CFLAGS) -o $@ $(TEST) $(SRC) $(LDLIBS)
 
@@ -52,7 +63,7 @@ check: test/selfcheck
 
 clean:
 	rm -rf dist
-	rm -f llmkit test/selfcheck llmkit.exe
+	rm -f llmkit test/selfcheck llmkit.exe src/prompts.gen.c src/prompts.gen.h
 
 # tag, build and publish binaries to GitHub Releases (needs gh)
 # usage: make release TAG=v1.2.3

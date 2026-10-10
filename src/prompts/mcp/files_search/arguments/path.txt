@@ -1,0 +1,1 @@
+Root of the walk: a directory is walked recursively, a single file is searched on its own.

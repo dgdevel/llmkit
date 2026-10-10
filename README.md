@@ -144,7 +144,9 @@ Runnable examples for every command live in [examples/](examples/) - see [docs/r
   passed through unconstrained (providers differ: `high`, `medium`, `low`,
   numbers, ...) - an unsupported value surfaces as the endpoint's own
   `api_error`; under `--anthropic` the option is silently not sent
-- `--system-prompt <text>` - the system prompt, once
+- `--system-prompt <text>` - the system prompt, once; `repl` starts from
+  a bundled default prompt when the flag is absent, the flag's text
+  replaces it
 - `--prompt <text|->` - `call` only: the one prompt; `-` reads it from
   stdin
 - `--header <name>=<value>` - extra http header; repeatable, a later

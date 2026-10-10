@@ -102,8 +102,26 @@ typedef struct fwire {
     int nturns, pos;
 } fwire_t;
 
+/* the system text the engine carries at its first turn, captured by
+   fwire_turn (one buffer, read right after the session under test) */
+static char g_seen_system[512];
+
+static void capture_system(const engine_t *e) {
+    g_seen_system[0] = '\0';
+    if (!e || !e->system) return;
+    const cJSON *content =
+        cJSON_GetObjectItemCaseSensitive(e->system, "content");
+    const cJSON *c = cJSON_IsArray(content) ? content->child : NULL;
+    if (!c) return;
+    const cJSON *tx = cJSON_GetObjectItemCaseSensitive(c, "text");
+    if (cJSON_IsString(tx))
+        snprintf(g_seen_system, sizeof g_seen_system, "%s",
+                 tx->valuestring ? tx->valuestring : "");
+}
+
 static int fwire_turn(wire_t *base, engine_t *e, turn_out_t *out) {
     fwire_t *f = (fwire_t *)base;
+    if (f->pos == 0) capture_system(e);
     memset(out, 0, sizeof *out);
     fturn_t *t = &f->turns[f->pos < f->nturns ? f->pos++ : f->nturns - 1];
     if (t->kind == TURN_FATAL) {
@@ -1466,7 +1484,7 @@ static void test_builtin(void) {
     check(builtin_regex_match("plain", "a plain match", NULL, 0),
           "builtin: literal substring");
 
-    /* tools/list: every tool present, descriptions empty */
+    /* tools/list: every tool present, descriptions bundled (src/prompts) */
     {
         loop_io_t io = { 0 };
         buf_init(&io.out);
@@ -1485,7 +1503,7 @@ static void test_builtin(void) {
                                 "files_search", "file_read",   "file_create",
                                 "file_edit",    "process_exec",
                                 "process_status" };
-        bool names_ok = true, descs_empty = true, args_empty = true;
+        bool names_ok = true, descs_set = true, args_set = true;
         if (cJSON_IsArray(tools))
             for (int i = 0; i < 9; i++) {
                 const cJSON *t = cJSON_GetArrayItem(tools, i);
@@ -1494,24 +1512,24 @@ static void test_builtin(void) {
                     names_ok = false;
                 const cJSON *d =
                     cJSON_GetObjectItemCaseSensitive(t, "description");
-                if (!cJSON_IsString(d) || d->valuestring[0])
-                    descs_empty = false;
+                if (!cJSON_IsString(d) || !d->valuestring[0])
+                    descs_set = false;
                 const cJSON *schema =
                     cJSON_GetObjectItemCaseSensitive(t, "inputSchema");
                 const cJSON *props = cJSON_GetObjectItemCaseSensitive(
                     schema, "properties");
-                if (!cJSON_IsObject(props)) args_empty = false;
+                if (!cJSON_IsObject(props)) args_set = false;
                 for (const cJSON *p = props ? props->child : NULL; p;
                      p = p->next) {
                     const cJSON *pd =
                         cJSON_GetObjectItemCaseSensitive(p, "description");
-                    if (!cJSON_IsString(pd) || pd->valuestring[0])
-                        args_empty = false;
+                    if (!cJSON_IsString(pd) || !pd->valuestring[0])
+                        args_set = false;
                 }
             }
         check(names_ok, "builtin: tool names in order");
-        check(descs_empty, "builtin: tool descriptions all empty");
-        check(args_empty, "builtin: argument descriptions all empty");
+        check(descs_set, "builtin: tool descriptions all non-empty");
+        check(args_set, "builtin: argument descriptions all non-empty");
         cJSON_Delete(r);
         buf_free(&io.out);
     }
@@ -2747,6 +2765,37 @@ static void test_repl(void) {
         check(strchr(r.ob, '\033') == NULL,
               "repl: off-tty styling fallback: no escape sequences");
         buf_free(&want);
+        repl_session_free(&r);
+        call_cfg_free(&c);
+    }
+
+    /* ---- system prompt: bundled default, explicit override, empty ---- */
+    check(strncmp(g_seen_system, "You are the assistant behind llmkit repl",
+                  strlen("You are the assistant behind llmkit repl")) == 0,
+          "repl: the bundled default prompt is compiled in");
+    {
+        fturn_t turns[] = {
+            { .recs = (const char *[]){
+                  "{\"type\":\"response\",\"text\":\"ok\",\"partial\":false}"},
+              .nrecs = 1, .kind = TURN_FINAL, .abort_after = -1 },
+        };
+        g_factory_wire = fwire_new(turns, 1);
+        repl_cfg(&c, PROTO_OPENAI);
+        c.system = strdup("custom system text");
+        repl_out_t r = repl_session(&c, "hi\n", 3);
+        check(r.rc == EXIT_OK, "repl: override session exits 0");
+        check_str(g_seen_system, "custom system text",
+                  "repl: --system-prompt replaces the bundled default");
+        repl_session_free(&r);
+        call_cfg_free(&c);
+
+        g_factory_wire = fwire_new(turns, 1);
+        repl_cfg(&c, PROTO_OPENAI);
+        c.system = strdup("");
+        r = repl_session(&c, "hi\n", 3);
+        check(r.rc == EXIT_OK, "repl: empty-prompt session exits 0");
+        check_str(g_seen_system, "",
+                  "repl: an explicit empty text beats the bundled default");
         repl_session_free(&r);
         call_cfg_free(&c);
     }

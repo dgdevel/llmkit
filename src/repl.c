@@ -3,8 +3,11 @@
    the display sink: ascii separators, tty-gated bold and italic,
    thinking and tool traffic rendered. Input is the shared raw-mode line
    editor of src/editor.c on a tty - the two Ctrl-C stages and the typed
-   echo lean on it - or its plain line loop on anything else. */
+   echo lean on it - or its plain line loop on anything else. Without
+   --system-prompt the session starts from the bundled default prompt
+   (src/prompts/system_prompts/repl.txt, tools/gen-prompts.sh). */
 #include "llmkit.h"
+#include "prompts.gen.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -243,7 +246,16 @@ int repl_run(const call_cfg_t *c, int in_fd, FILE *out, const char *exe_path,
     e->keep_mcp = true; /* the session continues; engine_free tears down */
     bool tty = false;
 
-    int rc = call_compile(c, e, exe_path);
+    /* the bundled default system prompt: an explicit --system-prompt
+       replaces it, and (per the call contract) a different empty text vs
+       no record stays distinguishable on the wire. the cast is safe: the
+       config is read-only past this point (call_compile never writes
+       through the pointer, cmd_repl frees the original). */
+    call_cfg_t cfg = *c;
+    if (!cfg.system)
+        cfg.system = (char *)prompt_system_prompts_repl;
+
+    int rc = call_compile(&cfg, e, exe_path);
     if (rc) goto done;
     {
         /* the one record call does not compile: display latency is the
