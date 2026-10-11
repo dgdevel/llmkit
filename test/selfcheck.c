@@ -1947,23 +1947,26 @@ static void test_builtin(void) {
           "builtin: file_analyze needs a path");
     free(t);
 
-    /* process tools: completed reply, timestamps, tail, temp file */
+    /* process tools: completed reply, stream-stamped lines, tail, temp
+       file */
     t = bc_call("process_exec", "{\"cmdline\":\"echo one; echo two\"}", &ie);
     check(!ie && t && strstr(t, "Exit code: 0\n") &&
               strstr(t, "Last three output lines:\n") &&
-              strstr(t, ": one\n") && strstr(t, ": two\n") &&
+              strstr(t, ": STDOUT: one\n") && strstr(t, ": STDOUT: two\n") &&
               !strstr(t, "still running") &&
               !strstr(t, "Process output available"),
           "builtin: process_exec completed reply with stamped lines");
     free(t);
 
     t = bc_call("process_exec",
-                "{\"cmdline\":\"echo a; echo b; echo c; echo d; echo e\"}",
+                "{\"cmdline\":"
+                "\"echo a; echo b; echo c; echo d; echo e\"}",
                 &ie);
     check(!ie && t && strstr(t, "Exit code: 0") &&
               strstr(t, "Process output available in") &&
               strstr(t, "(currently 5 lines)") &&
-              !strstr(t, ": a\n") && strstr(t, ": d\n") && strstr(t, ": e\n"),
+              !strstr(t, ": STDOUT: a\n") && strstr(t, ": STDOUT: d\n") &&
+              strstr(t, ": STDOUT: e\n"),
           "builtin: process_exec quotes the tail, names the temp file");
     {   /* the temp file holds all five stamped lines */
         char path[512] = "";
@@ -1978,7 +1981,9 @@ static void test_builtin(void) {
             while (fgets(lb, sizeof lb, pf)) {
                 lines++;
                 if (!(lb[2] == ':' && lb[5] == ':' && lb[8] == ':' &&
-                      lb[0] >= '0'))
+                      lb[0] >= '0' &&
+                      (!strncmp(lb + 10, "STDOUT: ", 8) ||
+                       !strncmp(lb + 10, "STDERR: ", 8))))
                     stamped = false;
             }
             fclose(pf);
@@ -1988,8 +1993,31 @@ static void test_builtin(void) {
     }
     free(t);
 
+    /* stderr gets its own stamp */
+    t = bc_call("process_exec",
+                "{\"cmdline\":\"echo toout; echo toerr 1>&2\"}", &ie);
+    check(!ie && t && strstr(t, ": STDOUT: toout\n") &&
+              strstr(t, ": STDERR: toerr\n"),
+          "builtin: process_exec separates stdout and stderr stamps");
+    free(t);
+
+    /* the recap carries the lifetime: 0.4s sleep, duration in range,
+       and a fast one stays under a tenth */
+    t = bc_call("process_exec",
+                "{\"cmdline\":\"sleep 0.4; echo after\"}", &ie);
+    double dur = -1;
+    if (t) {
+        char *dp = strstr(t, "Duration: ");
+        if (dp) dur = strtod(dp + 10, NULL);
+    }
+    check(!ie && t && dur >= 0.4 && dur < 5.0 &&
+              strstr(t, ": STDOUT: after\n"),
+          "builtin: process_exec recap carries a sane duration");
+    free(t);
+
     t = bc_call("process_exec", "{\"cmdline\":\"exit 7\"}", &ie);
-    check(!ie && t && strstr(t, "Exit code: 7"),
+    check(!ie && t && strstr(t, "Exit code: 7") &&
+              strstr(t, "Duration: "),
           "builtin: process_exec exit code");
     free(t);
 
@@ -2026,7 +2054,7 @@ static void test_builtin(void) {
                 &ie);
     check(!ie && t && strstr(t, "is still running") &&
               strstr(t, "Use process_status or process_wait.") &&
-              strstr(t, ": started\n"),
+              strstr(t, ": STDOUT: started\n"),
           "builtin: process_exec 10s wait reports still running");
     long pid = -1;
     if (t) {
@@ -2051,7 +2079,7 @@ static void test_builtin(void) {
             else free(fin), fin = NULL;
         }
         check(done && fin && strstr(fin, "Exit code: 0") &&
-                  strstr(fin, ": started\n"),
+                  strstr(fin, ": STDOUT: started\n"),
               "builtin: process_status sees the completion");
         free(fin);
     }
@@ -2111,13 +2139,14 @@ static void test_builtin(void) {
         snprintf(pargs, sizeof pargs, "{\"pid\":%ld,\"timeout\":1}", pid);
         t = bc_call("process_wait", pargs, &ie);
         check(!ie && t && strstr(t, "is still running") &&
-                  strstr(t, ": waiting\n"),
+                  strstr(t, ": STDOUT: waiting\n"),
               "builtin: process_wait timeout expiry reports still running");
         free(t);
         snprintf(pargs, sizeof pargs, "{\"pid\":%ld,\"timeout\":30}", pid);
         t = bc_call("process_wait", pargs, &ie);
         check(!ie && t && strstr(t, "Exit code: 0") &&
-                  strstr(t, ": waiting\n") && !strstr(t, "still running"),
+                  strstr(t, ": STDOUT: waiting\n") &&
+                  !strstr(t, "still running"),
               "builtin: process_wait sees the termination");
         free(t);
     }

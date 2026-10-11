@@ -211,26 +211,30 @@ types are errors - an unknown type lists the known ones.
 
 Runs `cmdline` through the shell (posix: `/bin/sh -c`, windows:
 `%ComSpec% /c`) with stdin connected to the null device, and waits up
-to 10 seconds for it to finish. stdout and stderr arrive merged into
-one stream and every line is stamped with a wall-clock timestamp as it
-is read - the `annotate-output.sh` style, line races between the two
-streams accepted:
+to 10 seconds for it to finish. stdout and stderr arrive on two
+separate pipes and every line is stamped with a wall-clock timestamp
+and its stream - the `annotate-output.sh` style with the stream named;
+a line is attributed when it is read, so the order between the two
+streams at their boundary is the reader's order, not a global one:
 
 ```
-HH:MM:SS: the line
+HH:MM:SS: STDOUT: the line
+HH:MM:SS: STDERR: the line
 ```
 
 The reply for a finished process:
 
 ```
 Exit code: ${code}
+Duration: ${seconds, three decimals}
 Last three output lines:
-${stamped line}
-${stamped line}
-${stamped line}
+HH:MM:SS: STDOUT: ${line}
+HH:MM:SS: STDERR: ${line}
+HH:MM:SS: STDOUT: ${line}
 ```
 
-The reply for one still running after the wait:
+The reply for one still running after the wait (no duration line:
+the process has not ended, so it has none yet):
 
 ```
 PID ${pid} is still running.
@@ -240,7 +244,8 @@ Use process_status or process_wait.
 ```
 
 `Last three output lines` carries whatever the process printed so far,
-at most three of them. The full stamped output is appended to one temp
+at most three of them, each stamped with its stream. The full stamped
+output is appended to one temp
 file per process (`$TMPDIR`, else `/tmp`, on posix; the user temp dir
 on windows) for the lifetime of the server, and once more than three
 lines exist the reply names it:

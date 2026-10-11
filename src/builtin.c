@@ -41,6 +41,7 @@
     prompt_mcp_process_send_signal_arguments_signal_windows
 #else
 #include <fcntl.h>
+#include <poll.h>
 #include <signal.h>
 #include <strings.h>
 #include <sys/wait.h>
@@ -907,10 +908,12 @@ static size_t split_kw(char *s, char **out, size_t max) {
    on any other pid in the os; process_wait blocks on one until it
    exits or a timeout passes. Every process owns one
    record for the lifetime of the server: the pid, the exit code once
-   reaped, and the output. stdout and stderr arrive on one pipe (merged
-   the annotate-output.sh way - line races between the two streams are
-   accepted), a detached reader thread stamps each line "HH:MM:SS: "
-   when it reads it, appends it to a per-process temp file and rotates
+   reaped, and the output. stdout and stderr arrive on two pipes (the
+   two streams stay distinguishable; a line's true writer is only known
+   for whole lines - one write() spanning both streams cannot happen,
+   but partial-line interleave at the boundary is accepted), a detached
+   reader stamps each line "HH:MM:SS: STDOUT: " or "HH:MM:SS: STDERR: "
+   per source pipe, appends it to a per-process temp file and rotates
    a three-line tail. */
 
 #define BM_PROC_WAIT_MS 10000  /* process_exec completion wait */
@@ -923,22 +926,27 @@ typedef struct proc_rec {
     long pid;
     bool exited;               /* reaped; exit_code is valid */
     int exit_code;
-    bool eof;                  /* reader drained the pipe */
+    double t_start;            /* mono clock at spawn, for the duration */
+    double t_end;              /* mono clock at reap, when exited */
+    bool eof;                  /* reader drained both pipes */
     unsigned long long nlines; /* annotated lines in the temp file */
     char *tail[BM_PROC_TAIL];  /* the last lines, oldest first */
     int ntail;
     char *out_path;            /* the temp file with the output */
     FILE *out;                 /* reader-owned while the reader lives */
-    int from_fd;               /* the merged pipe, reader-owned */
+    int out_fd;                /* the stdout pipe, reader-owned */
+    int err_fd;                /* the stderr pipe, reader-owned */
     pthread_mutex_t m;         /* guards the fields the reader fills */
 #ifdef _WIN32
     void *hproc; /* HANDLE; kept for the entry's lifetime */
+    void *out_r; /* HANDLE, stdout read end; reader-owned */
+    void *err_r; /* HANDLE, stderr read end; reader-owned */
 #endif
 } proc_rec_t;
 
 static proc_rec_t *g_procs; /* every process this server spawned */
 
-/* wall clock HH:MM:SS, the annotate-output.sh default prefix */
+/* wall clock HH:MM:SS, the timestamp half of the line prefix */
 static void hms_now(char out[9]) {
     time_t t = time(NULL);
     struct tm *tm = localtime(&t);
@@ -949,13 +957,15 @@ static void hms_now(char out[9]) {
     snprintf(out, 9, "%02d:%02d:%02d", tm->tm_hour, tm->tm_min, tm->tm_sec);
 }
 
-/* stamp one output line and record it: temp file, counter, tail */
-static void proc_emit(proc_rec_t *p, const char *s, size_t n) {
+/* stamp one output line and record it: temp file, counter, tail. src
+   is the stream name, "STDOUT" or "STDERR" */
+static void proc_emit(proc_rec_t *p, const char *src, const char *s,
+                      size_t n) {
     char ts[9];
     hms_now(ts);
     buf_t ln;
     buf_init(&ln);
-    buf_appendf(&ln, "%s: ", ts);
+    buf_appendf(&ln, "%s: %s: ", ts, src);
     for (size_t i = 0; i < n; i++) /* NUL bytes would cut the json reply */
         buf_append_byte(&ln, s[i] ? s[i] : '?');
     if (p->out) {
@@ -979,6 +989,7 @@ static void proc_set_exit(proc_rec_t *p, int code) {
     if (!p->exited) {
         p->exited = true;
         p->exit_code = code;
+        p->t_end = mono_now();
     }
     pthread_mutex_unlock(&p->m);
 }
@@ -992,42 +1003,174 @@ static int wait_code(int st) {
 }
 #endif
 
-/* detached: drain the merged pipe, one annotated line per newline. the
-   process is reaped here too once its output ends, so no zombie survives
-   even when it is never queried again */
-static void *proc_reader(void *arg) {
-    proc_rec_t *p = arg;
-    buf_t pend; /* the line currently arriving */
-    buf_init(&pend);
+#ifndef _WIN32
+/* drain one fd's buffered bytes, emitting one annotated line per
+   newline; stops when the read would block or the pipe is empty. the
+   caller decides, on eof, when the fd is spent */
+static void proc_drain(proc_rec_t *p, int fd, const char *src, buf_t *pend) {
     char chunk[8192];
     for (;;) {
-        ssize_t n = read(p->from_fd, chunk, sizeof chunk);
+        ssize_t n = read(fd, chunk, sizeof chunk);
         if (n < 0 && errno == EINTR) continue;
-        if (n <= 0) break; /* end of output (or unreadable pipe) */
+        if (n <= 0) return;
         size_t start = 0;
         for (size_t i = 0; i < (size_t)n; i++) {
             if (chunk[i] != '\n') continue;
             size_t len = i - start;
             if (len && chunk[start + len - 1] == '\r') len--;
-            proc_emit(p, chunk + start, len);
+            if (pend->len) { /* a partial line from an earlier pass */
+                buf_append(pend, chunk + start, len);
+                proc_emit(p, src, pend->data, pend->len);
+                pend->len = 0;
+            } else {
+                proc_emit(p, src, chunk + start, len);
+            }
             start = i + 1;
         }
-        buf_append(&pend, chunk + start, (size_t)n - start);
-        while (pend.len > BM_PROC_LINE_CAP) { /* a flood without newlines */
-            proc_emit(p, pend.data, BM_PROC_LINE_CAP);
-            size_t keep = pend.len - BM_PROC_LINE_CAP;
-            memmove(pend.data, pend.data + BM_PROC_LINE_CAP, keep);
-            pend.len = keep;
-            pend.data[keep] = '\0';
+        buf_append(pend, chunk + start, (size_t)n - start);
+        while (pend->len > BM_PROC_LINE_CAP) { /* a flood without newlines */
+            proc_emit(p, src, pend->data, BM_PROC_LINE_CAP);
+            size_t keep = pend->len - BM_PROC_LINE_CAP;
+            memmove(pend->data, pend->data + BM_PROC_LINE_CAP, keep);
+            pend->len = keep;
+            pend->data[keep] = '\0';
         }
     }
-    if (pend.len) { /* final line without its newline */
-        if (pend.data[pend.len - 1] == '\r') pend.len--;
-        proc_emit(p, pend.data, pend.len);
+}
+
+/* detached: drain both pipes, one annotated line per newline, each
+   stamped with its stream. the process is reaped here too once its
+   output ends, so no zombie survives even when it is never queried
+   again */
+static void *proc_reader(void *arg) {
+    proc_rec_t *p = arg;
+    buf_t pend_out, pend_err; /* the lines currently arriving */
+    buf_init(&pend_out);
+    buf_init(&pend_err);
+    struct pollfd fds[2] = { { p->out_fd, POLLIN, 0 },
+                             { p->err_fd, POLLIN, 0 } };
+    bool open_out = true, open_err = true;
+    while (open_out || open_err) {
+        int r = poll(fds, 2, -1);
+        if (r < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+        if (open_out && (fds[0].revents & (POLLIN | POLLHUP | POLLERR))) {
+            proc_drain(p, p->out_fd, "STDOUT", &pend_out);
+            char b; /* read returns 0 only when the pipe holds nothing
+                       and the write end is closed: the fd is spent */
+            if (read(p->out_fd, &b, 1) == 0) {
+                close(p->out_fd);
+                p->out_fd = -1;
+                open_out = false;
+                fds[0].fd = -1;
+            }
+        }
+        if (open_err && (fds[1].revents & (POLLIN | POLLHUP | POLLERR))) {
+            proc_drain(p, p->err_fd, "STDERR", &pend_err);
+            char b;
+            if (read(p->err_fd, &b, 1) == 0) {
+                close(p->err_fd);
+                p->err_fd = -1;
+                open_err = false;
+                fds[1].fd = -1;
+            }
+        }
     }
-    buf_free(&pend);
-    close(p->from_fd);
-    p->from_fd = -1;
+    if (pend_out.len) { /* final lines without their newline */
+        if (pend_out.data[pend_out.len - 1] == '\r') pend_out.len--;
+        proc_emit(p, "STDOUT", pend_out.data, pend_out.len);
+    }
+    if (pend_err.len) {
+        if (pend_err.data[pend_err.len - 1] == '\r') pend_err.len--;
+        proc_emit(p, "STDERR", pend_err.data, pend_err.len);
+    }
+    buf_free(&pend_out);
+    buf_free(&pend_err);
+    if (p->out_fd >= 0) close(p->out_fd);
+    if (p->err_fd >= 0) close(p->err_fd);
+    p->out_fd = -1;
+    p->err_fd = -1;
+#else
+/* drain one pipe's buffered bytes, emitting one annotated line per
+   newline; stops when the read fails or the pipe is empty. the caller
+   decides, on eof, when the handle is spent */
+static void proc_drainw(proc_rec_t *p, HANDLE h, const char *src,
+                        buf_t *pend) {
+    char chunk[8192];
+    DWORD n;
+    for (;;) {
+        if (!ReadFile(h, chunk, sizeof chunk, &n, NULL) || n == 0) return;
+        size_t start = 0;
+        for (size_t i = 0; i < (size_t)n; i++) {
+            if (chunk[i] != '\n') continue;
+            size_t len = i - start;
+            if (len && chunk[start + len - 1] == '\r') len--;
+            if (pend->len) { /* a partial line from an earlier pass */
+                buf_append(pend, chunk + start, len);
+                proc_emit(p, src, pend->data, pend->len);
+                pend->len = 0;
+            } else {
+                proc_emit(p, src, chunk + start, len);
+            }
+            start = i + 1;
+        }
+        buf_append(pend, chunk + start, (size_t)n - start);
+        while (pend->len > BM_PROC_LINE_CAP) { /* a flood without newlines */
+            proc_emit(p, src, pend->data, BM_PROC_LINE_CAP);
+            size_t keep = pend->len - BM_PROC_LINE_CAP;
+            memmove(pend->data, pend->data + BM_PROC_LINE_CAP, keep);
+            pend->len = keep;
+            pend->data[keep] = '\0';
+        }
+    }
+}
+
+/* detached: drain both pipes, one annotated line per newline, each
+   stamped with its stream. the process is reaped here too once its
+   output ends, so no zombie survives even when it is never queried
+   again */
+static void *proc_reader(void *arg) {
+    proc_rec_t *p = arg;
+    HANDLE h[2] = { (HANDLE)p->out_r, (HANDLE)p->err_r };
+    const char *src[2] = { "STDOUT", "STDERR" };
+    buf_t pend[2];
+    buf_init(&pend[0]);
+    buf_init(&pend[1]);
+    int open = 2;
+    while (open > 0) {
+        DWORD w = WaitForMultipleObjects((DWORD)open, h, FALSE, INFINITE);
+        if (w < WAIT_OBJECT_0 || w >= WAIT_OBJECT_0 + (DWORD)open) break;
+        int i = (int)(w - WAIT_OBJECT_0);
+        proc_drainw(p, h[i], src[i], &pend[i]);
+        /* a read yielding nothing means the write end is closed and the
+           pipe holds no data: the handle is spent; flush its partial
+           line now, its stream ends here */
+        DWORD got = 0;
+        char b;
+        if (!ReadFile(h[i], &b, 1, &got, NULL) || got == 0) {
+            CloseHandle(h[i]);
+            if (pend[i].len) {
+                if (pend[i].data[pend[i].len - 1] == '\r') pend[i].len--;
+                proc_emit(p, src[i], pend[i].data, pend[i].len);
+            }
+            buf_free(&pend[i]);
+            if (--open > 0) { /* swap the last one into the freed slot */
+                h[i] = h[open];
+                src[i] = src[open];
+                pend[i] = pend[open];
+            }
+        }
+    }
+    for (int i = 0; i < open; i++) {
+        if (pend[i].len) { /* final lines without their newline */
+            if (pend[i].data[pend[i].len - 1] == '\r') pend[i].len--;
+            proc_emit(p, src[i], pend[i].data, pend[i].len);
+        }
+        buf_free(&pend[i]);
+    }
+#endif
     if (p->out) {
         fclose(p->out);
         p->out = NULL;
@@ -1091,22 +1234,28 @@ static FILE *proc_mktemp(char *path, size_t sz) {
 
 #ifdef _WIN32
 
-/* %ComSpec% /c <cmdline>, stdin on NUL, stdout and stderr on one pipe */
+/* %ComSpec% /c <cmdline>, stdin on NUL, stdout and stderr on two pipes
+   so the streams stay distinguishable */
 static int proc_spawn(const char *cmdline, proc_rec_t *p) {
     p->hproc = NULL;
-    p->from_fd = -1;
+    p->out_fd = -1;
+    p->err_fd = -1;
     SECURITY_ATTRIBUTES sa;
     sa.nLength = sizeof sa;
     sa.lpSecurityDescriptor = NULL;
     sa.bInheritHandle = TRUE;
-    HANDLE out_r = NULL, out_w = NULL;
+    HANDLE out_r = NULL, out_w = NULL, err_r = NULL, err_w = NULL;
     HANDLE in_r = CreateFileA("NUL", GENERIC_READ,
                               FILE_SHARE_READ | FILE_SHARE_WRITE, &sa,
                               OPEN_EXISTING, 0, NULL);
-    if (in_r == INVALID_HANDLE_VALUE || !CreatePipe(&out_r, &out_w, &sa, 0)) {
+    if (in_r == INVALID_HANDLE_VALUE ||
+        !CreatePipe(&out_r, &out_w, &sa, 0) ||
+        !CreatePipe(&err_r, &err_w, &sa, 0)) {
         if (in_r != INVALID_HANDLE_VALUE) CloseHandle(in_r);
         if (out_r) CloseHandle(out_r);
         if (out_w) CloseHandle(out_w);
+        if (err_r) CloseHandle(err_r);
+        if (err_w) CloseHandle(err_w);
         return -1;
     }
     fflush(NULL);
@@ -1119,6 +1268,8 @@ static int proc_spawn(const char *cmdline, proc_rec_t *p) {
         CloseHandle(in_r);
         CloseHandle(out_r);
         CloseHandle(out_w);
+        CloseHandle(err_r);
+        CloseHandle(err_w);
         return -1;
     }
     wchar_t cmd[4096];
@@ -1136,11 +1287,11 @@ static int proc_spawn(const char *cmdline, proc_rec_t *p) {
     si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
     si.StartupInfo.hStdInput = in_r;
     si.StartupInfo.hStdOutput = out_w;
-    si.StartupInfo.hStdError = out_w; /* stderr merges into stdout */
+    si.StartupInfo.hStdError = err_w;
     SIZE_T asz = 0;
     InitializeProcThreadAttributeList(NULL, 1, 0, &asz);
     si.lpAttributeList = HeapAlloc(GetProcessHeap(), 0, asz);
-    HANDLE inherit[2] = { in_r, out_w };
+    HANDLE inherit[3] = { in_r, out_w, err_w };
     BOOL ok = si.lpAttributeList &&
               InitializeProcThreadAttributeList(si.lpAttributeList, 1, 0,
                                                 &asz) &&
@@ -1160,18 +1311,17 @@ static int proc_spawn(const char *cmdline, proc_rec_t *p) {
     }
     CloseHandle(in_r); /* child ends: owned by the child now */
     CloseHandle(out_w);
+    CloseHandle(err_w);
     if (!ok) {
         CloseHandle(out_r);
+        CloseHandle(err_r);
         return -1;
     }
     CloseHandle(pi.hThread);
     p->hproc = pi.hProcess; /* the failure paths below leave the child to
                                the caller's kill-and-wipe cleanup */
-    p->from_fd = _open_osfhandle((intptr_t)out_r, _O_BINARY | _O_NOINHERIT);
-    if (p->from_fd < 0) {
-        CloseHandle(out_r);
-        return -1;
-    }
+    p->out_r = out_r;
+    p->err_r = err_r;
     p->pid = (long)GetProcessId(pi.hProcess);
     return 0;
 }
@@ -1190,27 +1340,37 @@ static void proc_reap(proc_rec_t *p) {
 
 #else /* posix */
 
-/* /bin/sh -c <cmdline>, stdin on /dev/null, stdout and stderr on one pipe */
+/* /bin/sh -c <cmdline>, stdin on /dev/null, stdout and stderr on two
+   pipes so the streams stay distinguishable */
 static int proc_spawn(const char *cmdline, proc_rec_t *p) {
-    int out_pipe[2];
+    int out_pipe[2], err_pipe[2];
     if (pipe(out_pipe)) return -1;
+    if (pipe(err_pipe)) {
+        close(out_pipe[0]);
+        close(out_pipe[1]);
+        return -1;
+    }
     fflush(NULL);
     pid_t pid = fork();
     if (pid < 0) {
         close(out_pipe[0]);
         close(out_pipe[1]);
+        close(err_pipe[0]);
+        close(err_pipe[1]);
         return -1;
     }
     if (pid == 0) {
         /* stdin must not be ours (the json-rpc channel): the child reads
-           /dev/null instead; both output streams merge into the pipe */
+           /dev/null instead; each output stream gets its own pipe */
         int nul = open("/dev/null", O_RDONLY);
         if (nul < 0) _exit(127);
         dup2(nul, 0);
         dup2(out_pipe[1], 1);
-        dup2(out_pipe[1], 2);
+        dup2(err_pipe[1], 2);
         close(out_pipe[0]);
         close(out_pipe[1]);
+        close(err_pipe[0]);
+        close(err_pipe[1]);
         /* nothing else is inherited: other servers' pipes and any open
            sockets belong to the parent, not to this process */
         long maxfd = sysconf(_SC_OPEN_MAX);
@@ -1220,8 +1380,10 @@ static int proc_spawn(const char *cmdline, proc_rec_t *p) {
         _exit(127);
     }
     close(out_pipe[1]);
+    close(err_pipe[1]);
     p->pid = (long)pid;
-    p->from_fd = out_pipe[0];
+    p->out_fd = out_pipe[0];
+    p->err_fd = err_pipe[0];
     return 0;
 }
 
@@ -1241,10 +1403,13 @@ static void proc_reap(proc_rec_t *p) {
 /* the shared reply body: state line, tail, temp file, advice */
 static void proc_report(buf_t *out, proc_rec_t *p) {
     pthread_mutex_lock(&p->m);
-    if (p->exited)
+    if (p->exited) {
         buf_appendf(out, "Exit code: %d\n", p->exit_code);
-    else
+        buf_appendf(out, "Duration: %.3fs\n",
+                    (p->t_end ? p->t_end : mono_now()) - p->t_start);
+    } else {
         buf_appendf(out, "PID %ld is still running.\n", p->pid);
+    }
     buf_append_str(out, "Last three output lines:\n");
     for (int i = 0; i < p->ntail; i++) {
         buf_append_str(out, p->tail[i]);
@@ -3740,7 +3905,9 @@ static void tool_process_exec(const cJSON *args, buf_t *out, bool *is_error) {
         *is_error = true;
         return;
     }
-    p->from_fd = -1;
+    p->out_fd = -1;
+    p->err_fd = -1;
+    p->t_start = mono_now(); /* before spawn: the spawn itself counts */
     p->out = proc_mktemp(path, sizeof path);
     if (!p->out) {
         buf_clear(out);
@@ -3758,13 +3925,16 @@ static void tool_process_exec(const cJSON *args, buf_t *out, bool *is_error) {
             TerminateProcess((HANDLE)p->hproc, 1);
             CloseHandle((HANDLE)p->hproc);
         }
+        if (p->out_r) CloseHandle((HANDLE)p->out_r);
+        if (p->err_r) CloseHandle((HANDLE)p->err_r);
 #else
         if (p->pid > 0) {
             kill((pid_t)p->pid, SIGTERM);
             waitpid((pid_t)p->pid, NULL, 0);
         }
 #endif
-        if (p->from_fd >= 0) close(p->from_fd);
+        if (p->out_fd >= 0) close(p->out_fd);
+        if (p->err_fd >= 0) close(p->err_fd);
         fclose(p->out);
         remove(p->out_path);
         free(p->out_path);
