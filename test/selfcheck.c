@@ -8,6 +8,7 @@
 #include <signal.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -1516,17 +1517,17 @@ static void test_builtin(void) {
             ? cJSON_GetObjectItemCaseSensitive(
                   cJSON_GetObjectItemCaseSensitive(r, "result"), "tools")
             : NULL;
-        check(cJSON_IsArray(tools) && cJSON_GetArraySize(tools) == 13,
-              "builtin: thirteen tools listed");
-        const char *want[13] = { "web_search",   "web_fetch",   "files_list",
+        check(cJSON_IsArray(tools) && cJSON_GetArraySize(tools) == 14,
+              "builtin: fourteen tools listed");
+        const char *want[14] = { "web_search",   "web_fetch",   "files_list",
                                  "files_search", "file_read",   "file_create",
-                                 "file_edit",    "file_analyze",
-                                 "process_exec", "process_status",
-                                 "process_wait", "skills_search",
-                                 "skills_read" };
+                                 "file_edit",    "file_delete",
+                                 "file_analyze", "process_exec",
+                                 "process_status", "process_wait",
+                                 "skills_search", "skills_read" };
         bool names_ok = true, descs_set = true, args_set = true;
         if (cJSON_IsArray(tools))
-            for (int i = 0; i < 13; i++) {
+            for (int i = 0; i < 14; i++) {
                 const cJSON *t = cJSON_GetArrayItem(tools, i);
                 const cJSON *nm = cJSON_GetObjectItemCaseSensitive(t, "name");
                 if (!cJSON_IsString(nm) || strcmp(nm->valuestring, want[i]))
@@ -1739,6 +1740,33 @@ static void test_builtin(void) {
     check(!ie && t && strstr(t, "replaced lines 1-3"),
           "builtin: file_edit keeps an inner blank line");
     free(t);
+
+    write_file("/tmp/llmkit-test-builtin/gone.txt", "bye\n");
+    t = bc_call("file_delete",
+                "{\"path\":\"/tmp/llmkit-test-builtin/gone.txt\"}", &ie);
+    check(!ie && t && strstr(t, "deleted"),
+          "builtin: file_delete removes a file");
+    free(t);
+
+    t = bc_call("file_delete",
+                "{\"path\":\"/tmp/llmkit-test-builtin/gone.txt\"}", &ie);
+    check(ie && t && strstr(t, "No such file"),
+          "builtin: file_delete missing file errors");
+    free(t);
+
+    {   /* nested tree, recursive removal */
+        mkdir("/tmp/llmkit-test-builtin/tree", 0777);
+        mkdir("/tmp/llmkit-test-builtin/tree/sub", 0777);
+        write_file("/tmp/llmkit-test-builtin/tree/a.txt", "a\n");
+        write_file("/tmp/llmkit-test-builtin/tree/sub/b.txt", "b\n");
+        t = bc_call("file_delete",
+                    "{\"path\":\"/tmp/llmkit-test-builtin/tree\"}", &ie);
+        struct stat st;
+        check(!ie && t && strstr(t, "deleted") &&
+                  stat("/tmp/llmkit-test-builtin/tree", &st),
+              "builtin: file_delete removes a directory recursively");
+        free(t);
+    }
 
     t = bc_call("files_list", "{\"path\":\"/tmp/llmkit-test-builtin\","
                               "\"regex\":\"notes\"}", &ie);

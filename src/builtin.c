@@ -32,6 +32,7 @@
 #endif
 #define BM_ACCESS _access
 #define BM_MKDIR(p) _mkdir(p)
+#define BM_RMDIR(p) _rmdir(p)
 #define BM_LSTAT(p, s) stat((p), (s))
 #else
 #include <fcntl.h>
@@ -41,6 +42,7 @@
 #include <unistd.h>
 #define BM_ACCESS access
 #define BM_MKDIR(p) mkdir((p), 0777)
+#define BM_RMDIR(p) rmdir((p))
 #define BM_LSTAT lstat
 #endif
 
@@ -116,6 +118,9 @@ static const arg_def_t ARGS_file_edit[] = {
     {"line_number", "integer", prompt_mcp_file_edit_arguments_line_number,
      true},
 };
+static const arg_def_t ARGS_file_delete[] = {
+    {"path", "string", prompt_mcp_file_delete_arguments_path, true},
+};
 static const arg_def_t ARGS_file_analyze[] = {
     {"path", "string", prompt_mcp_file_analyze_arguments_path, true},
 };
@@ -145,6 +150,7 @@ static const tool_def_t TOOLS[] = {
     {"file_read", prompt_mcp_file_read_description, ARGS_file_read, 3},
     {"file_create", prompt_mcp_file_create_description, ARGS_file_create, 3},
     {"file_edit", prompt_mcp_file_edit_description, ARGS_file_edit, 4},
+    {"file_delete", prompt_mcp_file_delete_description, ARGS_file_delete, 1},
     {"file_analyze", prompt_mcp_file_analyze_description, ARGS_file_analyze,
      1},
     {"process_exec", prompt_mcp_process_exec_description, ARGS_process_exec,
@@ -2551,6 +2557,73 @@ static void tool_file_create(const cJSON *args, buf_t *out, bool *is_error) {
     buf_appendf(out, "wrote %lu bytes to %s", (unsigned long)n, path);
 }
 
+/* ---- file_delete ---- */
+
+/* depth-first post-order removal: files unlink(3), directories recursed
+   then rmdir(3); on failure returns the deepest path and errno context */
+static void rm_tree(const char *path, buf_t *err, int depth) {
+    if (depth > 64) {
+        if (err) buf_appendf(err, "recursion limit at '%s'", path);
+        return;
+    }
+    struct stat st;
+    if (BM_LSTAT(path, &st)) { /* dangling symlink: still removable */
+        if (remove(path) && err)
+            buf_appendf(err, "'%s': %s", path, strerror(errno));
+        return;
+    }
+    if (!S_ISDIR(st.st_mode)) {
+        if (remove(path) && err)
+            buf_appendf(err, "'%s': %s", path, strerror(errno));
+        return;
+    }
+    DIR *d = opendir(path);
+    if (!d) {
+        if (err) buf_appendf(err, "'%s': %s", path, strerror(errno));
+        return;
+    }
+    struct dirent *de;
+    while ((de = readdir(d))) {
+        if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, "..")) continue;
+        char child[BM_PATH_MAX];
+        if (snprintf(child, sizeof child, "%s/%s", path, de->d_name) >=
+            (int)sizeof child) {
+            if (err) buf_appendf(err, "'%s/...' name too long", path);
+            continue;
+        }
+        rm_tree(child, err, depth + 1);
+    }
+    closedir(d);
+    if (BM_RMDIR(path) && err)
+        buf_appendf(err, "'%s': %s", path, strerror(errno));
+}
+
+static void tool_file_delete(const cJSON *args, buf_t *out, bool *is_error) {
+    const char *path = NULL;
+    if (!need_str(args, "path", &path, out)) {
+        *is_error = true;
+        return;
+    }
+    if (!strlen(path)) {
+        buf_clear(out);
+        buf_append_str(out, "path must not be empty");
+        *is_error = true;
+        return;
+    }
+    buf_t err;
+    buf_init(&err);
+    rm_tree(path, &err, 0);
+    if (err.data && err.data[0]) {
+        buf_clear(out);
+        buf_appendf(out, "delete failed: %s", err.data);
+        *is_error = true;
+    } else {
+        buf_clear(out);
+        buf_appendf(out, "deleted %s", path);
+    }
+    buf_free(&err);
+}
+
 /* ---- file_edit ---- */
 
 typedef struct fline {
@@ -3957,7 +4030,8 @@ static void tool_skills_read(const cJSON *args, buf_t *out, bool *is_error) {
 
 static const tool_fn TOOL_FNS[TOOLS_N] = {
     tool_web_search, tool_web_fetch,  tool_files_list, tool_files_search,
-    tool_file_read,  tool_file_create, tool_file_edit, tool_file_analyze,
+    tool_file_read,  tool_file_create, tool_file_edit, tool_file_delete,
+    tool_file_analyze,
     tool_process_exec, tool_process_status, tool_process_wait,
     tool_skills_search, tool_skills_read,
 };

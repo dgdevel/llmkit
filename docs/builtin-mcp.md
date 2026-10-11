@@ -1,7 +1,7 @@
 # builtin-mcp
 
 `llmkit builtin-mcp` is an mcp server on stdio exposing a set of
-generic-use tools: web search, web fetch, six file operations, three
+generic-use tools: web search, web fetch, seven file operations, three
 process operations and two agent-skill operations. No arguments, no
 config file:
 
@@ -52,6 +52,7 @@ empty description.
 | `file_read` | `path: string, lines_offset: int, lines_length: int` | the requested lines |
 | `file_create` | `path: string, content: string, overwrite: bool = false` | confirmation |
 | `file_edit` | `path: string, oldString: string, newString: string, line_number: int` | confirmation |
+| `file_delete` | `path: string` | confirmation |
 | `file_analyze` | `path: string` | the file's structure, one line per element |
 | `process_exec` | `cmdline: string` | exit code or pid + output tail |
 | `process_status` | `pid: int` | same report for one spawned pid; any other pid: running state |
@@ -160,6 +161,15 @@ block: the new block keeps its internal relative indentation and is
 shifted so its first line lands on the column of the first replaced
 line, `newString`'s own text written verbatim. Line endings are
 preserved (`\n` and `\r\n`).
+
+### file_delete(path)
+
+Deletes the file at `path`, or a directory recursively - depth-first
+post-order: each child is removed before its parent, directories go
+through `rmdir(3)` only once empty, so a failure leaves the untouched
+remainder in place and reports the deepest path that failed with its
+`strerror` reason. Dangling symlinks are unlinked rather than followed.
+Depth is capped at 64. Success returns `deleted <path>`.
 
 ### file_analyze(path)
 
