@@ -94,6 +94,22 @@ void dspy_error_line(dspy_t *s, const char *code, const char *msg) {
     dspy_write_str(s, "\n");
 }
 
+/* the tool name is on the collapsed list */
+static bool dspy_brief_match(const dspy_t *s, const char *tool) {
+    if (!s->brief_tools || !tool) return false;
+    size_t tl = strlen(tool);
+    const char *p = s->brief_tools;
+    while (p && *p) {
+        while (*p == ' ') p++;
+        if (!*p) break;
+        const char *q = strchr(p, ' ');
+        size_t nl = q ? (size_t)(q - p) : strlen(p);
+        if (nl == tl && !memcmp(p, tool, tl)) return true;
+        p = q;
+    }
+    return false;
+}
+
 /* the tool traffic arms both record dispatchers share: the tool name
    with its arguments tree, and the response text, bold */
 void dspy_tool_request(dspy_t *s, const cJSON *rec) {
@@ -111,13 +127,64 @@ void dspy_tool_request(dspy_t *s, const cJSON *rec) {
     dspy_styled(s, s->st->bold, line.data ? line.data : "");
     dspy_ensure_nl(s);
     buf_free(&line);
+    /* arm the brief reply: listed tool, full traffic otherwise */
+    if (dspy_brief_match(s, tool)) {
+        free(s->brief_tool);
+        s->brief_tool = strdup(tool);
+        s->brief_t = mono_now();
+        s->brief_bytes = s->brief_lines = 0;
+    } else {
+        free(s->brief_tool);
+        s->brief_tool = NULL;
+    }
 }
 
 void dspy_tool_response(dspy_t *s, const char *tx) {
+    if (s->brief_tool) { /* the brief summary: one line, no reply text */
+        char ts[32] = "", line[96];
+        double secs = mono_now() - s->brief_t;
+        if (secs < 0) secs = 0;
+        stamp_now(ts, sizeof ts);
+        int n = snprintf(line, sizeof line,
+                         "%stool replied in %.2f s, %zu lines, %zu bytes\n",
+                         ts, secs, s->brief_lines, s->brief_bytes);
+        if (n > 0)
+            dspy_write(s, line,
+                       (size_t)n >= sizeof line ? sizeof line - 1 : (size_t)n);
+        free(s->brief_tool);
+        s->brief_tool = NULL;
+        return;
+    }
     if (tx && *tx) s->sep_pending = true; /* empty renders nothing */
     s->cur = -1;
     dspy_styled(s, s->st->bold, tx);
     dspy_ensure_nl(s);
+}
+
+/* counts the reply's lines and bytes into the open brief state; call it
+   before dspy_tool_response for every response record of the call */
+void dspy_brief_count(dspy_t *s, const char *tx) {
+    if (!s->brief_tool) return;
+    size_t n = tx ? strlen(tx) : 0;
+    s->brief_bytes += n;
+    if (!n) return;
+    for (const char *p = tx; *p; p++)
+        if (*p == '\n') s->brief_lines++;
+    if (tx[n - 1] != '\n') s->brief_lines++; /* the last, unterminated line */
+}
+
+/* ---- brief tool rendering (llmkit agent's default for listed tools) ----
+   dspy_brief_tools arms the list; from then on a request of a listed
+   tool renders its request line but swallows the reply into one summary:
+   `tool replied in XX s, YY lines, ZZ bytes` at the response record. The
+   request keeps its rule and separator so the block boundaries (and any
+   thinking/response traffic between calls) stay where they were. */
+
+void dspy_brief_tools(dspy_t *s, const char *names) {
+    free(s->brief_tools);
+    s->brief_tools = names && *names ? strdup(names) : NULL;
+    free(s->brief_tool);
+    s->brief_tool = NULL;
 }
 
 /* the turn-closing usage line - the file's counterpart of the repl's

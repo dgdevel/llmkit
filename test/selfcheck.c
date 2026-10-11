@@ -3702,11 +3702,116 @@ static repl_out_t repl_session_opt(call_cfg_t *c, const repl_opts_t *o,
     return r;
 }
 
+/* the same, with the fake tool executor on the engine */
+static repl_out_t repl_session_opt_ft(call_cfg_t *c, const repl_opts_t *o,
+                                      const char *script, size_t sn) {
+    repl_out_t r = { NULL, 0, 0 };
+    int fd = pipe_feed(script, sn);
+    check(fd >= 0, "agent: pipe feed");
+    char *ob = NULL;
+    size_t on = 0;
+    FILE *out = open_memstream(&ob, &on);
+    r.rc = repl_run_ex(c, o, fd, out, "/x", repl_ftool_factory);
+    fclose(out);
+    close(fd);
+    r.ob = ob;
+    r.on = on;
+    return r;
+}
+
 static void test_agent(void) {
     call_cfg_t c;
     char err[256];
     char cwd[1024];
     check(getcwd(cwd, sizeof cwd) != NULL, "agent: getcwd");
+
+    /* ---- brief tool traffic: default summary, --verbose full ---- */
+    {
+        fturn_t turns[] = {
+            { .recs = (const char *[]){
+                  "{\"type\":\"tool_request\",\"tool\":\"files_search\","
+                  "\"arguments\":{\"path\":\"x\"},\"id\":\"t1\"}"},
+              .nrecs = 1, .kind = TURN_TOOLS, .abort_after = -1 },
+            { .recs = (const char *[]){
+                  "{\"type\":\"response\",\"text\":\"done\","
+                  "\"partial\":false}"},
+              .nrecs = 1, .kind = TURN_FINAL, .abort_after = -1 },
+        };
+        ftool_t ftools[] = { { .tool = "files_search",
+                               .text = "aaa\nbbb\nccc\n", .rc = 0 } };
+        g_ftools = (ftool_script_t){ ftools, 1, 0 };
+
+        repl_opts_t brief = { .default_prompt = prompt_system_prompts_agent,
+                              .builtin_mcp = true,
+                              .agents_md = true };
+        g_factory_wire = fwire_new(turns, 2);
+        repl_cfg(&c, PROTO_OPENAI);
+        repl_out_t r = repl_session_opt_ft(&c, &brief, "q\n", 2);
+        check(r.rc == EXIT_OK, "agent: brief session exits 0");
+        /* the request line drew, the reply collapsed to one summary */
+        check(strstr(r.ob, "files_search {\"path\":\"x\"}") != NULL,
+              "agent: brief request line renders");
+        check(strstr(r.ob, "aaa") == NULL && strstr(r.ob, "bbb") == NULL,
+              "agent: brief swallows the reply text");
+        {
+            char *norm = repl_norm(r.ob);
+            check(strstr(norm, "tool replied in") != NULL &&
+                      strstr(norm, "3 lines, 12 bytes") != NULL,
+                  "agent: brief summary has lines and bytes");
+            free(norm);
+        }
+        repl_session_free(&r);
+        call_cfg_free(&c);
+
+        /* --verbose: the reply renders whole */
+        repl_opts_t full = { .default_prompt = prompt_system_prompts_agent,
+                             .builtin_mcp = true,
+                             .agents_md = true,
+                             .full_tools = true };
+        g_factory_wire = fwire_new(turns, 2);
+        repl_cfg(&c, PROTO_OPENAI);
+        r = repl_session_opt_ft(&c, &full, "q\n", 2);
+        check(r.rc == EXIT_OK, "agent: verbose session exits 0");
+        check(strstr(r.ob, "aaa\nbbb\nccc\n") != NULL,
+              "agent: verbose keeps the full reply");
+        check(strstr(r.ob, "tool replied in") == NULL,
+              "agent: verbose draws no summary");
+        repl_session_free(&r);
+        call_cfg_free(&c);
+
+        /* an unlisted tool keeps its full reply under the default */
+        turns[0].recs[0] =
+            "{\"type\":\"tool_request\",\"tool\":\"fs.echo\","
+            "\"arguments\":{},\"id\":\"t1\"}";
+        ftool_t ftools2[] = { { .tool = "fs.echo", .text = "echo", .rc = 0 } };
+        g_ftools = (ftool_script_t){ ftools2, 1, 0 };
+        g_factory_wire = fwire_new(turns, 2);
+        repl_cfg(&c, PROTO_OPENAI);
+        r = repl_session_opt_ft(&c, &brief, "q\n", 2);
+        check(r.rc == EXIT_OK, "agent: unlisted-tool session exits 0");
+        check(strstr(r.ob, "echo\n") != NULL &&
+                  strstr(r.ob, "tool replied in") == NULL,
+              "agent: unlisted tool keeps the full reply");
+        repl_session_free(&r);
+        call_cfg_free(&c);
+    }
+
+    /* ---- --verbose flag: extraction, compaction, errors ---- */
+    {
+        char *av[] = {"--openai", "http://x", "--verbose", "--model", "m"};
+        char err2[256] = "";
+        int v = repl_verbose_extract(5, av, err2, sizeof err2);
+        check(v == 1, "agent: --verbose extracted");
+        check_str(av[0], "--openai", "agent: --verbose compacts argv");
+        check_str(av[3], "m", "agent: --verbose keeps the rest in order");
+        char *av2[] = {"--openai", "http://x"};
+        check(repl_verbose_extract(2, av2, err2, sizeof err2) == 0,
+              "agent: no --verbose reports 0");
+        char *av3[] = {"--verbose", "--verbose"};
+        check(repl_verbose_extract(2, av3, err2, sizeof err2) == -1 &&
+                  strstr(err2, "given twice") != NULL,
+              "agent: --verbose twice is a usage error");
+    }
 
     /* ---- the one extra flag: extraction, compaction, errors ---- */
     {
@@ -3835,6 +3940,94 @@ static void test_agent(void) {
         call_cfg_free(&c);
     }
     check(chdir(cwd) == 0, "agent: chdir back");
+
+    /* ---- brief tool traffic: default summary, --verbose full ---- */
+    {
+        fturn_t turns[] = {
+            { .recs = (const char *[]){
+                  "{\"type\":\"tool_request\",\"tool\":\"files_search\","
+                  "\"arguments\":{\"path\":\"x\"},\"id\":\"t1\"}"},
+              .nrecs = 1, .kind = TURN_TOOLS, .abort_after = -1 },
+            { .recs = (const char *[]){
+                  "{\"type\":\"response\",\"text\":\"done\","
+                  "\"partial\":false}"},
+              .nrecs = 1, .kind = TURN_FINAL, .abort_after = -1 },
+        };
+        ftool_t ftools[] = { { .tool = "files_search",
+                               .text = "aaa\nbbb\nccc\n", .rc = 0 } };
+        g_ftools = (ftool_script_t){ ftools, 1, 0 };
+
+        repl_opts_t brief = { .default_prompt = prompt_system_prompts_agent,
+                              .builtin_mcp = true,
+                              .agents_md = true };
+        g_factory_wire = fwire_new(turns, 2);
+        repl_cfg(&c, PROTO_OPENAI);
+        repl_out_t r = repl_session_opt_ft(&c, &brief, "q\n", 2);
+        check(r.rc == EXIT_OK, "agent: brief session exits 0");
+        /* the request line drew, the reply collapsed to one summary */
+        check(strstr(r.ob, "files_search {\"path\":\"x\"}") != NULL,
+              "agent: brief request line renders");
+        check(strstr(r.ob, "aaa") == NULL && strstr(r.ob, "bbb") == NULL,
+              "agent: brief swallows the reply text");
+        {
+            char *norm = repl_norm(r.ob);
+            check(strstr(norm, "tool replied in") != NULL &&
+                      strstr(norm, "3 lines, 12 bytes") != NULL,
+                  "agent: brief summary has lines and bytes");
+            free(norm);
+        }
+        repl_session_free(&r);
+        call_cfg_free(&c);
+
+        /* --verbose: the reply renders whole */
+        repl_opts_t full = { .default_prompt = prompt_system_prompts_agent,
+                             .builtin_mcp = true,
+                             .agents_md = true,
+                             .full_tools = true };
+        g_factory_wire = fwire_new(turns, 2);
+        repl_cfg(&c, PROTO_OPENAI);
+        r = repl_session_opt_ft(&c, &full, "q\n", 2);
+        check(r.rc == EXIT_OK, "agent: verbose session exits 0");
+        check(strstr(r.ob, "aaa\nbbb\nccc\n") != NULL,
+              "agent: verbose keeps the full reply");
+        check(strstr(r.ob, "tool replied in") == NULL,
+              "agent: verbose draws no summary");
+        repl_session_free(&r);
+        call_cfg_free(&c);
+
+        /* an unlisted tool keeps its full reply under the default */
+        turns[0].recs[0] =
+            "{\"type\":\"tool_request\",\"tool\":\"fs.echo\","
+            "\"arguments\":{},\"id\":\"t1\"}";
+        ftool_t ftools2[] = { { .tool = "fs.echo", .text = "echo", .rc = 0 } };
+        g_ftools = (ftool_script_t){ ftools2, 1, 0 };
+        g_factory_wire = fwire_new(turns, 2);
+        repl_cfg(&c, PROTO_OPENAI);
+        r = repl_session_opt_ft(&c, &brief, "q\n", 2);
+        check(r.rc == EXIT_OK, "agent: unlisted-tool session exits 0");
+        check(strstr(r.ob, "echo\n") != NULL &&
+                  strstr(r.ob, "tool replied in") == NULL,
+              "agent: unlisted tool keeps the full reply");
+        repl_session_free(&r);
+        call_cfg_free(&c);
+    }
+
+    /* ---- --verbose flag: extraction, compaction, errors ---- */
+    {
+        char *av[] = {"--openai", "http://x", "--verbose", "--model", "m"};
+        char err2[256] = "";
+        int v = repl_verbose_extract(5, av, err2, sizeof err2);
+        check(v == 1, "agent: --verbose extracted");
+        check_str(av[0], "--openai", "agent: --verbose compacts argv");
+        check_str(av[3], "m", "agent: --verbose keeps the rest in order");
+        char *av2[] = {"--openai", "http://x"};
+        check(repl_verbose_extract(2, av2, err2, sizeof err2) == 0,
+              "agent: no --verbose reports 0");
+        char *av3[] = {"--verbose", "--verbose"};
+        check(repl_verbose_extract(2, av3, err2, sizeof err2) == -1 &&
+                  strstr(err2, "given twice") != NULL,
+              "agent: --verbose twice is a usage error");
+    }
 
     /* ---- the conversation store: append, byte-exact records ---- */
     {

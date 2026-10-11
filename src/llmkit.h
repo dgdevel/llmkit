@@ -858,6 +858,9 @@ typedef struct repl_opts {
                                    content block, after the prompt */
     const char *store;          /* conversation store path; NULL = none */
     bool llm_retry;             /* retry failed llm calls, fibonacci delays */
+    bool full_tools;            /* tool replies render whole; default off =
+                                   listed tools show one summary line
+                                   (agent's --verbose sets it) */
 } repl_opts_t;
 
 /* run the chat session: records compiled from c, input lines from in_fd,
@@ -873,6 +876,9 @@ int repl_run_ex(const call_cfg_t *c, const repl_opts_t *o, int in_fd,
    place; returns the compacted flag count, or -1 with err filled */
 int repl_store_extract(int argc, char **argv, const char **store,
                        char *err, size_t errsz);
+/* pull --verbose out of the agent flag range, in place; returns 1 seen,
+   0 absent, -1 on a duplicate (err filled) */
+int repl_verbose_extract(int argc, char **argv, char *err, size_t errsz);
 
 /* ================= pretty.c ================= */
 
@@ -895,6 +901,12 @@ typedef struct dspy {
     bool last_nl;     /* last written byte was \n */
     int cur;          /* open streamed block: R_THINKING/R_RESPONSE, -1 */
     bool sep_pending; /* a block opened, its rule not yet drawn (lazy) */
+    /* brief tool mode (llmkit agent): the collapsed tools' name list
+       (NULL = none), and the in-flight brief reply, NULL = full traffic */
+    char *brief_tools;
+    char *brief_tool;
+    double brief_t; /* its request stamp (mono_now) */
+    size_t brief_bytes, brief_lines;
 } dspy_t;
 
 void dspy_write(dspy_t *s, const char *t, size_t n);
@@ -907,6 +919,11 @@ void dspy_error_line(dspy_t *s, const char *code, const char *msg);
 /* the tool traffic arms both record dispatchers share */
 void dspy_tool_request(dspy_t *s, const cJSON *rec);
 void dspy_tool_response(dspy_t *s, const char *tx);
+/* agent's default: these tools collapse to one timing summary line */
+#define DSPY_BRIEF_TOOLS "web_fetch files_search files_read skills_read"
+void dspy_brief_tools(dspy_t *s, const char *names /* NULL = full output */);
+/* tally the reply's lines/bytes of the in-flight brief tool call */
+void dspy_brief_count(dspy_t *s, const char *tx);
 /* a record's content text blocks joined with \n */
 void dspy_content_text(const cJSON *rec, buf_t *out);
 

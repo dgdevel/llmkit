@@ -184,6 +184,7 @@ static void repl_sink_fn(void *ctx, cJSON *rec) {
     } else if (k == R_TOOL_REQUEST) {
         dspy_tool_request(&s->d, rec);
     } else if (k == R_TOOL_RESPONSE) {
+        dspy_brief_count(&s->d, rec_str(rec, "text"));
         dspy_tool_response(&s->d, rec_str(rec, "text"));
     } else if (k == R_ERROR) {
         dspy_error_line(&s->d, rec_str(rec, "code"), rec_str(rec, "message"));
@@ -395,6 +396,9 @@ int repl_run_ex(const call_cfg_t *c, const repl_opts_t *o, int in_fd,
     sink.d.out = out;
     sink.d.st = &st;
     sink.d.cur = -1;
+    /* agent's brief tool traffic: the listed tools collapse to one
+       summary line each unless --verbose kept the full replies */
+    dspy_brief_tools(&sink.d, o->full_tools ? NULL : DSPY_BRIEF_TOOLS);
 
     engine_t *e = engine_new(repl_sink_fn, &sink);
     if (factory) e->wire_factory = factory;
@@ -636,6 +640,25 @@ int repl_store_extract(int argc, char **argv, const char **store,
     return n;
 }
 
+/* pull --verbose out of the agent flag range, in place; returns 1 when
+   seen, 0 when absent, -1 on a duplicate (err filled) */
+int repl_verbose_extract(int argc, char **argv, char *err, size_t errsz) {
+    bool seen = false;
+    int n = 0;
+    for (int i = 0; i < argc; i++) {
+        if (!strcmp(argv[i], "--verbose")) {
+            if (seen) {
+                snprintf(err, errsz, "--verbose given twice");
+                return -1;
+            }
+            seen = true;
+            continue;
+        }
+        argv[n++] = argv[i];
+    }
+    return seen ? 1 : 0;
+}
+
 static void agent_usage(FILE *out) {
     fputs("usage: llmkit agent (--anthropic|--openai|--openai-responses) "
           "<api_base>\n"
@@ -646,7 +669,7 @@ static void agent_usage(FILE *out) {
           "                [--header <name=value>]...\n"
           "                [--mcp-proxy <config>]... "
           "[--terminal-tool <name.tool>]...\n"
-          "                [--conversation-store <file>]\n",
+          "                [--conversation-store <file>] [--verbose]\n",
           out);
 }
 
@@ -657,26 +680,31 @@ int cmd_agent_repl(int argc, char **argv) {
     signals_init(); /* SIGINT is an input control here, as in repl */
     char err[256] = "";
     const char *store = NULL;
-    int n = repl_store_extract(argc - 2, argv + 2, &store, err, sizeof err);
-    if (n < 0) {
-        fprintf(stderr, "llmkit agent: %s\n", err);
-        agent_usage(stderr);
-        return EXIT_OUT_OF_CHANNEL;
-    }
     call_cfg_t c;
-    if (call_parse_ex(n, argv + 2, &c, err, sizeof err, false) != 0) {
-        fprintf(stderr, "llmkit agent: %s\n", err);
-        agent_usage(stderr);
-        return EXIT_OUT_OF_CHANNEL;
+    int n = repl_store_extract(argc - 2, argv + 2, &store, err, sizeof err);
+    if (n >= 0) {
+        int v = repl_verbose_extract(n, argv + 2, err, sizeof err);
+        if (v < 0)
+            n = -1;
+        else {
+            n = call_parse_ex(n - v, argv + 2, &c, err, sizeof err, false);
+            if (n == 0) {
+                char exe[4096];
+                self_exe(exe, sizeof exe, argv ? argv[0] : NULL);
+                repl_opts_t o = { .default_prompt =
+                                      prompt_system_prompts_agent,
+                                  .builtin_mcp = true,
+                                  .agents_md = true,
+                                  .store = store,
+                                  .llm_retry = true,
+                                  .full_tools = v == 1 };
+                int rc = repl_run_ex(&c, &o, STDIN_FILENO, stdout, exe, NULL);
+                call_cfg_free(&c);
+                return rc;
+            }
+        }
     }
-    char exe[4096];
-    self_exe(exe, sizeof exe, argv ? argv[0] : NULL);
-    repl_opts_t o = { .default_prompt = prompt_system_prompts_agent,
-                      .builtin_mcp = true,
-                      .agents_md = true,
-                      .store = store,
-                      .llm_retry = true };
-    int rc = repl_run_ex(&c, &o, STDIN_FILENO, stdout, exe, NULL);
-    call_cfg_free(&c);
-    return rc;
+    fprintf(stderr, "llmkit agent: %s\n", err);
+    agent_usage(stderr);
+    return EXIT_OUT_OF_CHANNEL;
 }
