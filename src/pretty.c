@@ -94,9 +94,13 @@ void dspy_error_line(dspy_t *s, const char *code, const char *msg) {
     dspy_write_str(s, "\n");
 }
 
-/* the tool name is on the collapsed list */
+/* the tool name is on the collapsed list; records name tools by their
+   exposed form <server>.<name> (mcp.c), so the match takes the name
+   after the last dot - a dotless name matches whole */
 static bool dspy_brief_match(const dspy_t *s, const char *tool) {
     if (!s->brief_tools || !tool) return false;
+    const char *dot = strrchr(tool, '.');
+    if (dot && dot[1]) tool = dot + 1;
     size_t tl = strlen(tool);
     const char *p = s->brief_tools;
     while (p && *p) {
@@ -115,6 +119,12 @@ static bool dspy_brief_match(const dspy_t *s, const char *tool) {
 void dspy_tool_request(dspy_t *s, const cJSON *rec) {
     s->cur = -1;
     const char *tool = rec_str(rec, "tool");
+    if (tool && s->brief_strip) { /* agent display: name only */
+        size_t pl = strlen(s->brief_strip);
+        if (!strncmp(tool, s->brief_strip, pl) && tool[pl] == '.' &&
+            tool[pl + 1])
+            tool += pl + 1;
+    }
     buf_t line;
     buf_init(&line);
     if (tool) buf_append_str(&line, tool);
@@ -185,6 +195,11 @@ void dspy_brief_tools(dspy_t *s, const char *names) {
     s->brief_tools = names && *names ? strdup(names) : NULL;
     free(s->brief_tool);
     s->brief_tool = NULL;
+}
+
+void dspy_brief_strip(dspy_t *s, const char *prefix) {
+    free(s->brief_strip);
+    s->brief_strip = prefix && *prefix ? strdup(prefix) : NULL;
 }
 
 /* the turn-closing usage line - the file's counterpart of the repl's

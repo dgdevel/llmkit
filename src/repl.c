@@ -397,8 +397,10 @@ int repl_run_ex(const call_cfg_t *c, const repl_opts_t *o, int in_fd,
     sink.d.st = &st;
     sink.d.cur = -1;
     /* agent's brief tool traffic: the listed tools collapse to one
-       summary line each unless --verbose kept the full replies */
+       summary line each unless --verbose kept the full replies, and the
+       bundled server's prefix never shows - its name adds no signal */
     dspy_brief_tools(&sink.d, o->full_tools ? NULL : DSPY_BRIEF_TOOLS);
+    if (o->builtin_mcp) dspy_brief_strip(&sink.d, "builtin");
 
     engine_t *e = engine_new(repl_sink_fn, &sink);
     if (factory) e->wire_factory = factory;

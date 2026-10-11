@@ -905,6 +905,8 @@ typedef struct dspy {
        (NULL = none), and the in-flight brief reply, NULL = full traffic */
     char *brief_tools;
     char *brief_tool;
+    char *brief_strip; /* agent display: the `server.` prefix dropped,
+                          NULL = names render whole */
     double brief_t; /* its request stamp (mono_now) */
     size_t brief_bytes, brief_lines;
 } dspy_t;
@@ -922,6 +924,10 @@ void dspy_tool_response(dspy_t *s, const char *tx);
 /* agent's default: these tools collapse to one timing summary line */
 #define DSPY_BRIEF_TOOLS "web_fetch files_search file_read skills_read"
 void dspy_brief_tools(dspy_t *s, const char *names /* NULL = full output */);
+/* the request line renders `<prefix>.<tool>` as `<tool>` (the agent
+   surface's bundled server, the one whose prefix adds no signal);
+   NULL disarms, exposed names still drive match and wire */
+void dspy_brief_strip(dspy_t *s, const char *prefix);
 /* tally the reply's lines/bytes of the in-flight brief tool call */
 void dspy_brief_count(dspy_t *s, const char *tx);
 /* a record's content text blocks joined with \n */
