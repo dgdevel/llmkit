@@ -252,9 +252,13 @@ int spawn_shell(const char *command_line, spawn_t *out) {
     PROCESS_INFORMATION pi;
     memset(&pi, 0, sizeof pi);
     if (ok)
+        /* CREATE_NEW_PROCESS_GROUP: ctrl-c (CTRL_C_EVENT goes to a whole
+           group) reaches the parent's console handler only, not this
+           server child; children are managed via their pipes */
         ok = CreateProcessW(NULL, cmd, NULL, NULL, TRUE,
-                            EXTENDED_STARTUPINFO_PRESENT, NULL, NULL,
-                            &si.StartupInfo, &pi);
+                            EXTENDED_STARTUPINFO_PRESENT |
+                                CREATE_NEW_PROCESS_GROUP,
+                            NULL, NULL, &si.StartupInfo, &pi);
     if (si.lpAttributeList) {
         DeleteProcThreadAttributeList(si.lpAttributeList);
         HeapFree(GetProcessHeap(), 0, si.lpAttributeList);
@@ -324,6 +328,11 @@ int spawn_shell(const char *command_line, spawn_t *out) {
         dup2(out_pipe[1], 1);
         close(in_pipe[0]); close(in_pipe[1]);
         close(out_pipe[0]); close(out_pipe[1]);
+        /* own process group: a ctrl-c at the parent's terminal must stop
+           the parent's turn, not kill this server child (SIGINT goes to
+           the whole foreground group otherwise; children are managed via
+           their pipes - SIGTERM through spawn_kill - never by tty input) */
+        setpgid(0, 0);
         /* nothing else is inherited: other servers' pipes and any open
            sockets belong to the parent, not to this server */
         long maxfd = sysconf(_SC_OPEN_MAX);
@@ -334,6 +343,7 @@ int spawn_shell(const char *command_line, spawn_t *out) {
     }
     close(in_pipe[0]);
     close(out_pipe[1]);
+    setpgid(pid, pid); /* the child raced its own call: errno EACCES is fine */
     out->pid = pid;
     out->to_fd = in_pipe[1];
     out->from_fd = out_pipe[0];

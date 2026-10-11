@@ -1204,6 +1204,41 @@ static void test_mcp_stdio(void) {
     cJSON_Delete(args);
     buf_free(&out);
 
+    /* ctrl-c is a process-group signal: a spawned server runs in its
+       own group (a group SIGINT must not kill it - the repl session
+       continues after a stopped turn); the kill(0) below targets the
+       harness's own group after setpgid, never the parent make/shell */
+    {
+        write_file("/tmp/llmkit-test-sig.py",
+                   "import sys, time\n"
+                   "sys.stdout.write('ready\\n')\n"
+                   "sys.stdout.flush()\n"
+                   "time.sleep(30)\n");
+        spawn_t sp;
+        check(spawn_shell("python3 /tmp/llmkit-test-sig.py", &sp) == 0,
+              "mcp: sig-test server spawned");
+        char line[64] = "";
+        ssize_t n = read(sp.from_fd, line, sizeof line - 1);
+        check(n > 0 && strstr(line, "ready") != NULL,
+              "mcp: sig-test server is up");
+        /* the group kill below must stay inside this process: without
+           isolation it also reaches make and the parent shell */
+        check(setpgid(0, 0) == 0, "mcp: sig-test own process group");
+        kill(0, SIGINT); /* own group, exactly like a terminal ctrl-c */
+        msleep(300);
+        check(g_stop_flag, "mcp: sig-test parent observed the SIGINT");
+        int wl = waitpid(sp.pid, NULL, WNOHANG);
+        check(wl == 0, "mcp: child survives a group SIGINT");
+        /* end it: close stdin (python sleeps), reap, close the pipe */
+        close(sp.to_fd);
+        waitpid(sp.pid, NULL, 0);
+        close(sp.from_fd);
+        /* the harness saw SIGINT too (assert above): the handler is still
+           armed - a second one would _exit - so clear the flag before
+           later scripted-sigint turns run */
+        g_stop_flag = 0;
+    }
+
     mcp_kill_all((mcp_mgr_t *)e->mcp);
     cJSON_Delete(trec);
     engine_free(e);
