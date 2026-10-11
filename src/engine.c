@@ -496,6 +496,23 @@ const cJSON *wire_io_get(engine_t *e, const char *field) {
     return cJSON_IsNull(f) ? NULL : f;
 }
 
+/* the completed wire turn's token usage as an {"input_tokens":...,
+   "output_tokens":...} tree, NULL when the endpoint reported none */
+char *wire_usage_json(const wire_t *w) {
+    bool in = false, out = false;
+    double vin = 0, vout = 0;
+    if (!w) return NULL;
+    if (w->usage && w->usage(w, &vin, &vout, &in, &out)) {
+        buf_t b;
+        buf_init(&b);
+        buf_appendf(&b, "{\"input_tokens\":%.0f,\"output_tokens\":%.0f}",
+                    vin, vout);
+        char *j = b.data;
+        return j;
+    }
+    return NULL;
+}
+
 void append_tool_json(buf_t *b, const tool_entry_t *t, const char *schema_field,
                       bool nested, const char *tail) {
     if (nested)
@@ -705,7 +722,24 @@ int engine_run(engine_t *e) {
         wire_t *w = ensure_wire(e);
         turn_out_t out;
         size_t tr_before = e->tr.n;
+        double t0 = mono_now();
         int kind = w->turn(w, e, &out);
+        double turn_s = mono_now() - t0;
+        if (out.final_rec) {
+            char ts[32];
+            stamp_now(ts, sizeof ts);
+            cJSON_AddStringToObject(out.final_rec, "timestamp", ts);
+            cJSON_AddNumberToObject(out.final_rec, "duration_s", turn_s);
+            if (e->wire) {
+                char *u = wire_usage_json(e->wire);
+                if (u) {
+                    cJSON *ut = cJSON_Parse(u);
+                    free(u);
+                    if (ut)
+                        cJSON_AddItemToObject(out.final_rec, "usage", ut);
+                }
+            }
+        }
         if (kind == TURN_FATAL) {
             const char *code = rec_str(out.error_rec, "code");
             int rc = exit_code_of(code);

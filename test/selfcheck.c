@@ -16,6 +16,21 @@
 
 static int checks = 0, failures = 0;
 
+/* the engine stamps each final record with the turn's wall time and the
+   endpoint's token reading; the clock and the spans differ run to run.
+   Returns a fresh copy with the three stats keys cut - NULL stays NULL */
+static char *strip_stats(const char *line) {
+    if (!line) return NULL;
+    cJSON *r = cJSON_Parse(line);
+    if (!r) return strdup(line);
+    cJSON_DeleteItemFromObject(r, "timestamp");
+    cJSON_DeleteItemFromObject(r, "duration_s");
+    cJSON_DeleteItemFromObject(r, "usage");
+    char *out = cJSON_PrintUnformatted(r);
+    cJSON_Delete(r);
+    return out;
+}
+
 static void check(int cond, const char *name) {
     checks++;
     if (!cond) {
@@ -2496,8 +2511,10 @@ static void test_stream_parity(void) {
                          rec_bool(r, "partial", true);
             cJSON_Delete(r);
             if (partial || tpart) continue;
-            buf_append_str(&keep, caps[i].v[k]);
+            char *norm = strip_stats(caps[i].v[k]);
+            buf_append_str(&keep, norm);
             buf_append_byte(&keep, '\n');
+            free(norm);
         }
         runs[i] = keep.data ? keep.data : "";
     }
@@ -3046,6 +3063,36 @@ static void test_call(void) {
             free(eb);
             call_cfg_free(&c);
         }
+    }
+
+    /* the final record carries the turn's stats: timestamp, wall time,
+       usage - what the repl's timing line and the agent's stderr line
+       read from */
+    {
+        fturn_t turns[] = {
+            { .recs = (const char *[]){
+                  "{\"type\":\"response\",\"text\":\"ok\","
+                  "\"partial\":false}"},
+              .nrecs = 1, .kind = TURN_FINAL, .abort_after = -1 },
+        };
+        g_factory_wire = fwire_new(turns, 1);
+        memset(&c, 0, sizeof c);
+        c.protocol = PROTO_OPENAI;
+        c.api_base = strdup("http://x");
+        c.prompt = strdup("q");
+        char *ob = NULL, *eb = NULL;
+        size_t on = 0, en = 0;
+        FILE *out = open_memstream(&ob, &on);
+        FILE *er = open_memstream(&eb, &en);
+        int rc = call_run(&c, out, er, "/x", script_factory);
+        fclose(out);
+        fclose(er);
+        check(rc == EXIT_OK, "stats: scripted run exits 0");
+        check(strstr(ob, "ok\n") != NULL, "stats: reply intact");
+        check(en == 0, "stats: no stderr");
+        free(ob);
+        free(eb);
+        call_cfg_free(&c);
     }
 
     /* fatal endpoint error: exit code + one stderr line */
@@ -3862,10 +3909,13 @@ static void test_agent(void) {
                     break;
                 }
                 line[strcspn(line, "\n")] = '\0';
-                if (strcmp(line, want_lines[i])) {
+                char *got = strip_stats(line);
+                if (!got || strcmp(got, want_lines[i])) {
+                    free(got);
                     ok = false;
                     break;
                 }
+                free(got);
             }
             check(ok, "agent: the store carries the conversation verbatim");
             check(fgets(line, sizeof line, sf) == NULL,

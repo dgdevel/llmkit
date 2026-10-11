@@ -382,6 +382,18 @@ static void set_usage(owire_t *w, const cJSON *u, const char *in_f,
     w->have_usage = true;
 }
 
+/* the wire's usage seam: the last completed round's token reading */
+static bool oai_usage(const wire_t *wp, double *in, double *out,
+                      bool *have_in, bool *have_out) {
+    (void)wp;
+    owire_t *w = (owire_t *)wp;
+    *have_in = w->have_usage;
+    *have_out = w->have_usage;
+    *in = w->usage_in;
+    *out = w->usage_out;
+    return w->have_usage;
+}
+
 static void chat_chunk(owire_t *w, const cJSON *ch) {
     const cJSON *choices = cJSON_GetObjectItemCaseSensitive(ch, "choices");
     if (cJSON_IsArray(choices))
@@ -771,6 +783,7 @@ wire_t *wire_openai_new(int proto) {
     w->base.turn = owire_turn;
     w->base.build = owire_build;
     w->base.destroy = owire_destroy;
+    w->base.usage = oai_usage;
     buf_init(&w->msgbuf);
     buf_init(&w->base.last_body);
     blk_init(&w->be);

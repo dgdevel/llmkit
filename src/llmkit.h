@@ -436,6 +436,10 @@ typedef struct wire {
     /* serialization only: fills last_body, no network (tests, sec.13) */
     int (*build)(struct wire *w, struct engine *e); /* 0 ok, 2 invalid_record */
     void (*destroy)(struct wire *w);
+    /* the last completed turn's token reading; false when the endpoint
+       reported none (non-streaming, or the record lacked usage) */
+    bool (*usage)(const struct wire *w, double *in, double *out,
+                  bool *have_in, bool *have_out);
     buf_t last_body; /* request body of the most recent build */
 } wire_t;
 
@@ -518,6 +522,9 @@ int engine_stop_orderly(engine_t *e); /* returns EXIT_INTERRUPTED */
 int engine_pre_start_stop(engine_t *e);  /* SIGINT before start; returns exit code */
 void engine_rebuild_options_cache(engine_t *e);
 wire_t *wire_factory_default(engine_t *e);
+/* the last completed turn's token usage, {"input_tokens":..,
+   "output_tokens":..} as text, NULL when the wire reports none */
+char *wire_usage_json(const wire_t *w);
 
 /* stdin reader thread body (arg is the engine) */
 void *stdin_reader_thread(void *arg);

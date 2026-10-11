@@ -172,6 +172,11 @@ typedef struct invoke_out {
     char *text;      /* final response text (owned) */
     char *err_code;  /* fatal error code (owned) */
     char *err_msg;
+    /* the invoke's last model round, as the engine stamped the final
+       record: wall time and the endpoint's token reading */
+    double duration_s;
+    double tok_in, tok_out;
+    bool have_usage;
 } invoke_out_t;
 
 /* rebuild a transcript from the seed records. Text-like trecs carry no
@@ -227,6 +232,8 @@ static void invoke_run(agent_state_t *a, const char *input,
     const char *fatal_code = NULL, *fatal_msg = NULL;
     const char *tresp_text = NULL;
     bool tresp_is_error = false;
+    double out_dur = 0, out_in = 0, out_out = 0;
+    bool out_have = false;
     buf_t final;
     buf_init(&final);
     for (cap_rec_t *c = sink.head; c; c = c->next) {
@@ -248,6 +255,16 @@ static void invoke_run(agent_state_t *a, const char *input,
                turn, concatenated; thinking records in between do not
                end it */
             buf_append_str(&final, rec_str(c->tree, "text"));
+            if (!rec_bool(c->tree, "partial", false)) {
+                out_dur = rec_num(c->tree, "duration_s", 0.0);
+                const cJSON *u =
+                    cJSON_GetObjectItemCaseSensitive(c->tree, "usage");
+                if (cJSON_IsObject(u)) {
+                    out_in = rec_num(u, "input_tokens", 0.0);
+                    out_out = rec_num(u, "output_tokens", 0.0);
+                    out_have = true;
+                }
+            }
         } else if (k == R_TOOL_REQUEST) {
             /* the turn's text is over - a tool round follows, and the
                answer is the last turn's */
@@ -265,6 +282,10 @@ static void invoke_run(agent_state_t *a, const char *input,
     }
 
     memset(out, 0, sizeof *out);
+    out->duration_s = out_dur;
+    out->tok_in = out_in;
+    out->tok_out = out_out;
+    out->have_usage = out_have;
     bool term_answer = rc == EXIT_TERMINAL_TOOL && tresp_text != NULL;
     if (term_answer && tresp_is_error) {
         /* failed terminal tool: failed call carrying the message */
@@ -349,6 +370,12 @@ static int agent_handle(void *ctx, const char *method, cJSON *params,
         cJSON_AddItemToArray(content, blk);
         cJSON_AddItemToObject(res, "content", content);
         *result_out = res;
+        if (out.have_usage)
+            fprintf(stderr,
+                    "llmkit agent-as-tool: turn %.2fs | input %.0f tok | "
+                    "output %.0f tok | total %.0f tok\n",
+                    out.duration_s, out.tok_in, out.tok_out,
+                    out.tok_in + out.tok_out);
         if (out.ok) {
             if (a->retain) a->mark = a->eng->tr.n;
         } else {

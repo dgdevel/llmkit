@@ -42,6 +42,7 @@ typedef struct repl_sink {
     double think_s;  /* thinking generation, accumulated over all blocks */
     double resp_s;   /* response generation, accumulated over all blocks */
     bool resp_done;  /* a response block completed this turn */
+    double turn_s;   /* the turn's wall time, from the final record */
     /* the turn's tokens as the endpoint reported them: each model round
        re-sends the whole conversation, so the reading that matches the
        endpoint's own log is the LAST round's - input is the conversation's
@@ -82,6 +83,7 @@ static void timing_reset(repl_sink_t *s) {
     s->t_resp = 0;
     s->think_s = 0;
     s->resp_s = 0;
+    s->turn_s = 0;
     s->resp_done = false;
     s->tok_in = 0;
     s->tok_out = 0;
@@ -105,22 +107,32 @@ static void usage_accum(repl_sink_t *s, const cJSON *rec) {
     s->have_usage = true;
 }
 
-/* the turn's timing line, drawn when the response block completed: wall
-   clock of the completion, then the three spans - first token since the
+/* the turn's stats line, drawn when the response block completed: wall
+   clock of the completion, the three spans - first token since the
    request (prompt processing), thinking generation and response
-   generation, tool rounds excluded, accumulated over every block - and
-   the turn's token reading when the endpoint reported any */
-static void render_timing(repl_sink_t *s) {
-    char ts[32] = "", tok[96] = "", line[256];
+   generation, tool rounds excluded, accumulated over every block - the
+   turn's token reading when the endpoint reported any, and the turn's
+   own wall time as the engine stamped the final record */
+static void render_stats(repl_sink_t *s) {
+    char ts[32] = "", tok[96] = "", line[320];
     stamp_now(ts, sizeof ts);
     if (s->have_usage)
         snprintf(tok, sizeof tok,
                  " | input %.0f tok | output %.0f tok | total %.0f tok",
                  s->tok_in, s->tok_out, s->tok_in + s->tok_out);
-    int n = snprintf(line, sizeof line,
-                     "%sfirst token %.2fs | thinking %.2fs | response %.2fs%s\n",
-                     ts, s->t_first ? s->t_first - s->t_turn : 0.0, s->think_s,
-                     s->resp_s, tok);
+    int n;
+    if (s->turn_s > 0)
+        n = snprintf(line, sizeof line,
+                     "%sfirst token %.2fs | thinking %.2fs | response %.2fs"
+                     "%s | turn %.2fs\n",
+                     ts, s->t_first ? s->t_first - s->t_turn : 0.0,
+                     s->think_s, s->resp_s, tok, s->turn_s);
+    else
+        n = snprintf(line, sizeof line,
+                     "%sfirst token %.2fs | thinking %.2fs | response %.2fs"
+                     "%s\n",
+                     ts, s->t_first ? s->t_first - s->t_turn : 0.0,
+                     s->think_s, s->resp_s, tok);
     if (n <= 0) return;
     dspy_ensure_nl(&s->d);
     dspy_write(&s->d, line,
@@ -164,6 +176,7 @@ static void repl_sink_fn(void *ctx, cJSON *rec) {
                     s->t_resp = 0;
                 }
                 s->resp_done = true;
+                s->turn_s = rec_num(rec, "duration_s", 0.0);
             }
             dspy_ensure_nl(&s->d); /* per-block trailing newline, call's rule */
             s->d.cur = -1;
@@ -538,7 +551,7 @@ int repl_run_ex(const call_cfg_t *c, const repl_opts_t *o, int in_fd,
         timing_reset(&sink);
         rc = engine_start(e);
         if (rc == 0) rc = engine_run(e);
-        if (sink.resp_done) render_timing(&sink); /* response completed */
+        if (sink.resp_done) render_stats(&sink); /* response completed */
         last_ending = rc;
         if (rc == EXIT_INTERRUPTED) {
             g_stop_flag = 0; /* consumed: the session continues */

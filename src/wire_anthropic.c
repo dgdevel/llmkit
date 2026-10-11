@@ -345,6 +345,18 @@ static void ant_set_usage(awire_t *w, const cJSON *u, bool in, bool out) {
     }
 }
 
+/* the wire's usage seam: the streaming split (input at message_start,
+   output at message_delta) re-joined; either half alone reports */
+static bool ant_usage(const wire_t *wp, double *in, double *out,
+                      bool *have_in, bool *have_out) {
+    awire_t *w = (awire_t *)wp;
+    *have_in = w->have_in;
+    *have_out = w->have_out;
+    *in = w->usage_in;
+    *out = w->usage_out;
+    return w->have_in || w->have_out;
+}
+
 static void ant_attach_usage(cJSON *rec, const awire_t *w) {
     if (w->have_in || w->have_out)
         rec_attach_usage(rec, w->usage_in, w->have_out ? w->usage_out : 0);
@@ -623,6 +635,7 @@ wire_t *wire_anthropic_new(void) {
     w->base.turn = awire_turn;
     w->base.build = awire_build;
     w->base.destroy = awire_destroy;
+    w->base.usage = ant_usage;
     buf_init(&w->msgbuf);
     buf_init(&w->base.last_body);
     blk_init(&w->be);
