@@ -591,7 +591,8 @@ static void entry_line(buf_t *out, const char *path, const struct stat *st,
     char perm[4], hs[48];
     perms_of(path, perm);
     human_size((unsigned long long)st->st_size, hs, sizeof hs);
-    buf_appendf(out, "%s %s %s", perm, hs, path);
+    buf_appendf(out, "%s %s %s%s", perm, hs, path,
+                S_ISDIR(st->st_mode) ? "/" : "");
     if (has_lines) buf_appendf(out, ", %llu lines", lines);
     buf_append_byte(out, '\n');
 }

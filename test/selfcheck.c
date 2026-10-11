@@ -1853,7 +1853,7 @@ static void test_builtin(void) {
        line count to give) ends at its path */
     t = bc_call("files_list", "{\"path\":\"/tmp/llmkit-test-builtin\","
                               "\"regex\":\"sub$|notes\"}", &ie);
-    check(!ie && t && strstr(t, "/sub\n") && !strstr(t, "sub,") &&
+    check(!ie && t && strstr(t, "/sub/\n") && !strstr(t, "sub,") &&
               strstr(t, "notes.txt, 3 lines\n"),
           "builtin: files_list names the line count last");
     free(t);
@@ -1882,7 +1882,7 @@ static void test_builtin(void) {
                 "{\"path\":\"/tmp/llmkit-test-builtin\","
                 "\"regex\":\"hidden\",\"show_hidden_files\":true,"
                 "\"recurse_subdirectories\":true}", &ie);
-    check(!ie && t && strstr(t, ".hidden.txt") && strstr(t, "/.hiddendir\n") &&
+    check(!ie && t && strstr(t, ".hidden.txt") && strstr(t, "/.hiddendir/\n") &&
               strstr(t, ".hiddendir/deep.txt"),
           "builtin: files_list lists dot entries when asked");
     free(t);
