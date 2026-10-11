@@ -3614,6 +3614,7 @@ static void test_repl(void) {
               "repl: the interrupted error line rendered");
         repl_session_free(&r);
         call_cfg_free(&c);
+        /* a turn ran here: the engine took and freed the wire */
 
         g_factory_wire = fwire_new(turns, 1);
         repl_cfg(&c, PROTO_OPENAI);
@@ -3622,6 +3623,9 @@ static void test_repl(void) {
         check(r.on == 0, "repl: EOF before any input renders nothing");
         repl_session_free(&r);
         call_cfg_free(&c);
+        fwire_destroy(g_factory_wire); /* no turn ran: the engine never
+                                          took it */
+        g_factory_wire = NULL;
     }
 
     /* ---- fatal error ends the session with its code ---- */
@@ -3696,6 +3700,9 @@ static void test_repl(void) {
         check(r.rc == EXIT_INVALID_RECORD, "repl: bad UTF-8 exits 2");
         repl_session_free(&r);
         call_cfg_free(&c);
+        fwire_destroy(g_factory_wire); /* no turn ran: the engine never
+                                          took it */
+        g_factory_wire = NULL;
     }
 
     /* ---- multi-turn anthropic: same session, compiled max_tokens ---- */
@@ -4327,6 +4334,9 @@ static void test_agent(void) {
         buf_free(&want);
         repl_session_free(&r);
         call_cfg_free(&c);
+        fwire_destroy(g_factory_wire); /* replay only: the engine never
+                                          took it */
+        g_factory_wire = NULL;
 
         /* ---- resume and continue: history rides the transcript ---- */
         {
@@ -4379,6 +4389,9 @@ static void test_agent(void) {
               "agent: no turn ran over a malformed store");
         repl_session_free(&r);
         call_cfg_free(&c);
+        fwire_destroy(g_factory_wire); /* no turn ran: the engine never
+                                          took it */
+        g_factory_wire = NULL;
 
         /* ---- a store that cannot be opened is the io tier ---- */
         repl_opts_t dir = { .store = "/tmp/llmkit-test-agent" };
@@ -4390,6 +4403,9 @@ static void test_agent(void) {
               "agent: the unopenable store's error line rendered");
         repl_session_free(&r);
         call_cfg_free(&c);
+        fwire_destroy(g_factory_wire); /* no turn ran: the engine never
+                                          took it */
+        g_factory_wire = NULL;
     }
     system("rm -rf /tmp/llmkit-test-agent");
 }
@@ -4980,20 +4996,26 @@ static void test_terminal_tools(void) {
 
     /* shape validation of terminal_tools */
     {
-        char *m = validate_tools(cJSON_Parse(
+        cJSON *tr = cJSON_Parse(
             "{\"type\":\"tools\",\"tools\":[{\"type\":\"stdio\",\"name\":\"a\","
-            "\"command_line\":\"x\",\"terminal_tools\":\"echo\"}]}"));
+            "\"command_line\":\"x\",\"terminal_tools\":\"echo\"}]}");
+        char *m = validate_tools(tr);
         check(m != NULL, "terminal: terminal_tools must be a list");
+        cJSON_Delete(tr);
         free(m);
-        m = validate_tools(cJSON_Parse(
+        tr = cJSON_Parse(
             "{\"type\":\"tools\",\"tools\":[{\"type\":\"stdio\",\"name\":\"a\","
-            "\"command_line\":\"x\",\"terminal_tools\":[42]}]}"));
+            "\"command_line\":\"x\",\"terminal_tools\":[42]}]}");
+        m = validate_tools(tr);
         check(m != NULL, "terminal: entries must be strings");
+        cJSON_Delete(tr);
         free(m);
-        m = validate_tools(cJSON_Parse(
+        tr = cJSON_Parse(
             "{\"type\":\"tools\",\"tools\":[{\"type\":\"stdio\",\"name\":\"a\","
-            "\"command_line\":\"x\",\"terminal_tools\":[\"echo\"]}]}"));
+            "\"command_line\":\"x\",\"terminal_tools\":[\"echo\"]}]}");
+        m = validate_tools(tr);
         check(m == NULL, "terminal: valid shape passes");
+        cJSON_Delete(tr);
         free(m);
     }
 
@@ -5187,6 +5209,7 @@ static void jb_fn(void *ctx, cJSON *rec) {
     jb_t *j = ctx;
     buf_append_tree(&j->b, rec);
     buf_append_byte(&j->b, '\n');
+    cJSON_Delete(rec); /* the emit callback owns the record */
 }
 
 /* the [HH:MM:SS] stamps are the wall clock: golden-exact after the

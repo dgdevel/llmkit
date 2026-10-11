@@ -260,7 +260,9 @@ typedef struct store_load {
 static void store_load_fail(store_load_t *sc, const char *msg) {
     if (sc->rc != EXIT_OK) return;
     sc->rc = EXIT_INVALID_RECORD;
-    pretty_live_record(sc->live, rec_error(EC_INVALID_RECORD, msg, true));
+    cJSON *err = rec_error(EC_INVALID_RECORD, msg, true);
+    pretty_live_record(sc->live, err);
+    cJSON_Delete(err);
 }
 
 static void store_load_line(void *ctx, char *line /*malloc'd*/) {
@@ -483,8 +485,12 @@ int repl_helper_build(const call_cfg_t *c, const char *system_prompt,
     /* the seed: header, the session's llm and system records, the
        subagent's tools (the session's servers minus the helper entry
        itself - the recursion cut), and the agent-as-tool record */
-    write_jsonl_line(seed, cJSON_Parse("{\"type\":\"header\",\"version\":1}"));
-    write_jsonl_line(seed, call_build_llm(c));
+    cJSON *hdr = cJSON_Parse("{\"type\":\"header\",\"version\":1}");
+    write_jsonl_line(seed, hdr);
+    cJSON_Delete(hdr);
+    cJSON *llm = call_build_llm(c);
+    write_jsonl_line(seed, llm);
+    cJSON_Delete(llm);
     if (system_prompt && *system_prompt) {
         cJSON *sys = cJSON_CreateObject();
         cJSON_AddStringToObject(sys, "type", "system");
@@ -827,6 +833,10 @@ int repl_run_ex(const call_cfg_t *c, const repl_opts_t *o, int in_fd,
 
 done:
     buf_free(&line);
+    /* the dspy sink's strdup'd brief state (agent display) */
+    free(sink.d.brief_tools);
+    free(sink.d.brief_tool);
+    free(sink.d.brief_strip);
     if (tty) editor_free(&ed);
     else plain_free(&pr);
     if (sink.store) fclose(sink.store);

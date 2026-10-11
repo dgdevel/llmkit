@@ -61,9 +61,27 @@ test/selfcheck: $(TEST) $(SRC) src/llmkit.h src/prompts.gen.h | check-ascii
 check: test/selfcheck
 	./test/selfcheck
 
+# valgrind pass over the self-check suite (needs valgrind installed)
+# usage: make check-vg   [VG=...] swaps the tool, [VGFLAGS=...] extra flags
+VG      ?= valgrind
+VGFLAGS ?= --leak-check=full --show-leak-kinds=definite \
+           --errors-for-leak-kinds=definite --track-origins=yes \
+           --child-silent-after-fork=yes --fair-sched=yes \
+           --error-exitcode=99 --log-file=test/valgrind.log
+
+# -O1 instead of -O2: faster under valgrind, still debuggable
+test/selfcheck-vg: $(TEST) $(SRC) src/llmkit.h src/prompts.gen.h | check-ascii
+	@mkdir -p test
+	$(CC) $(CFLAGS) -O1 -g -fno-omit-frame-pointer -o $@ $(TEST) $(SRC) $(LDLIBS)
+
+check-vg: test/selfcheck-vg
+	$(VG) $(VGFLAGS) ./test/selfcheck-vg
+	@echo "valgrind clean (log: test/valgrind.log)"
+
 clean:
 	rm -rf dist
-	rm -f llmkit test/selfcheck llmkit.exe src/prompts.gen.c src/prompts.gen.h
+	rm -f llmkit test/selfcheck test/selfcheck-vg test/valgrind.log \
+	      llmkit.exe src/prompts.gen.c src/prompts.gen.h
 
 # tag, build and publish binaries to GitHub Releases (needs gh)
 # usage: make release TAG=v1.2.3
@@ -75,4 +93,4 @@ release:
 packages:
 	@tools/package.sh "$(TAG)" $(TGT)
 
-.PHONY: all check check-ascii clean release packages
+.PHONY: all check check-ascii check-vg clean release packages

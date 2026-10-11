@@ -6,3 +6,7 @@ test/selfcheck.exe
 dist/
 src/prompts.gen.c
 src/prompts.gen.h
+
+# valgrind run artifacts
+test/selfcheck-vg
+test/valgrind.log
