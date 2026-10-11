@@ -43,6 +43,7 @@ void editor_init(editor_t *ed, FILE *out, int in_fd, const char *prompt) {
     buf_init(&ed->line);
     ed->lbuf = malloc(LNBUF_INIT);
     linenoiseHistorySetMaxLen(HIST_CAP);
+    linenoiseSetMultiLine(1); /* long lines wrap across rows, not scroll */
     linenoiseSetCompletionCallback(ed_complete_bridge);
     ed_active = ed;
 }
