@@ -13,14 +13,19 @@ This document provides context and instructions for agents working on the `llmki
 
 ## Project Structure
 - `src/`: Core source code.
-    - `main.c`: Entry point and command dispatch.
-    - `agent.c`: Agent logic and workflow.
-    - `engine.c`: Core LLM orchestration engine.
-    - `llmproxy.c`: Interface for communicating with LLM providers.
-    - `mcp.c`: MCP protocol implementation.
-    - `builtin.c`: Implementation of built-in MCP tools (file system, process, web).
-    - `repl.c`: Interactive terminal interface.
+    - `main.c`: Entry point and subcommand dispatch (runner, call, repl, agent, mcp-repl, prettyprint, proxy, mcp servers).
+    - `engine.c`: Core conversation engine (turn loop, tool calls, steering).
+    - `agent.c`: Agent runner logic (`llmkit agent`, agent-as-tool seed).
+    - `wire_openai.c`, `wire_anthropic.c`: LLM provider wire clients (chat completions, responses, anthropic).
+    - `llmproxy.c`: `llmkit proxy`, a plain-http endpoint forwarding to one upstream LLM.
+    - `mcp.c`: MCP client protocol implementation.
+    - `proxy.c`: `llmkit mcp-proxy` config pipeline and stdio server.
+    - `builtin.c`: Implementation of built-in MCP tools (file system, process, web, agent skills).
+    - `call.c`, `repl.c`, `mcprepl.c`, `pretty.c`: Command front-ends (one-off call, interactive repl, mcp console, transcript rendering).
+    - `editor.c` + `vendor/linenoise/`: interactive line editing behind the repl.
+    - `platform.c`, `sse.c`, `buf.c`, `jsonl.c`: platform tty/pipes, SSE parsing, buffers, JSON Lines.
     - `prompts/`: System and tool prompts (bundled into binary via `tools/gen-prompts.sh`).
+    - `vendor/regex/`: vendored regex for Windows (MinGW) builds.
 - `docs/`: Design, requirements, and release documentation.
 - `examples/`: Sample usage and scripts.
 - `test/`: Self-check tests.

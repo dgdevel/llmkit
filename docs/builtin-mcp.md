@@ -1,7 +1,7 @@
 # builtin-mcp
 
 `llmkit builtin-mcp` is an mcp server on stdio exposing a set of
-generic-use tools: web search, web fetch, seven file operations, three
+generic-use tools: web search, web fetch, nine file operations, four
 process operations and two agent-skill operations. No arguments, no
 config file:
 
