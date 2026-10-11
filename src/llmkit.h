@@ -920,7 +920,7 @@ void dspy_error_line(dspy_t *s, const char *code, const char *msg);
 void dspy_tool_request(dspy_t *s, const cJSON *rec);
 void dspy_tool_response(dspy_t *s, const char *tx);
 /* agent's default: these tools collapse to one timing summary line */
-#define DSPY_BRIEF_TOOLS "web_fetch files_search files_read skills_read"
+#define DSPY_BRIEF_TOOLS "web_fetch files_search file_read skills_read"
 void dspy_brief_tools(dspy_t *s, const char *names /* NULL = full output */);
 /* tally the reply's lines/bytes of the in-flight brief tool call */
 void dspy_brief_count(dspy_t *s, const char *tx);
