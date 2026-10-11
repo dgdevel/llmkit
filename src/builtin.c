@@ -1255,7 +1255,7 @@ static void proc_report(buf_t *out, proc_rec_t *p) {
                     "Process output available in %s (currently %llu lines)\n",
                     p->out_path ? p->out_path : "?", p->nlines);
     if (!p->exited)
-        buf_append_str(out, "Use process_status to monitor it.\n");
+        buf_append_str(out, "Use process_status or process_wait.\n");
     pthread_mutex_unlock(&p->m);
 }
 

@@ -26,7 +26,7 @@ Tools are for:
 
 ## Tools Instructions
 Prefer relative paths if no system-wide access is needed.
-`file_read` use max 15-lines line_range or calculate length from `analyze` output; extend range only if needed (you are memory constrained).
+Using `file_read` calculate length from `analyze` output; search more with `files_search` if unsatisfied.
 Limit `file_edit` window size to changed lines; split edits in multiple calls with 1-5 line changes per call, no split for new lines to add.
 `file_delete` is irreversible.
 

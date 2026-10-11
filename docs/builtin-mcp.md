@@ -236,7 +236,7 @@ The reply for one still running after the wait:
 PID ${pid} is still running.
 Last three output lines:
 ...
-Use process_status to monitor it.
+Use process_status or process_wait.
 ```
 
 `Last three output lines` carries whatever the process printed so far,

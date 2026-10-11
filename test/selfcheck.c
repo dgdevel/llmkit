@@ -2025,7 +2025,7 @@ static void test_builtin(void) {
     t = bc_call("process_exec", "{\"cmdline\":\"echo started; sleep 11\"}",
                 &ie);
     check(!ie && t && strstr(t, "is still running") &&
-              strstr(t, "Use process_status to monitor it.") &&
+              strstr(t, "Use process_status or process_wait.") &&
               strstr(t, ": started\n"),
           "builtin: process_exec 10s wait reports still running");
     long pid = -1;
