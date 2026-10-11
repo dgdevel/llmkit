@@ -76,6 +76,88 @@ void buf_append_jstr(buf_t *b, const char *s) {
     cJSON_Delete(it);
 }
 
+/* ---- the agent's trimmed tool arguments ----
+   first head and last tail bytes around [...], cut on sequence
+   bounds - strings longer than twenty bytes elide (head = tail = 10) */
+static void trim_utf8_head(buf_t *out, const char *s, size_t want) {
+    while (want && *s) {
+        size_t k = utf8_seq_len(s);
+        if (want < k) break; /* a wider char than budget left */
+        buf_append(out, s, k);
+        s += k;
+        want -= k;
+    }
+}
+
+static void trim_utf8_tail(buf_t *out, const char *s, size_t want) {
+    /* collect the sequence lengths front to back (a backward walk would
+       misread the continuations), then take whole sequences from the
+       end while the budget lasts */
+    size_t n = strlen(s);
+    size_t *lens = malloc((n ? n : 1) * sizeof *lens);
+    if (!lens) return;
+    size_t cnt = 0, i = 0;
+    while (i < n) {
+        size_t k = utf8_seq_len(s + i);
+        if (i + k > n) k = 1; /* never past the end */
+        lens[cnt++] = k;
+        i += k;
+    }
+    size_t take = 0, j = cnt;
+    while (j > 0 && take + lens[j - 1] <= want) {
+        j--;
+        take += lens[j];
+    }
+    buf_append(out, s + n - take, take);
+    free(lens);
+}
+
+void buf_append_jstr_headtail(buf_t *b, const char *s, size_t head,
+                              size_t tail) {
+    if (!s) s = "";
+    buf_t t;
+    buf_init(&t);
+    trim_utf8_head(&t, s, head);
+    buf_append_str(&t, "[...]");
+    trim_utf8_tail(&t, s, tail);
+    buf_append_jstr(b, t.data ? t.data : "");
+    buf_free(&t);
+}
+
+/* one value: strings trim, arrays and objects recurse, the rest render
+   as the untrimmed appenders write them */
+static void trim_append_value(buf_t *b, const cJSON *v) {
+    if (cJSON_IsString(v) && v->valuestring) {
+        if (strlen(v->valuestring) > 20) {
+            buf_append_jstr_headtail(b, v->valuestring, 10, 10);
+            return;
+        }
+        buf_append_jstr(b, v->valuestring);
+        return;
+    }
+    if (cJSON_IsArray(v) || cJSON_IsObject(v)) {
+        buf_append_byte(b, cJSON_IsArray(v) ? '[' : '{');
+        bool first = true;
+        for (const cJSON *c = v->child; c; c = c->next) {
+            if (!first) buf_append_byte(b, ',');
+            first = false;
+            if (cJSON_IsObject(v)) {
+                buf_append_jstr(b, c->string ? c->string : "");
+                buf_append_byte(b, ':');
+            }
+            trim_append_value(b, c);
+        }
+        buf_append_byte(b, cJSON_IsArray(v) ? ']' : '}');
+        return;
+    }
+    buf_append_tree(b, v);
+}
+
+void buf_append_tree_trim(buf_t *b, const cJSON *t) {
+    if (!t) { buf_append_str(b, "null"); return; }
+    trim_append_value(b, t);
+}
+
 void buf_append_tree(buf_t *b, const cJSON *t) {
     if (!t) { buf_append_str(b, "null"); return; }
     char *p = cJSON_PrintUnformatted(t);
@@ -89,6 +171,20 @@ void buf_append_jnum(buf_t *b, double d) {
     buf_append_str(b, p);
     cJSON_free(p);
     cJSON_Delete(it);
+}
+
+/* one UTF-8 sequence's length from its lead byte; 1 for a bare or
+   malformed lead, never past the end of a valid string */
+size_t utf8_seq_len(const char *p) {
+    if (!p) return 1;
+    unsigned char c = (unsigned char)*p;
+    size_t n = 1;
+    if ((c & 0xE0) == 0xC0) n = 2;
+    else if ((c & 0xF0) == 0xE0) n = 3;
+    else if ((c & 0xF8) == 0xF0) n = 4;
+    /* the continuations of the length are presumed: the callers only
+       land inside valid UTF-8 (utf8_valid gates the inputs) */
+    return n;
 }
 
 /* strict UTF-8: reject overlongs, surrogates, > U+10FFFF */

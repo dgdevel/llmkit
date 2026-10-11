@@ -94,6 +94,9 @@ void dspy_error_line(dspy_t *s, const char *code, const char *msg) {
     dspy_write_str(s, "\n");
 }
 
+/* ---- brief tool rendering: the trimmed argument rendering the agent
+   display uses lives in buf.c (buf_append_tree_trim) ---- */
+
 /* the tool name is on the collapsed list; records name tools by their
    exposed form <server>.<name> (mcp.c), so the match takes the name
    after the last dot - a dotless name matches whole */
@@ -131,7 +134,9 @@ void dspy_tool_request(dspy_t *s, const cJSON *rec) {
     const cJSON *args = cJSON_GetObjectItemCaseSensitive(rec, "arguments");
     if (cJSON_IsObject(args)) {
         if (line.len) buf_append_byte(&line, ' ');
-        buf_append_tree(&line, args);
+        /* the agent's quiet display trims the long string arguments */
+        if (s->trim_args) buf_append_tree_trim(&line, args);
+        else buf_append_tree(&line, args);
     }
     if (line.len) s->sep_pending = true; /* empty renders nothing */
     dspy_styled(s, s->st->bold, line.data ? line.data : "");

@@ -50,6 +50,11 @@ typedef struct repl_sink {
     double tok_in;   /* input tokens */
     double tok_out;  /* output tokens */
     bool have_usage; /* a record of this turn reported usage */
+    /* the agent's quiet display: thinking text suppressed to one
+       `thinking...` line per turn (--verbose renders it whole) */
+    bool quiet_think; /* armed at startup, never reset */
+    bool think_shown; /* this turn's line drew already */
+    bool think_done;  /* this turn's thinking blocks all closed */
 } repl_sink_t;
 
 /* the store's write side: called from the sink for every emitted record
@@ -88,6 +93,8 @@ static void timing_reset(repl_sink_t *s) {
     s->tok_in = 0;
     s->tok_out = 0;
     s->have_usage = false;
+    s->think_shown = false; /* the turn's quiet `thinking...` line */
+    s->think_done = false;
 }
 
 /* the turn's token reading, round by round: usage rides the last record
@@ -144,8 +151,29 @@ static void repl_sink_fn(void *ctx, cJSON *rec) {
     store_persist(s, rec);
     usage_accum(s, rec); /* the turn's totals, round by round */
     int k = rec_classify(rec);
-    if (k == R_THINKING || k == R_RESPONSE) {
-        const char *tx = rec_str(rec, "text");
+    const char *tx = rec_str(rec, "text");
+    if (k == R_THINKING && s->quiet_think) {
+        /* agent's quiet display: one line stands for the block, the
+           streamed text never renders (timing still counts it) */
+        if (!rec_bool(rec, "partial", false)) s->think_done = true;
+        if (!s->think_shown && tx && *tx) {
+            s->think_shown = true;
+            s->d.sep_pending = true;
+            dspy_styled(&s->d, s->d.st->italic, "thinking...");
+            dspy_ensure_nl(&s->d);
+            s->d.cur = -1;
+        }
+        if (tx && *tx) { /* the token clock still counts the thinking */
+            double now = mono_now();
+            if (!s->t_first) s->t_first = now;
+            if (!s->t_think) s->t_think = now;
+        }
+        if (s->think_done && s->t_think) {
+            double now = mono_now();
+            s->think_s += now - s->t_think;
+            s->t_think = 0;
+        }
+    } else if (k == R_THINKING || k == R_RESPONSE) {
         /* arm the separator only when something will render: the wire's
            block-close records carry empty text (signature, usage) and
            must not open a block that never draws */
@@ -383,6 +411,7 @@ static bool line_valid(const buf_t *b) {
 int repl_run(const call_cfg_t *c, int in_fd, FILE *out, const char *exe_path,
              wire_t *(*factory)(engine_t *)) {
     repl_opts_t o = { .default_prompt = prompt_system_prompts_repl };
+    /* zero opts: no quiet trims - those are the agent's defaults */
     return repl_run_ex(c, &o, in_fd, out, exe_path, factory);
 }
 
@@ -401,6 +430,10 @@ int repl_run_ex(const call_cfg_t *c, const repl_opts_t *o, int in_fd,
        bundled server's prefix never shows - its name adds no signal */
     dspy_brief_tools(&sink.d, o->full_tools ? NULL : DSPY_BRIEF_TOOLS);
     if (o->builtin_mcp) dspy_brief_strip(&sink.d, "builtin");
+    /* agent's quiet display, --verbose restores the full traffic: long
+       string arguments render elided, thinking collapses to one line */
+    sink.d.trim_args = o->trim_args;
+    sink.quiet_think = o->quiet_think;
 
     engine_t *e = engine_new(repl_sink_fn, &sink);
     if (factory) e->wire_factory = factory;
@@ -699,7 +732,12 @@ int cmd_agent_repl(int argc, char **argv) {
                                   .agents_md = true,
                                   .store = store,
                                   .llm_retry = true,
-                                  .full_tools = v == 1 };
+                                  .full_tools = v == 1,
+                                  /* quiet display defaults, --verbose
+                                     restores both: thinking text whole,
+                                     tool arguments untrimmed */
+                                  .quiet_think = v != 1,
+                                  .trim_args = v != 1 };
                 int rc = repl_run_ex(&c, &o, STDIN_FILENO, stdout, exe, NULL);
                 call_cfg_free(&c);
                 return rc;

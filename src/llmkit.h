@@ -98,12 +98,22 @@ void ptr_push(void ***v, size_t *n, size_t *cap, void *item);
 
 /* append a JSON-encoded string literal (with quotes) */
 void buf_append_jstr(buf_t *b, const char *s);
+/* append a JSON string literal of s's first head and last tail bytes
+   around [...] as one elided value (agent's trimmed tool arguments) */
+void buf_append_jstr_headtail(buf_t *b, const char *s, size_t head,
+                              size_t tail);
 /* append the serialization of a cJSON tree (unformatted) */
 void buf_append_tree(buf_t *b, const cJSON *t);
+/* the same, but string values longer than twenty bytes render elided -
+   their first and last ten around [...] (agent display only) */
+void buf_append_tree_trim(buf_t *b, const cJSON *t);
 /* append a JSON number from a double, cJSON-style (deterministic) */
 void buf_append_jnum(buf_t *b, double d);
 
 bool utf8_valid(const uint8_t *p, size_t n);
+/* one UTF-8 sequence's byte length from its lead byte; malformed leads
+   count one - the callers land inside valid UTF-8 only */
+size_t utf8_seq_len(const char *p);
 
 /* ================= platform.c ================= */
 typedef struct queue queue_t;
@@ -861,6 +871,12 @@ typedef struct repl_opts {
     bool full_tools;            /* tool replies render whole; default off =
                                    listed tools show one summary line
                                    (agent's --verbose sets it) */
+    bool quiet_think;           /* thinking collapses to one `thinking...`
+                                   line per turn; the agent's default,
+                                   --verbose renders it whole */
+    bool trim_args;             /* long string arguments render elided on
+                                   the request lines; the agent's quiet
+                                   default, --verbose restores them */
 } repl_opts_t;
 
 /* run the chat session: records compiled from c, input lines from in_fd,
@@ -901,6 +917,9 @@ typedef struct dspy {
     bool last_nl;     /* last written byte was \n */
     int cur;          /* open streamed block: R_THINKING/R_RESPONSE, -1 */
     bool sep_pending; /* a block opened, its rule not yet drawn (lazy) */
+    bool trim_args;   /* tool request lines render their string arguments
+                         trimmed: first and last ten characters around
+                         [...] when longer than twenty (agent display) */
     /* brief tool mode (llmkit agent): the collapsed tools' name list
        (NULL = none), and the in-flight brief reply, NULL = full traffic */
     char *brief_tools;

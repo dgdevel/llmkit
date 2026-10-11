@@ -3834,6 +3834,77 @@ static void test_agent(void) {
         call_cfg_free(&c);
     }
 
+    /* ---- quiet display defaults: trimmed arguments, one thinking
+       line; --verbose restores the full traffic ---- */
+    {
+        /* 40 content bytes: head and tail ten around the elision */
+        fturn_t turns[] = {
+            { .recs = (const char *[]){
+                  "{\"type\":\"tool_request\",\"tool\":\"builtin."
+                  "file_create\",\"arguments\":{\"path\":\"x.txt\","
+                  "\"content\":\"0123456789abcdefghij...wxyz9876543210\","
+                  "\"overwrite\":false},\"id\":\"t1\"}"},
+              .nrecs = 1, .kind = TURN_TOOLS, .abort_after = -1 },
+            { .recs = (const char *[]){
+                  "{\"type\":\"thinking\",\"text\":\"secret plan\","
+                  "\"partial\":true}",
+                  "{\"type\":\"thinking\",\"text\":\"\",\"partial\":"
+                  "false,\"signature\":\"s\"}",
+                  "{\"type\":\"response\",\"text\":\"done\","
+                  "\"partial\":false}"},
+              .nrecs = 3, .kind = TURN_FINAL, .abort_after = -1 },
+        };
+        ftool_t ftools[] = { { .tool = "builtin.file_create",
+                               .text = "ok", .rc = 0 } };
+        g_ftools = (ftool_script_t){ ftools, 1, 0 };
+
+        /* the agent's quiet default (cmd_agent_repl's opts, quiet both) */
+        repl_opts_t quiet = { .default_prompt = prompt_system_prompts_agent,
+                              .builtin_mcp = true,
+                              .agents_md = true,
+                              .quiet_think = true,
+                              .trim_args = true };
+        g_factory_wire = fwire_new(turns, 2);
+        repl_cfg(&c, PROTO_OPENAI);
+        repl_out_t r = repl_session_opt_ft(&c, &quiet, "q\n", 2);
+        check(r.rc == EXIT_OK, "agent: quiet session exits 0");
+        /* the long string argument elides to head[...]tail, the short
+           ones render whole */
+        check(strstr(r.ob, "\"content\":\"0123456789[...]9876543210\"") !=
+                  NULL,
+              "agent: quiet trims the long string argument");
+        check(strstr(r.ob, "0123456789abcdefghij") == NULL,
+              "agent: quiet hides the whole argument");
+        check(strstr(r.ob, "\"path\":\"x.txt\"") != NULL &&
+                  strstr(r.ob, "\"overwrite\":false") != NULL,
+              "agent: quiet keeps the short arguments whole");
+        /* the thinking text never renders, one line stands for it */
+        check(strstr(r.ob, "secret plan") == NULL,
+              "agent: quiet hides the thinking text");
+        check(strstr(r.ob, "thinking...") != NULL,
+              "agent: quiet draws the one thinking line");
+        repl_session_free(&r);
+        call_cfg_free(&c);
+
+        /* --verbose: everything renders whole */
+        repl_opts_t loud = { .default_prompt = prompt_system_prompts_agent,
+                             .builtin_mcp = true,
+                             .agents_md = true,
+                             .full_tools = true };
+        g_factory_wire = fwire_new(turns, 2);
+        repl_cfg(&c, PROTO_OPENAI);
+        r = repl_session_opt_ft(&c, &loud, "q\n", 2);
+        check(r.rc == EXIT_OK, "agent: loud session exits 0");
+        check(strstr(r.ob, "0123456789abcdefghij...wxyz9876543210") != NULL,
+              "agent: verbose keeps the whole argument");
+        check(strstr(r.ob, "[...]") == NULL,
+              "agent: verbose draws no elision");
+        check(strstr(r.ob, "secret plan") != NULL,
+              "agent: verbose renders the thinking text");
+        repl_session_free(&r);
+        call_cfg_free(&c);
+    }
+
     /* ---- --verbose flag: extraction, compaction, errors ---- */
     {
         char *av[] = {"--openai", "http://x", "--verbose", "--model", "m"};
