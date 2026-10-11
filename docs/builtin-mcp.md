@@ -172,12 +172,22 @@ preserved (`\n` and `\r\n`).
 
 ### file_delete(path)
 
-Deletes the file at `path`, or a directory recursively - depth-first
-post-order: each child is removed before its parent, directories go
-through `rmdir(3)` only once empty, so a failure leaves the untouched
-remainder in place and reports the deepest path that failed with its
-`strerror` reason. Dangling symlinks are unlinked rather than followed.
-Depth is capped at 64. Success returns `deleted <path>`.
+Moves the file or directory at `path` into the user's trash instead of
+destroying it - freedesktop trash dirs on Linux (`$XDG_DATA_HOME/Trash`
+or `~/.local/share/Trash`, per-mount `.Trash/$UID` or `.Trash-$UID`,
+created when missing and the mount is writable), `~/.Trash` on macOS,
+the recycle bin on Windows (`SHFileOperationW` with `FOF_ALLOWUNDO`).
+Name collisions in the trash get a " 2", " 3" ... suffix; the freedesktop
+sidecar `.trashinfo` records the original path and deletion date so a
+file manager can restore it. The tool still answers `deleted <path>`.
+
+When no trash is reachable (cross-device move, read-only or absent trash
+dir that cannot be created, no home), the old irreversible removal runs:
+depth-first post-order - each child removed before its parent,
+directories through `rmdir(3)` only once empty, so a failure leaves the
+untouched remainder in place and reports the deepest path that failed
+with its `strerror` reason. Dangling symlinks are unlinked rather than
+followed. Depth is capped at 64.
 
 ### file_analyze(path)
 

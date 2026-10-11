@@ -24,6 +24,7 @@
 #include <direct.h>
 #include <fcntl.h>
 #include <io.h>
+#include <shellapi.h> /* SHFileOperationW (recycle bin) */
 #include <windows.h>
 #ifndef R_OK
 #define R_OK 4
@@ -2739,6 +2740,245 @@ static void tool_file_create(const cJSON *args, buf_t *out, bool *is_error) {
 
 /* ---- file_delete ---- */
 
+/* the tool is presented as a plain delete, but it moves the victim into
+   the user's trash instead (freedesktop trash dirs on linux, ~/.Trash on
+   macos, the recycle bin on windows) so a wrong call stays recoverable;
+   when no trash exists (unreachable path, different filesystem) the file
+   is irreversibly removed as before. directories move whole - no walk,
+   no partial failures. */
+
+/* is p a directory on the same filesystem as top */
+static bool same_fs_mount(const char *top, const char *p) {
+    struct stat a, b;
+    if (BM_LSTAT(p, &b)) return false;         /* gone: let the move fail */
+    if (BM_LSTAT(top, &a)) return false;
+    return a.st_dev == b.st_dev;
+}
+
+/* "name" of "/a/b/name", "" of "/name", whole of "name"; never the
+   leading slash, never past a trailing one */
+static const char *base_ptr(const char *path) {
+    const char *p = strrchr(path, '/');
+    return p ? p + 1 : path;
+}
+
+/* does trash_dir/name already exist; unreadable trash counts as taken */
+static bool trash_name_taken(const char *trash_dir, const char *name) {
+    char p[BM_PATH_MAX];
+    if (snprintf(p, sizeof p, "%s/%s", trash_dir, name) >= (int)sizeof p)
+        return false;
+    struct stat st;
+    return BM_LSTAT(p, &st) == 0;
+}
+
+/* freedesktop trash spec: one trash per mount, at <mount>/.Trash/$UID
+   (Sticky bit: only its owner may use it) or <mount>/.Trash-$UID;
+   everything is a plain rename() away. returns the trash dir of the
+   mount holding src, or NULL when none exists. the spec lets the
+   implementation create a missing trash on the mount - the home one at
+   $XDG_DATA_HOME/Trash (or ~/.local/share/Trash) and, on foreign
+   mounts, .Trash-$UID - so a headless box still gets one. an existing
+   .Trash admin dir without the sticky bit is never touched, and nothing
+   is created when the mount is read-only (that caller falls back to a
+   real delete). */
+static const char *xdg_trash_layout(const char *src) {
+    struct stat st;
+    if (BM_LSTAT(src, &st)) return NULL;
+    static char trash[BM_PATH_MAX];
+
+    /* home mount: $XDG_DATA_HOME/Trash, else ~/.local/share/Trash */
+    const char *home = getenv("HOME");
+    if (home && *home) {
+        const char *xdg = getenv("XDG_DATA_HOME");
+        int w = xdg && xdg[0] == '/'
+                    ? snprintf(trash, BM_PATH_MAX, "%s/Trash", xdg)
+                    : snprintf(trash, BM_PATH_MAX, "%s/.local/share/Trash",
+                               home);
+        if (w >= (int)BM_PATH_MAX) return NULL;
+        struct stat t;
+        if (!BM_LSTAT(trash, &t) && S_ISDIR(t.st_mode) &&
+            t.st_dev == st.st_dev)
+            return trash;
+        if (BM_LSTAT(trash, &t)) {
+            /* absent: create it with the spec's subdirs, use it when it
+               lands on the same filesystem */
+            char sub[BM_PATH_MAX];
+            if ((BM_MKDIR(trash) == 0 || errno == EEXIST) &&
+                snprintf(sub, BM_PATH_MAX, "%s/files", trash) <
+                    (int)BM_PATH_MAX &&
+                (BM_MKDIR(sub) == 0 || errno == EEXIST)) {
+                struct stat s2;
+                if (!BM_LSTAT(trash, &s2) && S_ISDIR(s2.st_mode) &&
+                    s2.st_dev == st.st_dev)
+                    return trash;
+            }
+        }
+    }
+
+    /* other mounts: walk up from src to its mount root - the shallowest
+       existing ancestor still on src's filesystem */
+    char top[BM_PATH_MAX];
+    if (snprintf(top, sizeof top, "%s", src) >= (int)sizeof top) return NULL;
+    for (;;) {
+        char *slash = strrchr(top, '/');
+        if (!slash || slash == top) {
+            strcpy(top, "/");
+            break;
+        }
+        *slash = '\0';
+        struct stat t;
+        if (BM_LSTAT(top, &t) || t.st_dev != st.st_dev) {
+            *slash = '/'; /* last good one */
+            break;
+        }
+    }
+    int w = snprintf(trash, sizeof trash, "%s/.Trash/%lu", top,
+                     (unsigned long)geteuid());
+    struct stat t;
+    if (w < (int)sizeof trash && !BM_LSTAT(trash, &t) &&
+        S_ISDIR(t.st_mode) && (t.st_mode & S_ISVTX))
+        return trash;
+    w = snprintf(trash, sizeof trash, "%s/.Trash-%lu", top,
+                 (unsigned long)geteuid());
+    if (w >= (int)sizeof trash) return NULL;
+    if (!BM_LSTAT(trash, &t) && S_ISDIR(t.st_mode)) return trash;
+    if (BM_LSTAT(trash, &t)) {
+        /* absent: the spec lets us create ours on the mount */
+        char sub[BM_PATH_MAX];
+        if ((BM_MKDIR(trash) == 0 || errno == EEXIST) &&
+            snprintf(sub, BM_PATH_MAX, "%s/files", trash) <
+                (int)BM_PATH_MAX &&
+            (BM_MKDIR(sub) == 0 || errno == EEXIST)) {
+            struct stat s2;
+            if (!BM_LSTAT(trash, &s2) && S_ISDIR(s2.st_mode)) return trash;
+        }
+    }
+    return NULL;
+}
+
+#ifdef _WIN32
+/* utf-8 in, utf-16 out */
+static bool to_wide(const char *s, wchar_t *w, int cap) {
+    return MultiByteToWideChar(CP_UTF8, 0, s, -1, w, cap) != 0;
+}
+#endif
+
+/* move src into the user's trash. 0 moved, -1 no trash / move failed */
+static int trash_move(const char *src, buf_t *into) {
+#ifdef _WIN32
+    /* recycle bin through the shell: FOF_ALLOWUNDO is what makes it a
+       trash instead of a wipe; the double-null tail of pFrom required */
+    wchar_t pathbuf[BM_PATH_MAX + 2];
+    if (!to_wide(src, pathbuf, BM_PATH_MAX)) return -1;
+    size_t n = wcslen(pathbuf);
+    pathbuf[n + 1] = 0;
+    SHFILEOPSTRUCTW op;
+    memset(&op, 0, sizeof op);
+    op.wFunc = FO_DELETE;
+    op.pFrom = pathbuf;
+    op.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_NOERRORUI |
+                FOF_SILENT;
+    if (SHFileOperationW(&op) == 0 && !op.fAnyOperationsAborted) {
+        if (into) buf_append_str(into, "recycle bin");
+        return 0;
+    }
+    return -1;
+#else
+#if defined(__APPLE__)
+    const char *home = getenv("HOME");
+    char trash_dir[BM_PATH_MAX], files_dir[BM_PATH_MAX];
+    char *info_dir = NULL;
+    bool have_trash = false;
+    (void)src;
+    if (home && *home &&
+        snprintf(trash_dir, BM_PATH_MAX, "%s/.Trash", home) <
+            (int)BM_PATH_MAX &&
+        snprintf(files_dir, BM_PATH_MAX, "%s", trash_dir) <
+            (int)BM_PATH_MAX) {
+        struct stat st;
+        if (stat(trash_dir, &st) == 0 && S_ISDIR(st.st_mode))
+            have_trash = true;
+    }
+#else
+    const char *t = xdg_trash_layout(src);
+    char trash_dir[BM_PATH_MAX], files_dir[BM_PATH_MAX];
+    char info_dir[BM_PATH_MAX];
+    bool have_trash = false;
+    (void)trash_dir; /* only the two subdirs below are used */
+    if (t && snprintf(files_dir, BM_PATH_MAX, "%s/files", t) <
+                (int)BM_PATH_MAX &&
+        snprintf(info_dir, BM_PATH_MAX, "%s/info", t) < (int)BM_PATH_MAX) {
+        /* the spec wants both subdirs present; created alongside the
+           home trash by xdg_trash_layout, ensured here for a foreign
+           admin trash that lost them */
+        if (BM_MKDIR(files_dir) == 0 || errno == EEXIST) {
+            BM_MKDIR(info_dir); /* failure only costs the .trashinfo */
+            have_trash = true;
+        }
+    }
+#endif
+    if (!have_trash) return -1;
+    if (!same_fs_mount(files_dir, src))
+        return -1; /* cross-device rename would fail anyway */
+    const char *base = base_ptr(src);
+    char dst[BM_PATH_MAX];
+    if (snprintf(dst, sizeof dst, "%s/%s", files_dir, base) >=
+        (int)sizeof dst)
+        return -1;
+    if (trash_name_taken(files_dir, base)) {
+        bool placed = false;
+        for (int i = 2; i < 100 && !placed; i++) {
+            char uniq[BM_PATH_MAX];
+            if (snprintf(uniq, sizeof uniq, "%s/%s %d", files_dir, base, i) >=
+                (int)sizeof uniq)
+                break;
+            struct stat st;
+            if (BM_LSTAT(uniq, &st) == 0) continue;
+            snprintf(dst, sizeof dst, "%s", uniq);
+            placed = true;
+        }
+        if (!placed) return -1;
+    }
+    if (rename(src, dst) != 0) return -1;
+#ifndef __APPLE__
+    /* sidecar .trashinfo: original location + deletion date, so a
+       trash-aware file manager can put it back */
+    {
+        const char *b2 = base_ptr(dst);
+        char info_path[BM_PATH_MAX];
+        if (snprintf(info_path, sizeof info_path, "%s/%s.trashinfo",
+                     info_dir, b2) < (int)sizeof info_path) {
+            FILE *f = fopen(info_path, "w");
+            if (f) {
+                time_t now = time(NULL);
+                struct tm *tm = localtime(&now);
+                char when[64] = "";
+                if (tm)
+                    snprintf(when, sizeof when, "%04d-%02d-%02dT%02d:%02d:%02d",
+                             tm->tm_year + 1900, tm->tm_mon + 1, tm->tm_mday,
+                             tm->tm_hour, tm->tm_min, tm->tm_sec);
+                fputs("[Trash Info]\nPath=", f);
+                for (const char *p = src; *p; p++) {
+                    /* RFC 2396 unreserved set, slash kept as separator */
+                    if (isalnum((unsigned char)*p) || *p == '/' ||
+                        *p == '-' || *p == '_' || *p == '.' || *p == '!' ||
+                        *p == '~' || *p == '*' || *p == '\'' || *p == '(' ||
+                        *p == ')')
+                        fputc(*p, f);
+                    else
+                        fprintf(f, "%%%02X", (unsigned char)*p);
+                }
+                fprintf(f, "\nDeletionDate=%s\n", when);
+                fclose(f);
+            }
+        }
+    }
+#endif
+    if (into) buf_appendf(into, "%s", dst);
+    return 0;
+#endif
+}
+
 /* depth-first post-order removal: files unlink(3), directories recursed
    then rmdir(3); on failure returns the deepest path and errno context */
 static void rm_tree(const char *path, buf_t *err, int depth) {
@@ -2790,6 +3030,16 @@ static void tool_file_delete(const cJSON *args, buf_t *out, bool *is_error) {
         *is_error = true;
         return;
     }
+    /* recoverable first: into the trash when one is reachable */
+    buf_t where;
+    buf_init(&where);
+    if (trash_move(path, &where) == 0) {
+        buf_clear(out);
+        buf_appendf(out, "deleted %s", path);
+        buf_free(&where);
+        return;
+    }
+    buf_free(&where);
     buf_t err;
     buf_init(&err);
     rm_tree(path, &err, 0);
