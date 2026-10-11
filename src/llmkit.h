@@ -588,6 +588,12 @@ bool mcp_tool_is_terminal(mcp_mgr_t *m, const char *tool);
 int mcp_call_raw(mcp_server_t *srv, const char *upstream_tool,
                  const cJSON *args, cJSON **result_out, char *err, size_t errsz,
                  double timeout);
+/* raw json-rpc round trip against one upstream: the request goes out as
+   given (a fresh id is minted), its result tree comes back. Same codes
+   as mcp_call_raw. For proxy passthrough of non-tool methods. */
+int mcp_request_raw(mcp_server_t *srv, const char *method,
+                    const cJSON *params, cJSON **result_out, char *err,
+                    size_t errsz, double timeout);
 /* call: 0 ok (text_out,is_error), 1 failed (err), 2 timeout */
 int mcp_call(mcp_mgr_t *m, const char *tool /* server.tool */, cJSON *args,
              buf_t *text_out, bool *is_error, char *err, size_t errsz,
@@ -932,6 +938,9 @@ void llm_proxy_map_request(int proto, const char *body, size_t n,
                            emit_fn em, void *ctx);
 void llm_proxy_map_response(int proto, long status, const char *body,
                             size_t n, emit_fn em, void *ctx);
+/* upstream url for a passthrough (non-llm) request: api_base + the
+   client path past its first segment, query string kept (selfcheck seam) */
+void llm_proxy_pt_url(const char *api_base, const char *target, buf_t *out);
 
 typedef struct llm_proxy_sse llm_proxy_sse_t;
 llm_proxy_sse_t *llm_proxy_sse_new(int proto, emit_fn em, void *ctx);

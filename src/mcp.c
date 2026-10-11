@@ -681,6 +681,20 @@ int mcp_call_raw(mcp_server_t *srv, const char *upstream_tool,
     return 0;
 }
 
+int mcp_request_raw(mcp_server_t *srv, const char *method,
+                    const cJSON *params, cJSON **result_out, char *err,
+                    size_t errsz, double timeout) {
+    cJSON *pp = params ? cJSON_Duplicate((cJSON *)params, 1)
+                       : cJSON_CreateObject();
+    cJSON *req = rpc_make(srv, method, pp);
+    cJSON *reply = NULL;
+    int rc = server_rpc(srv, req, &reply, timeout, err, errsz);
+    cJSON_Delete(req);
+    if (rc) return rc;
+    *result_out = reply;
+    return 0;
+}
+
 int mcp_call(mcp_mgr_t *m, const char *tool, cJSON *args, buf_t *text_out,
              bool *is_error, char *err, size_t errsz, double timeout) {
     const char *dot = strchr(tool, '.');

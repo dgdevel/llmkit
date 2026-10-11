@@ -1364,10 +1364,13 @@ rendered conversation only.
   path the client itself addressed. The listen side is plain tcp, no
   tls - the point is to be the http endpoint a client or a local
   network can talk to; the upstream may be https.
-- **methods** - POST only; anything else is answered `405` with a json
-  error body and the connection closes. Request bodies need
-  `Content-Length` (a chunked body is answered `411`); the head is
-  capped (431 beyond) and the body capped (413 beyond).
+- **methods** - any method passes: a POST is the llm conversation the
+  wire viewer renders; every other method (GET `/models`, a HEAD ping,
+  a client's own extension call) is a transparent passthrough - the
+  request goes upstream untouched and the reply comes back, nothing
+  renders. Request bodies need `Content-Length` (a chunked body is
+  answered `411`); the head is capped (431 beyond) and the body capped
+  (413 beyond).
 - **headers** - request headers pass except the hop-by-hop set,
   `Host`, `Content-Length`, `Expect` (a `100 Continue` is sent for it)
   and `Accept-Encoding` (identity only, so the passing bytes parse);
@@ -1398,7 +1401,9 @@ through, closing with the turn's usage line when the endpoint reports
 one. A non-2xx response renders as one `!` line with the wires' error
 shaping. Parsing never blocks the passthrough: a body that does not
 parse renders as a `! invalid_record` / `! http_error` line and still
-reaches its destination byte for byte.
+reaches its destination byte for byte. A non-POST request is outside
+the viewer's contract altogether: it is forwarded and relayed with no
+record emitted and no parsing attempted.
 
 ### process rules
 

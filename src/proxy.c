@@ -427,6 +427,22 @@ int proxy_handle(void *ctx, const char *method, cJSON *params,
         *result_out = result; /* relayed verbatim */
         return 0;
     }
+    /* anything else is not the proxy's business: a non-standard method
+       from a client that treats this as a plain mcp server - forward it
+       to the first connected upstream and relay the result verbatim.
+       Notifications among these take no reply (the loop drops rc 2). */
+    if (p->mgr->n) {
+        cJSON *result = NULL;
+        char err[512] = "";
+        int rc = mcp_request_raw(p->mgr->v[0], method, params, &result, err,
+                                 sizeof err, -1);
+        if (rc != 0) {
+            *errmsg_out = strdup(err[0] ? err : "upstream call failed");
+            return 1;
+        }
+        *result_out = result;
+        return 0;
+    }
     *errmsg_out = strdup("method not found");
     return 1;
 }

@@ -5118,6 +5118,32 @@ static void test_llm_proxy(void) {
         buf_free(&j.b);
     }
 
+    /* ---- passthrough url derivation (non-llm requests) ---- */
+    {
+        static const struct {
+            const char *base, *target, *want;
+        } v[] = {
+            {"http://x:9931/v1", "/v1/models", "http://x:9931/v1/models"},
+            {"http://x:9931/v1", "/models", "http://x:9931/v1/models"},
+            {"http://x:9931/v1/", "/v1/models", "http://x:9931/v1/models"},
+            {"http://x:9931/v1", "/v1/a/b?c=1&d=2",
+             "http://x:9931/v1/a/b?c=1&d=2"},
+            {"http://x:9931", "/v1/models", "http://x:9931/models"},
+            {"http://x:9931/v1", "/", "http://x:9931/v1/"},
+            {"http://x:9931/v1", "/v1", "http://x:9931/v1"},
+            {"http://x:9931/v1", "/v2/models", "http://x:9931/v1/models"},
+            {"http://x:9931/v1", "/models", "http://x:9931/v1/models"},
+        };
+        for (size_t i = 0; i < sizeof v / sizeof v[0]; i++) {
+            buf_t u;
+            buf_init(&u);
+            llm_proxy_pt_url(v[i].base, v[i].target, &u);
+            check_str(u.data ? u.data : "", v[i].want,
+                      "proxy: passthrough url");
+            buf_free(&u);
+        }
+    }
+
     /* ---- the rendered view is prettyprint's ---- */
     {
         char *ob = NULL;

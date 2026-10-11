@@ -485,7 +485,12 @@ Same core, third entry point. `llmkit mcp-proxy <config.jsonl>`:
   applies the inverse argument renaming before forwarding through the sec.6
   client; the result is relayed verbatim. Calls are serialized, one at a
   time, replies in request order; a failed upstream call is a json-rpc error
-  response and the proxy stays up.
+  response and the proxy stays up. Any other method the client sends -
+  `resources/list`, `prompts/list`, a client's own extension call - is
+  forwarded as-is to the first connected upstream and its result relayed
+  verbatim; with no upstream connected the reply is `method not found`.
+  `initialize`, `notifications/initialized` and `ping` stay the proxy's
+  own (sec.9).
 - Threads: main plus one reader per stdio upstream, same queues as sec.2.
 
 ## 11. call
@@ -883,9 +888,10 @@ the same sink fed record by record instead of from a file - and
   head until the blank line (CRLF and LF tolerated, 64 KiB cap), the
   request line and header fields parsed into a list, `Content-Length`
   bodies (411 for chunked, 413 beyond the cap), `Expect: 100-continue`
-  answered, keep-alive by version and `Connection`. POST only - 405
-  otherwise; the request path is ignored (routing is the protocol
-  flag's business).
+  answered, keep-alive by version and `Connection`. Any method - POST
+  renders as the llm conversation, every other method is a transparent
+  passthrough (below); the request path is ignored for POSTs (routing
+  is the protocol flag's business).
 - **relay** - one fresh curl easy handle per request, the
   `http_perform` shape with its own callbacks: the header callback
   collects the status line and the forwardable headers, the write
@@ -895,6 +901,12 @@ the same sink fed record by record instead of from a file - and
   `Content-Length` under keep-alive. `Accept-Encoding` is forced to
   identity (the passing bytes must parse); hop-by-hop headers and the
   client's auth pass through untouched, `--key` fills the gap only.
+  A non-POST request skips the interception entirely: it goes upstream
+  with the method, target and headers as they came (the path past the
+  client's version segment rides on the api_base - `/v1/models` reaches
+  `<api_base>/models`), the reply relayed buffered with its status and
+  headers, and nothing renders on stdout - the viewer shows llm
+  conversations only; the request path never reaches the record mapping.
 - **interception** - the protocol flag names the wire language, so
   both directions map to the record catalogue: requests as the
   conversation their messages carry - the system prompt included

@@ -1443,7 +1443,114 @@ done:
     return keep;
 }
 
+/* passthrough body sink: always buffered, never live, never sse */
+static size_t pt_write_cb(char *ptr, size_t sz, size_t nm, void *ud) {
+    fx_t *f = ud;
+    size_t n = sz * nm;
+    f->got_body = true;
+    buf_append(&f->body, ptr, n);
+    if (g_stop_flag) return 0; /* abort the transfer */
+    return n;
+}
+
+/* ================= passthrough ================= */
+
+/* upstream url for a passthrough request: the api_base plus the client's
+   path past its first segment when that segment is version-like
+   ("v" + digits: "/v1/models" -> "/models", "/v1" -> ""), the whole path
+   otherwise ("/models" -> "/models", "/" -> ""); the query rides along */
+void llm_proxy_pt_url(const char *api_base, const char *target, buf_t *out) {
+    buf_append_str(out, api_base);
+    const char *tgt = target;
+    const char *qm = strchr(tgt, '?');
+    size_t plen = qm ? (size_t)(qm - tgt) : strlen(tgt);
+    const char *p = memchr(tgt, '/', plen); /* the first '/' */
+    if (!p) return;
+    /* the rest past the first segment, slash kept */
+    const char *q = memchr(p + 1, '/', (size_t)(tgt + plen - p - 1));
+    const char *rest = q ? q : tgt + plen;
+    /* version-like first segment ("v1"): past it; anything else: whole */
+    size_t seglen = (size_t)((q ? q : tgt + plen) - (p + 1));
+    bool version = seglen >= 2 && p[1] == 'v';
+    for (size_t i = 2; version && i < seglen; i++)
+        if (p[i] < '0' || p[i] > '9') version = false;
+    const char *tail = version ? rest : p;
+    if (out->len && out->data[out->len - 1] == '/' && *tail == '/') tail++;
+    buf_append(out, tail, (size_t)(tgt + plen - tail));
+    if (qm) buf_append_str(out, qm);
+}
+
 /* ================= serve ================= */
+
+/* one non-llm request (GET /v1/models, a HEAD ping, a client's own
+   extension call): forwarded to the upstream verbatim - same method,
+   target path after the protocol's segment, all client headers - and
+   the reply relayed buffered with its status and headers. Nothing
+   renders on stdout: the wire viewer shows llm conversations only.
+   Returns false when the connection must close. */
+static bool passthrough(creq_t *req, sock_t c, const llm_proxy_cfg_t *cfg) {
+    buf_t url;
+    buf_init(&url);
+    llm_proxy_pt_url(cfg->api_base, req->target, &url);
+
+    /* client headers minus the hop-by-hop set */
+    struct curl_slist *hdrs = NULL;
+    for (size_t i = 0; i < req->nh; i++)
+        if (!req_hdr_skip(req->h[i].name))
+            http_hdr_add(&hdrs, req->h[i].name, req->h[i].value);
+
+    fx_t f;
+    memset(&f, 0, sizeof f);
+    f.c = c;
+    f.client_ok = true;
+    buf_init(&f.ctype);
+    buf_init(&f.body);
+
+    bool keep = false;
+    CURL *cu = curl_easy_init();
+    if (!cu) {
+        send_local_error(c, 502, "Bad Gateway", "cannot start the transfer");
+        goto done;
+    }
+    curl_easy_setopt(cu, CURLOPT_URL, url.data);
+    curl_easy_setopt(cu, CURLOPT_NOSIGNAL, 1L);
+    curl_easy_setopt(cu, CURLOPT_CUSTOMREQUEST, req->method);
+    curl_easy_setopt(cu, CURLOPT_POSTFIELDS,
+                     req->body.data ? req->body.data : "");
+    curl_easy_setopt(cu, CURLOPT_POSTFIELDSIZE, (long)req->body.len);
+    curl_easy_setopt(cu, CURLOPT_HTTPHEADER, hdrs);
+    curl_easy_setopt(cu, CURLOPT_HEADERFUNCTION, fx_hdr_cb);
+    curl_easy_setopt(cu, CURLOPT_HEADERDATA, &f);
+    curl_easy_setopt(cu, CURLOPT_WRITEFUNCTION, pt_write_cb);
+    curl_easy_setopt(cu, CURLOPT_WRITEDATA, &f);
+    curl_easy_setopt(cu, CURLOPT_CONNECTTIMEOUT, 30L);
+
+    CURLcode res = curl_easy_perform(cu);
+    curl_easy_cleanup(cu);
+
+    if (res != CURLE_OK) {
+        if (!f.head_sent)
+            send_local_error(c, 502, "Bad Gateway",
+                             curl_easy_strerror(res));
+        goto done;
+    }
+    if (!f.head_sent) {
+        f.is_sse = false; /* a passthrough reply is never an llm stream */
+        fx_send_head(&f, (long)f.body.len);
+    }
+    if (f.body.len)
+        f.client_ok = sock_write_all(c, f.body.data, f.body.len) &&
+                      f.client_ok;
+    keep = req->keep && f.client_ok && !g_stop_flag;
+done:
+    for (size_t i = 0; i < f.nh; i++) free(f.hlines[i]);
+    free(f.hlines);
+    buf_free(&f.ctype);
+    buf_free(&f.body);
+    curl_slist_free_all(hdrs);
+    buf_free(&url);
+    return keep;
+}
 
 static void serve_connection(sock_t c, const llm_proxy_cfg_t *cfg,
                              pretty_live_t *pr) {
@@ -1479,10 +1586,12 @@ static void serve_connection(sock_t c, const llm_proxy_cfg_t *cfg,
             break;
         }
         if (strcmp(req.method, "POST")) {
-            send_local_error(c, 405, "Method Not Allowed",
-                             "llmkit proxy forwards POST requests only");
+            /* non-llm traffic (GET /models, health checks, a client's own
+               extension calls): transparent passthrough, nothing renders */
+            bool keep = passthrough(&req, c, cfg);
             creq_free(&req);
-            break;
+            if (!keep || g_stop_flag) break;
+            continue;
         }
         bool keep = forward(&req, c, cfg, pr);
         creq_free(&req);
