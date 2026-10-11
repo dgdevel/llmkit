@@ -3635,6 +3635,294 @@ static void squash_ws(char *dst, size_t dstn, const char *src) {
     dst[w] = '\0';
 }
 
+/* ---------- shell, batch, powershell: function outline ---------- */
+
+/* one shared outline walker; the extractors do dialect work */
+
+/* is line[pos..] a word end here: the next char is not an identifier
+   character? */
+static bool word_ends(const char *line, size_t len, size_t pos,
+                      size_t wl) {
+    size_t end = pos + wl;
+    if (end >= len) return true;
+    return !id_start((unsigned char)line[end]) &&
+           !isalnum((unsigned char)line[end]) && line[end] != '_';
+}
+
+/* drop '  a:  b ' -> 'a b' into dst; two runs of whitespace squeeze to
+   one space, trailing space goes */
+static void squeeze_spaces(char *dst, size_t cap, const char *s,
+                           size_t n) {
+    size_t w = 0;
+    bool pending = false;
+    for (size_t r = 0; r < n && w + 1 < cap; r++) {
+        if (s[r] == ' ' || s[r] == '\t') {
+            pending = true;
+            continue;
+        }
+        if (pending && w) dst[w++] = ' ';
+        pending = false;
+        dst[w++] = s[r];
+    }
+    dst[w] = '\0';
+}
+
+/* ---------- shell (.sh, .bash): POSIX functions and subcommands ---------- */
+
+/* the function name if `name() {` (or a newline) opens a POSIX shell
+   function here, else NULL */
+static const char *sh_fn_at(const char *line, size_t ll, size_t k) {
+    size_t n = 0;
+    while (k + n < ll && (isalnum((unsigned char)line[k + n]) ||
+                          line[k + n] == '_'))
+        n++;
+    if (!n || k + n + 2 > ll || line[k + n] != '(' ||
+        line[k + n + 1] != ')')
+        return NULL;
+    size_t a = k + n + 2;
+    while (a < ll && (line[a] == ' ' || line[a] == '\t')) a++;
+    if (a >= ll || line[a] != '{') return NULL;
+    return line + k;
+}
+
+/* the case keyword if `case WORD in` opens a case statement here, else
+   NULL */
+static const char *sh_case_at(const char *line, size_t ll, size_t k) {
+    if (!word_at(line, ll, k, "case", 4)) return NULL;
+    if (!word_ends(line, ll, k, 4)) return NULL;
+    size_t a = k + 4;
+    while (a < ll && (line[a] == ' ' || line[a] == '\t')) a++;
+    if (a >= ll || line[a] == ' ' || line[a] == '\t') return NULL;
+    while (a < ll && line[a] != ' ' && line[a] != '\t') a++;
+    while (a < ll && (line[a] == ' ' || line[a] == '\t')) a++;
+    if (!word_at(line, ll, a, "in", 2) || !word_ends(line, ll, a, 2))
+        return NULL;
+    return line + k + 5;
+}
+
+/* the case-arm label if the line is a pattern branch: `p) cmd ;;`,
+   `p)` opening a multi-line arm, or `p) cmd # c`. The pattern (text
+   before the closing paren) must be a plain word list: `=`, `(`, `;`
+   or a backtick in it rejects the line (kills `x=$(...)` assignments) */
+static const char *sh_arm_at(const char *line, size_t ll, size_t k) {
+    if (line[k] == '(' || line[k] == '`' || line[k] == '\\' ||
+        line[k] == '#')
+        return NULL;
+    int sub = 0, par = 0;
+    for (size_t i = k; i < ll; i++) {
+        char c = line[i];
+        if (c == '$') {
+            if (i + 1 < ll && (line[i + 1] == '(' || line[i + 1] == '{'))
+                sub++;
+            continue;
+        }
+        if (sub) {
+            if (c == ')' || c == '}') sub--;
+            continue;
+        }
+        if (c == '(') {
+            par++;
+            continue;
+        }
+        if (c != ')' || par) {
+            if (c == ')') par--;
+            continue;
+        }
+        /* the close: the pattern is line[k..i) */
+        for (size_t j = k; j < i; j++) {
+            char d = line[j];
+            if (d == '=' || d == ';' || d == '(' || d == '`')
+                return NULL;
+        }
+        size_t a = i + 1;
+        while (a < ll && (line[a] == ' ' || line[a] == '\t')) a++;
+        if (a >= ll || line[a] == ';' || line[a] == '#')
+            return line + k; /* arm over here */
+        /* a one-liner: the `;;` must come before any further `)` */
+        int s2 = 0;
+        for (size_t j = a; j < ll; j++) {
+            char d = line[j];
+            if (d == '$') {
+                if (j + 1 < ll && line[j + 1] == '(') s2++;
+                continue;
+            }
+            if (s2) {
+                if (d == ')' || d == '}') s2--;
+                continue;
+            }
+            if (d == ';' && j + 1 < ll && line[j + 1] == ';')
+                return line + k;
+            if (d == ')') return NULL; /* that was a group, not a close */
+        }
+        return line + k;
+    }
+    return NULL;
+}
+
+static void analyze_shell(const char *text, size_t len, nodes_t *ns) {
+    size_t pos = 0;
+    const char *line;
+    size_t ll;
+    long lineno = 0;
+    int depth = 0;
+
+    while (next_line(text, len, &pos, &line, &ll)) {
+        lineno++;
+        size_t k = 0;
+        while (k < ll && (line[k] == ' ' || line[k] == '\t')) k++;
+        if (k >= ll || line[k] == '#') continue;
+        if (!strncmp(line + k, "esac", 4) && word_ends(line, ll, k, 4)) {
+            if (depth > 0) depth--;
+            continue;
+        }
+        if (!strncmp(line + k, "}", 1) && word_ends(line, ll, k, 1)) {
+            if (depth > 0) depth--;
+            continue;
+        }
+        const char *w;
+        if ((w = sh_fn_at(line, ll, k))) {
+            char label[AN_LABEL_MAX + 8];
+            size_t wl = 0;
+            while (w + wl < line + ll && w[wl] != '(') wl++;
+            squeeze_spaces(label, sizeof label, w, wl);
+            char lab2[AN_LABEL_MAX + 16];
+            snprintf(lab2, sizeof lab2, "%s()", label);
+            node_add(ns, lineno, depth, lab2);
+            depth++;
+            continue;
+        }
+        if ((w = sh_case_at(line, ll, k))) {
+            char label[AN_LABEL_MAX + 8];
+            squeeze_spaces(label, sizeof label, w,
+                           (size_t)(line + ll - w));
+            char lab2[AN_LABEL_MAX + 16];
+            snprintf(lab2, sizeof lab2, "case %s", label);
+            node_add(ns, lineno, depth, lab2);
+            depth++;
+            continue;
+        }
+        if ((w = sh_arm_at(line, ll, k))) {
+            char label[AN_LABEL_MAX + 8];
+            size_t wl = 0;
+            while (w + wl < line + ll && w[wl] != ')') wl++;
+            squeeze_spaces(label, sizeof label, w, wl);
+            node_add(ns, lineno, depth, label);
+        }
+    }
+}
+
+/* ---------- batch (.bat, .cmd): labels and calls ---------- */
+
+static bool bat_line_at(const char *line, size_t ll, size_t k,
+                        const char *word, size_t wl) {
+    if (!word_at(line, ll, k, word, wl)) return false;
+    return word_ends(line, ll, k, wl);
+}
+
+static void analyze_batch(const char *text, size_t len, nodes_t *ns) {
+    size_t pos = 0;
+    const char *line;
+    size_t ll;
+    long lineno = 0;
+    const char *last = NULL; /* the call the following label answers */
+
+    while (next_line(text, len, &pos, &line, &ll)) {
+        lineno++;
+        size_t k = 0;
+        while (k < ll && (line[k] == ' ' || line[k] == '\t')) k++;
+        if (k + 1 >= ll) continue;         /* ':' or empty */
+        if (line[k + 1] == ':') continue;  /* :: comment */
+        if (line[k] == ':') {
+            if (last && !strncmp(line + k + 1, last, strlen(last)) &&
+                line[k + 1 + strlen(last)] == '\0') {
+                node_add(ns, lineno, 1, line + k + 1);
+            } else {
+                node_add(ns, lineno, 0, line + k + 1);
+            }
+            last = NULL;
+            continue;
+        }
+        const char *word = NULL;
+        if (bat_line_at(line, ll, k, "call", 4) ||
+            bat_line_at(line, ll, k, "goto", 4)) {
+            word = "call/goto";
+        } else if (bat_line_at(line, ll, k, "for", 3)) {
+            word = "for";
+        } else if (bat_line_at(line, ll, k, "if", 2)) {
+            word = "if";
+        }
+        if (!word) continue;
+        if (!strcmp(word, "call/goto")) {
+            size_t a = k + 4;
+            while (a < ll && (line[a] == ' ' || line[a] == '\t')) a++;
+            if (bat_line_at(line, ll, a, "call", 4)) a += 4;
+            while (a < ll && (line[a] == ' ' || line[a] == '\t')) a++;
+            if (a < ll && line[a] == ':')
+                last = line + a + 1; /* expect this label next */
+        }
+        char label[AN_LABEL_MAX / 2 + 4];
+        squeeze_spaces(label, sizeof label, line + k, ll - k);
+        char lab2[AN_LABEL_MAX + 16];
+        snprintf(lab2, sizeof lab2, "%s %s", word, label);
+        node_add(ns, lineno, 0, lab2);
+    }
+}
+
+/* ---------- powershell (.ps1): functions, filters, classes ---------- */
+
+/* the keyword if the line opens a nested function/filter/enum here,
+   else NULL */
+static const char *ps_sub_at(const char *line, size_t ll, size_t k) {
+    static const char *const words[] = {"function", "filter", "enum",
+                                        NULL};
+    for (int i = 0; words[i]; i++) {
+        size_t wl = strlen(words[i]);
+        if (word_at(line, ll, k, words[i], wl) &&
+            word_ends(line, ll, k, wl))
+            return words[i];
+    }
+    return NULL;
+}
+
+static void analyze_pwsh(const char *text, size_t len, nodes_t *ns) {
+    size_t pos = 0;
+    const char *line;
+    size_t ll;
+    long lineno = 0;
+    int depth = 0;
+
+    while (next_line(text, len, &pos, &line, &ll)) {
+        lineno++;
+        size_t k = 0;
+        while (k < ll && (line[k] == ' ' || line[k] == '\t')) k++;
+        if (k >= ll || line[k] == '#') continue;
+        size_t tl = ll; /* the label ends at the opening '{' */
+        for (size_t i = k; i < tl; i++)
+            if (line[i] == '{') { tl = i; break; }
+        while (tl > k && (line[tl - 1] == ' ' || line[tl - 1] == '\t'))
+            tl--;
+        if (line[k] == '}' && tl == k + 1) {
+            if (depth > 0) depth--;
+            continue;
+        }
+        const char *kw;
+        if ((kw = ps_sub_at(line, ll, k))) {
+            char label[AN_LABEL_MAX + 8];
+            squeeze_spaces(label, sizeof label, line + k, tl - k);
+            node_add(ns, lineno, depth, label);
+            depth++;
+            continue;
+        }
+        if (word_at(line, ll, k, "class", 5) &&
+            word_ends(line, ll, k, 5)) {
+            char label[AN_LABEL_MAX + 8];
+            squeeze_spaces(label, sizeof label, line + k, tl - k);
+            node_add(ns, lineno, depth, label);
+            depth++;
+        }
+    }
+}
+
 /* does a declaration head open with the `typedef` word? */
 static bool starts_typedef(const char *head) {
     return !strncmp(head, "typedef", 7) &&
@@ -3762,11 +4050,20 @@ static const char *const EXTS_C[] = {
     ".java", ".cs", ".js", ".jsx", ".ts", ".tsx", NULL};
 static const char *const EXTS_PYTHON[] = {
     ".py", ".pyi", NULL};
+static const char *const EXTS_SHELL[] = {
+    ".sh", ".bash", NULL};
+static const char *const EXTS_BATCH[] = {
+    ".bat", ".cmd", NULL};
+static const char *const EXTS_PWSH[] = {
+    ".ps1", NULL};
 
 static const analyzer_t ANALYZERS[] = {
     {"markdown", EXTS_MARKDOWN, analyze_markdown},
     {"c",        EXTS_C,        analyze_c},
     {"python",   EXTS_PYTHON,   analyze_python},
+    {"shell",    EXTS_SHELL,    analyze_shell},
+    {"batch",    EXTS_BATCH,    analyze_batch},
+    {"powershell", EXTS_PWSH,   analyze_pwsh},
 };
 enum { ANALYZERS_N = sizeof ANALYZERS / sizeof ANALYZERS[0] };
 

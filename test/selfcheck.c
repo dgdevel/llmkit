@@ -1922,6 +1922,70 @@ static void test_builtin(void) {
           "builtin: file_analyze python classes and defs");
     free(t);
 
+    write_file("/tmp/llmkit-test-builtin/tool.sh",
+               "#!/bin/sh\n"
+               "# helper() { not a function }\n"
+               "usage() {\n"
+               "    echo \"usage: $0\"\n"
+               "}\n"
+               "run() {\n"
+               "    case $1 in\n"
+               "        -h) usage ;;\n"
+               "        start) echo go ;;\n"
+               "        *) echo '?' ;;\n"
+               "    esac\n"
+               "}\n"
+               "x=$(case hidden in a) ;; esac)\n");
+    t = bc_call("file_analyze",
+                "{\"path\":\"/tmp/llmkit-test-builtin/tool.sh\"}", &ie);
+    check(!ie && t && strstr(t, "  [shell]  13 lines\n") &&
+              strstr(t, "usage()\n") && strstr(t, "run()\n") &&
+              strstr(t, "case $1 in\n") && strstr(t, "  -h\n") &&
+              strstr(t, "  start\n") && strstr(t, "  *\n") &&
+              !strstr(t, "not a function") && !strstr(t, "hidden"),
+          "builtin: file_analyze shell functions, cases, arms");
+    free(t);
+
+    write_file("/tmp/llmkit-test-builtin/run.bat",
+               "@echo off\n"
+               ":: not a label\n"
+               ":top\n"
+               "if \"%1\"==\"\" goto :end\n"
+               "goto :main\n"
+               ":main\n"
+               "call :doit arg\n"
+               "goto :eof\n"
+               ":doit\n"
+               "echo did\n"
+               "goto :eof\n"
+               ":end\n");
+    t = bc_call("file_analyze",
+                "{\"path\":\"/tmp/llmkit-test-builtin/run.bat\"}", &ie);
+    check(!ie && t && strstr(t, "  [batch]  12 lines\n") &&
+              strstr(t, "top\n") && strstr(t, "if ") &&
+              strstr(t, "goto ") && strstr(t, "call ") &&
+              !strstr(t, "not a label"),
+          "builtin: file_analyze batch labels, branches, calls");
+    free(t);
+
+    write_file("/tmp/llmkit-test-builtin/loop.ps1",
+               "# Get-Thing { not a function }\n"
+               "function Get-Thing {\n"
+               "    param($Path)\n"
+               "}\n"
+               "filter Even { $_ % 2 -eq 0 }\n"
+               "class point {\n"
+               "    [int]$x\n"
+               "}\n");
+    t = bc_call("file_analyze",
+                "{\"path\":\"/tmp/llmkit-test-builtin/loop.ps1\"}", &ie);
+    check(!ie && t && strstr(t, "  [powershell]  8 lines\n") &&
+              strstr(t, "function Get-Thing\n") &&
+              strstr(t, "filter Even\n") && strstr(t, "class point\n") &&
+              !strstr(t, "not a function"),
+          "builtin: file_analyze powershell functions and classes");
+    free(t);
+
     write_file("/tmp/llmkit-test-builtin/plain.md", "just text\n");
     t = bc_call("file_analyze",
                 "{\"path\":\"/tmp/llmkit-test-builtin/plain.md\"}", &ie);
