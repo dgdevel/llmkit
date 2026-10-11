@@ -877,6 +877,9 @@ typedef struct repl_opts {
     bool trim_args;             /* long string arguments render elided on
                                    the request lines; the agent's quiet
                                    default, --verbose restores them */
+    bool helper_tool;           /* agent: attach the `helper` subagent -
+                                   this same agent as one tool (the
+                                   subagent's copy lacks it) */
 } repl_opts_t;
 
 /* run the chat session: records compiled from c, input lines from in_fd,
@@ -895,6 +898,20 @@ int repl_store_extract(int argc, char **argv, const char **store,
 /* pull --verbose out of the agent flag range, in place; returns 1 seen,
    0 absent, -1 on a duplicate (err filled) */
 int repl_verbose_extract(int argc, char **argv, char *err, size_t errsz);
+/* the same for --no-helper */
+int repl_nohelper_extract(int argc, char **argv, char *err, size_t errsz);
+/* build the helper's two config files (a jsonl seed for agent-as-tool,
+   a jsonl mcp-proxy config renaming its `invoke` to `helper`) plus the
+   helper server entry for the session's tools record; the seed carries
+   the session's llm/system records and base_tools' servers verbatim.
+   0 ok (seed_path/cfg_path filled, srv owned), else the exit code with
+   the error rendered through e */
+int repl_helper_build(const call_cfg_t *c, const char *system_prompt,
+                      const cJSON *base_tools, const char *exe_path,
+                      engine_t *e, char *seed_path, size_t seed_sz,
+                      char *cfg_path, size_t cfg_sz, cJSON **srv_out);
+/* wipe the helper's temp files (safe when never built) */
+void repl_helper_cleanup(const char *seed_path, const char *cfg_path);
 
 /* ================= pretty.c ================= */
 
@@ -943,9 +960,10 @@ void dspy_tool_response(dspy_t *s, const char *tx);
 /* agent's default: these tools collapse to one timing summary line */
 #define DSPY_BRIEF_TOOLS "web_fetch files_search file_read skills_read"
 void dspy_brief_tools(dspy_t *s, const char *names /* NULL = full output */);
-/* the request line renders `<prefix>.<tool>` as `<tool>` (the agent
-   surface's bundled server, the one whose prefix adds no signal);
-   NULL disarms, exposed names still drive match and wire */
+/* the request line renders `<prefix>.<tool>` as `<tool>` for each
+   space-separated prefix (the agent surface's bundled server and its
+   helper subagent, the ones whose prefixes add no signal); NULL
+   disarms, exposed names still drive match and wire */
 void dspy_brief_strip(dspy_t *s, const char *prefix);
 /* tally the reply's lines/bytes of the in-flight brief tool call */
 void dspy_brief_count(dspy_t *s, const char *tx);

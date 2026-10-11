@@ -20,6 +20,12 @@
 #include <string.h>
 #include <unistd.h>
 
+#ifdef _WIN32
+#include <fcntl.h>
+#include <io.h>
+#include <windows.h>
+#endif
+
 /* the line that prefixes the AGENTS.md content block */
 #define AGENTS_MD_PREFIX "##### Content of AGENTS.md #####\n"
 
@@ -394,6 +400,176 @@ static int inject_agents_md(engine_t *e, const char *prompt_text) {
     return rc;
 }
 
+/* ================= the helper subagent ================= */
+
+/* one temp jsonl per session, both writable only by us: the seed the
+   subagent boots from and the proxy config that renames its tool. Same
+   recipe as builtin.c's proc_mktemp, minus the reuse-the-pid trick. */
+static FILE *repl_mktemp(char *path, size_t sz) {
+#ifdef _WIN32
+    static unsigned seq;
+    char dir[264];
+    DWORD dn = GetTempPathA(sizeof dir, dir);
+    if (!dn || dn >= sizeof dir) return NULL;
+    for (int i = 0; i < 4096; i++) {
+        snprintf(path, sz, "%sllmkit-helper-%lu-%u.tmp", dir,
+                 (unsigned long)GetCurrentProcessId(), ++seq);
+        HANDLE h = CreateFileA(path, GENERIC_WRITE, 0, NULL, CREATE_NEW,
+                               FILE_ATTRIBUTE_NORMAL, NULL);
+        if (h != INVALID_HANDLE_VALUE) {
+            int fd = _open_osfhandle((intptr_t)h, _O_BINARY | _O_NOINHERIT);
+            if (fd < 0) {
+                CloseHandle(h);
+                return NULL;
+            }
+            return fdopen(fd, "wb");
+        }
+        DWORD err = GetLastError();
+        if (err != ERROR_FILE_EXISTS && err != ERROR_ACCESS_DENIED)
+            return NULL;
+    }
+    return NULL;
+#else
+    const char *dir = getenv("TMPDIR");
+    if (!dir || !*dir) dir = "/tmp";
+    if (snprintf(path, sz, "%s/llmkit-helper-XXXXXX", dir) >= (int)sz &&
+        snprintf(path, sz, "/tmp/llmkit-helper-XXXXXX") >= (int)sz)
+        return NULL; /* an overlong TMPDIR falls back, then gives up */
+    int fd = mkstemp(path);
+    if (fd < 0) return NULL;
+    return fdopen(fd, "w");
+#endif
+}
+
+static void write_jsonl_line(FILE *f, const cJSON *rec) {
+    char *p = cJSON_PrintUnformatted((cJSON *)rec);
+    if (p) {
+        fputs(p, f);
+        fputc('\n', f);
+        cJSON_free(p);
+    }
+}
+
+static void helper_fail(engine_t *e, const char *what) {
+    char msg[256];
+    snprintf(msg, sizeof msg,
+             "cannot prepare the helper subagent: %s failed", what);
+    engine_emit_record(e, rec_error(EC_IO_ERROR, msg, true));
+}
+
+int repl_helper_build(const call_cfg_t *c, const char *system_prompt,
+                      const cJSON *base_tools, const char *exe_path,
+                      engine_t *e, char *seed_path, size_t seed_sz,
+                      char *cfg_path, size_t cfg_sz, cJSON **srv_out) {
+    *srv_out = NULL;
+    *seed_path = *cfg_path = '\0';
+    FILE *seed = repl_mktemp(seed_path, seed_sz);
+    if (!seed) {
+        helper_fail(e, "the seed temp file");
+        return EXIT_IO_ERROR;
+    }
+    FILE *cfg = repl_mktemp(cfg_path, cfg_sz);
+    if (!cfg) {
+        fclose(seed);
+        remove(seed_path);
+        *seed_path = '\0';
+        helper_fail(e, "the config temp file");
+        return EXIT_IO_ERROR;
+    }
+    /* the seed: header, the session's llm and system records, the
+       subagent's tools (the session's servers minus the helper entry
+       itself - the recursion cut), and the agent-as-tool record */
+    write_jsonl_line(seed, cJSON_Parse("{\"type\":\"header\",\"version\":1}"));
+    write_jsonl_line(seed, call_build_llm(c));
+    if (system_prompt && *system_prompt) {
+        cJSON *sys = cJSON_CreateObject();
+        cJSON_AddStringToObject(sys, "type", "system");
+        cJSON *content = cJSON_AddArrayToObject(sys, "content");
+        cJSON *blk = cJSON_CreateObject();
+        cJSON_AddStringToObject(blk, "type", "text");
+        cJSON_AddStringToObject(blk, "text", system_prompt);
+        cJSON_AddItemToArray(content, blk);
+        write_jsonl_line(seed, sys);
+        cJSON_Delete(sys);
+    }
+    if (base_tools) {
+        const cJSON *list =
+            cJSON_GetObjectItemCaseSensitive(base_tools, "tools");
+        if (cJSON_IsArray(list) && list->child) {
+            cJSON *t = cJSON_CreateObject();
+            cJSON_AddStringToObject(t, "type", "tools");
+            cJSON *arr = cJSON_AddArrayToObject(t, "tools");
+            for (const cJSON *s = list->child; s; s = s->next)
+                if (strcmp(rec_str(s, "name"), "helper"))
+                    cJSON_AddItemToArray(arr, cJSON_Duplicate((cJSON *)s, 1));
+            write_jsonl_line(seed, t);
+            cJSON_Delete(t);
+        }
+    }
+    /* the agent-as-tool record, its two descriptions bundled with the
+       rest of the prompt texts (src/prompts/mcp/helper/) */
+    cJSON *aat = cJSON_CreateObject();
+    cJSON_AddStringToObject(aat, "type", "agent-as-tool");
+    cJSON_AddStringToObject(aat, "tool_description",
+                            prompt_mcp_helper_description);
+    cJSON_AddStringToObject(aat, "input_description",
+                            prompt_mcp_helper_arguments_prompt);
+    write_jsonl_line(seed, aat);
+    cJSON_Delete(aat);
+    fclose(seed);
+
+    /* the proxy config: one server exposing the subagent, one expose
+       renaming its tool `helper(prompt)` */
+    buf_t cl;
+    buf_init(&cl);
+    call_shell_quote(&cl, exe_path);
+    buf_append_str(&cl, " agent-as-tool ");
+    call_shell_quote(&cl, seed_path);
+    cJSON *tools = cJSON_CreateObject();
+    cJSON_AddStringToObject(tools, "type", "tools");
+    cJSON *arr = cJSON_AddArrayToObject(tools, "tools");
+    cJSON *srv1 = cJSON_CreateObject();
+    cJSON_AddStringToObject(srv1, "type", "stdio");
+    cJSON_AddStringToObject(srv1, "name", "as-tool");
+    cJSON_AddStringToObject(srv1, "command_line", cl.data);
+    cJSON_AddItemToArray(arr, srv1);
+    write_jsonl_line(cfg, tools);
+    cJSON_Delete(tools);
+    buf_free(&cl);
+    cJSON *expose = cJSON_CreateObject();
+    cJSON_AddStringToObject(expose, "type", "expose");
+    cJSON_AddStringToObject(expose, "tool", "as-tool.invoke");
+    cJSON_AddStringToObject(expose, "name", "helper");
+    cJSON *args = cJSON_AddObjectToObject(expose, "arguments");
+    cJSON *arg = cJSON_CreateObject();
+    cJSON_AddStringToObject(arg, "name", "prompt");
+    cJSON_AddItemToObject(args, "input", arg);
+    write_jsonl_line(cfg, expose);
+    cJSON_Delete(expose);
+    fclose(cfg);
+
+    /* the session's tools entry: the proxy as the `helper` server */
+    cJSON *srv = cJSON_CreateObject();
+    cJSON_AddStringToObject(srv, "type", "stdio");
+    cJSON_AddStringToObject(srv, "name", "helper");
+    buf_init(&cl);
+    call_shell_quote(&cl, exe_path);
+    buf_append_str(&cl, " mcp-proxy ");
+    call_shell_quote(&cl, cfg_path);
+    cJSON_AddStringToObject(srv, "command_line", cl.data);
+    buf_free(&cl);
+    /* not required: a helper that fails to spawn (full temp dir, moved
+       exe) degrades to a missing tool instead of killing the session */
+    cJSON_AddBoolToObject(srv, "required", false);
+    *srv_out = srv;
+    return EXIT_OK;
+}
+
+void repl_helper_cleanup(const char *seed_path, const char *cfg_path) {
+    if (seed_path && *seed_path) remove(seed_path);
+    if (cfg_path && *cfg_path) remove(cfg_path);
+}
+
 /* ================= session ================= */
 
 cJSON *repl_build_options(void) {
@@ -420,6 +596,7 @@ int repl_run_ex(const call_cfg_t *c, const repl_opts_t *o, int in_fd,
                 wire_t *(*factory)(engine_t *)) {
     style_t st;
     style_probe(&st, out);
+    char helper_seed[512] = "", helper_cfg[512] = "";
     repl_sink_t sink;
     memset(&sink, 0, sizeof sink);
     sink.d.out = out;
@@ -428,8 +605,21 @@ int repl_run_ex(const call_cfg_t *c, const repl_opts_t *o, int in_fd,
     /* agent's brief tool traffic: the listed tools collapse to one
        summary line each unless --verbose kept the full replies, and the
        bundled server's prefix never shows - its name adds no signal */
-    dspy_brief_tools(&sink.d, o->full_tools ? NULL : DSPY_BRIEF_TOOLS);
-    if (o->builtin_mcp) dspy_brief_strip(&sink.d, "builtin");
+    dspy_brief_tools(&sink.d, o->full_tools
+                                  ? NULL
+                                  : (o->helper_tool
+                                         ? DSPY_BRIEF_TOOLS " helper"
+                                         : DSPY_BRIEF_TOOLS));
+    /* the prefixes whose names add no signal: the bundled server and
+       the helper subagent's proxy wrapper */
+    {
+        char strip[64] = "";
+        if (o->builtin_mcp) snprintf(strip, sizeof strip, "builtin");
+        if (o->helper_tool)
+            snprintf(strip + strlen(strip), sizeof strip - strlen(strip),
+                     "%shelper", *strip ? " " : "");
+        if (*strip) dspy_brief_strip(&sink.d, strip);
+    }
     /* agent's quiet display, --verbose restores the full traffic: long
        string arguments render elided, thinking collapses to one line */
     sink.d.trim_args = o->trim_args;
@@ -483,6 +673,37 @@ int repl_run_ex(const call_cfg_t *c, const repl_opts_t *o, int in_fd,
         /* the built-in server rides the proxies' tools record: one
            record owns the whole server set (engine_apply replaces) */
         cJSON *tools = call_build_agent_tools(&cfg, exe_path);
+        char *m = validate_tools(tools);
+        if (m) {
+            engine_emit_record(e, rec_error(EC_INVALID_RECORD, m, true));
+            free(m);
+            cJSON_Delete(tools);
+            rc = EXIT_INVALID_RECORD;
+            goto done;
+        }
+        engine_apply_config_record(e, tools);
+        cJSON_Delete(tools);
+    }
+    if (o->helper_tool) {
+        /* the helper subagent: this same agent as one `helper(prompt)`
+           tool; its seed copies the session's llm, system prompt and
+           every tool server but the helper itself (the recursion cut) */
+        buf_t sys;
+        buf_init(&sys);
+        if (e->system) dspy_content_text(e->system, &sys);
+        cJSON *helper_srv = NULL;
+        rc = repl_helper_build(&cfg, sys.len ? sys.data : cfg.system,
+                               e->tools_cfg, exe_path, e, helper_seed,
+                               sizeof helper_seed, helper_cfg,
+                               sizeof helper_cfg, &helper_srv);
+        buf_free(&sys);
+        if (rc) goto done;
+        cJSON *tools =
+            e->tools_cfg
+                ? cJSON_Duplicate(e->tools_cfg, 1)
+                : cJSON_Parse("{\"type\":\"tools\",\"tools\":[]}");
+        cJSON_AddItemToArray(
+            cJSON_GetObjectItemCaseSensitive(tools, "tools"), helper_srv);
         char *m = validate_tools(tools);
         if (m) {
             engine_emit_record(e, rec_error(EC_INVALID_RECORD, m, true));
@@ -613,6 +834,7 @@ done:
         rc = EXIT_IO_ERROR;
     }
     engine_free(e); /* process teardown: the mcp children die here */
+    repl_helper_cleanup(helper_seed, helper_cfg);
     if (sink.d.io_fail) rc = EXIT_OUT_OF_CHANNEL;
     return rc;
 }
@@ -694,6 +916,25 @@ int repl_verbose_extract(int argc, char **argv, char *err, size_t errsz) {
     return seen ? 1 : 0;
 }
 
+/* pull --no-helper out of the agent flag range, in place; returns 1
+   when seen, 0 when absent, -1 on a duplicate (err filled) */
+int repl_nohelper_extract(int argc, char **argv, char *err, size_t errsz) {
+    bool seen = false;
+    int n = 0;
+    for (int i = 0; i < argc; i++) {
+        if (!strcmp(argv[i], "--no-helper")) {
+            if (seen) {
+                snprintf(err, errsz, "--no-helper given twice");
+                return -1;
+            }
+            seen = true;
+            continue;
+        }
+        argv[n++] = argv[i];
+    }
+    return seen ? 1 : 0;
+}
+
 static void agent_usage(FILE *out) {
     fputs("usage: llmkit agent (--anthropic|--openai|--openai-responses) "
           "<api_base>\n"
@@ -704,7 +945,8 @@ static void agent_usage(FILE *out) {
           "                [--header <name=value>]...\n"
           "                [--mcp-proxy <config>]... "
           "[--terminal-tool <name.tool>]...\n"
-          "                [--conversation-store <file>] [--verbose]\n",
+          "                [--conversation-store <file>] [--verbose] "
+          "[--no-helper]\n",
           out);
 }
 
@@ -718,29 +960,41 @@ int cmd_agent_repl(int argc, char **argv) {
     call_cfg_t c;
     int n = repl_store_extract(argc - 2, argv + 2, &store, err, sizeof err);
     if (n >= 0) {
-        int v = repl_verbose_extract(n, argv + 2, err, sizeof err);
-        if (v < 0)
+        int h = repl_nohelper_extract(n, argv + 2, err, sizeof err);
+        if (h < 0)
             n = -1;
         else {
-            n = call_parse_ex(n - v, argv + 2, &c, err, sizeof err, false);
-            if (n == 0) {
-                char exe[4096];
-                self_exe(exe, sizeof exe, argv ? argv[0] : NULL);
-                repl_opts_t o = { .default_prompt =
-                                      prompt_system_prompts_agent,
-                                  .builtin_mcp = true,
-                                  .agents_md = true,
-                                  .store = store,
-                                  .llm_retry = true,
-                                  .full_tools = v == 1,
-                                  /* quiet display defaults, --verbose
-                                     restores both: thinking text whole,
-                                     tool arguments untrimmed */
-                                  .quiet_think = v != 1,
-                                  .trim_args = v != 1 };
-                int rc = repl_run_ex(&c, &o, STDIN_FILENO, stdout, exe, NULL);
-                call_cfg_free(&c);
-                return rc;
+            n -= h; /* the flag compacted away when seen */
+            int v = repl_verbose_extract(n, argv + 2, err, sizeof err);
+            if (v < 0)
+                n = -1;
+            else {
+                n -= v; /* the verbose flag compacted away */
+                n = call_parse_ex(n, argv + 2, &c, err, sizeof err,
+                                  false);
+                if (n == 0) {
+                    char exe[4096];
+                    self_exe(exe, sizeof exe, argv ? argv[0] : NULL);
+                    repl_opts_t o = { .default_prompt =
+                                          prompt_system_prompts_agent,
+                                      .builtin_mcp = true,
+                                      .agents_md = true,
+                                      .store = store,
+                                      .llm_retry = true,
+                                      .full_tools = v == 1,
+                                      /* quiet display defaults, --verbose
+                                         restores both: thinking text whole,
+                                         tool arguments untrimmed */
+                                      .quiet_think = v != 1,
+                                      .trim_args = v != 1,
+                                      /* the helper subagent rides along
+                                         unless --no-helper */
+                                      .helper_tool = h != 1 };
+                    int rc = repl_run_ex(&c, &o, STDIN_FILENO, stdout, exe,
+                                         NULL);
+                    call_cfg_free(&c);
+                    return rc;
+                }
             }
         }
     }

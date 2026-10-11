@@ -122,11 +122,21 @@ static bool dspy_brief_match(const dspy_t *s, const char *tool) {
 void dspy_tool_request(dspy_t *s, const cJSON *rec) {
     s->cur = -1;
     const char *tool = rec_str(rec, "tool");
-    if (tool && s->brief_strip) { /* agent display: name only */
-        size_t pl = strlen(s->brief_strip);
-        if (!strncmp(tool, s->brief_strip, pl) && tool[pl] == '.' &&
-            tool[pl + 1])
-            tool += pl + 1;
+    if (tool && s->brief_strip) { /* agent display: name only; the strip
+                                     list is space-separated prefixes, the
+                                     first match strips its own dot */
+        const char *p = s->brief_strip;
+        while (p && *p) {
+            while (*p == ' ') p++;
+            if (!*p) break;
+            const char *q = strchr(p, ' ');
+            size_t pl = q ? (size_t)(q - p) : strlen(p);
+            if (!strncmp(tool, p, pl) && tool[pl] == '.' && tool[pl + 1]) {
+                tool += pl + 1;
+                break;
+            }
+            p = q;
+        }
     }
     buf_t line;
     buf_init(&line);

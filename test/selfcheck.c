@@ -4067,6 +4067,156 @@ static void test_agent(void) {
               "agent: --verbose twice is a usage error");
     }
 
+    /* ---- --no-helper flag: extraction, compaction, errors ---- */
+    {
+        char *av[] = {"--openai", "http://x", "--no-helper", "--model", "m"};
+        char err2[256] = "";
+        int h = repl_nohelper_extract(5, av, err2, sizeof err2);
+        check(h == 1, "agent: --no-helper extracted");
+        check_str(av[0], "--openai", "agent: --no-helper compacts argv");
+        check_str(av[3], "m", "agent: --no-helper keeps the rest in order");
+        char *av2[] = {"--openai", "http://x"};
+        check(repl_nohelper_extract(2, av2, err2, sizeof err2) == 0,
+              "agent: no --no-helper reports 0");
+        char *av3[] = {"--no-helper", "--no-helper"};
+        check(repl_nohelper_extract(2, av3, err2, sizeof err2) == -1 &&
+                  strstr(err2, "given twice") != NULL,
+              "agent: --no-helper twice is a usage error");
+        /* the repl surface does not know the flag either */
+        char *av4[] = {"--openai", "http://x", "--no-helper"};
+        check(call_parse_ex(3, av4, &c, err, sizeof err, false) == 1 &&
+                  strstr(err, "unknown flag '--no-helper'") != NULL,
+              "agent: --no-helper is agent-only");
+    }
+
+    /* ---- the helper subagent: builder shapes ---- */
+    {
+        char *av[] = {"--openai", "http://x", "--mcp-proxy", "/tmp/fs.jsonl"};
+        check(call_parse_ex(4, av, &c, err, sizeof err, false) == 0,
+              "helper: proxy vector parses");
+        cJSON *base = call_build_agent_tools(&c, "/bin");
+
+        engine_t *e = engine_new(NULL, NULL);
+        char seedp[512] = "", cfgp[512] = "";
+        cJSON *srv = NULL;
+        check(repl_helper_build(&c, "sys text", base, "/bin", e, seedp,
+                                sizeof seedp, cfgp, sizeof cfgp,
+                                &srv) == EXIT_OK,
+              "helper: build ok");
+        check(srv != NULL, "helper: server entry built");
+        check_str(rec_str(srv, "type"), "stdio",
+                  "helper: the entry is a stdio server");
+        check_str(rec_str(srv, "name"), "helper",
+                  "helper: the entry is named helper");
+        {
+            const char *cl = rec_str(srv, "command_line");
+            check(cl && strstr(cl, "mcp-proxy") != NULL,
+                  "helper: the entry runs the mcp-proxy child");
+        }
+        check(rec_bool(srv, "required", true) == false,
+              "helper: the entry is not required");
+        cJSON_Delete(srv);
+        engine_free(e);
+
+        /* the seed: header, llm, system, tools (base minus nothing - the
+           base has no helper entry yet), agent-as-tool */
+        {
+            char got[8192];
+            slurp_file(seedp, got, sizeof got);
+            check(strstr(got, "\"type\":\"header\"") != NULL,
+                  "helper seed: header line");
+            check(strstr(got, "\"type\":\"llm\"") != NULL &&
+                      strstr(got, "http://x") != NULL,
+                  "helper seed: the session's llm record");
+            check(strstr(got, "\"type\":\"system\"") != NULL &&
+                      strstr(got, "sys text") != NULL,
+                  "helper seed: the system prompt");
+            check(strstr(got, "\"name\":\"fs\"") != NULL &&
+                      strstr(got, "\"name\":\"builtin\"") != NULL,
+                  "helper seed: the session's tool servers");
+            check(strstr(got, "\"name\":\"helper\"") == NULL,
+                  "helper seed: no recursion - no helper server");
+            check(strstr(got, "\"type\":\"agent-as-tool\"") != NULL,
+                  "helper seed: the agent-as-tool record");
+        }
+        /* the config: the as-tool server and the helper rename */
+        {
+            char got[8192];
+            slurp_file(cfgp, got, sizeof got);
+            check(strstr(got, "\"name\":\"as-tool\"") != NULL &&
+                      strstr(got, "agent-as-tool") != NULL,
+                  "helper config: the as-tool server");
+            check(strstr(got, "\"tool\":\"as-tool.invoke\"") != NULL &&
+                      strstr(got, "\"name\":\"helper\"") != NULL &&
+                      strstr(got, "\"input\":{\"name\":\"prompt\"}") != NULL,
+                  "helper config: the expose renames invoke(input) to "
+                  "helper(prompt)");
+        }
+        repl_helper_cleanup(seedp, cfgp);
+        {
+            FILE *f = fopen(seedp, "r");
+            check(f == NULL, "helper: seed temp removed");
+            if (f) fclose(f);
+            f = fopen(cfgp, "r");
+            check(f == NULL, "helper: config temp removed");
+            if (f) fclose(f);
+        }
+
+        /* the recursion cut: a base record already carrying the helper
+           entry passes the rest but drops that one */
+        cJSON *with_helper = cJSON_Duplicate(base, 1);
+        cJSON *hs = cJSON_CreateObject();
+        cJSON_AddStringToObject(hs, "type", "stdio");
+        cJSON_AddStringToObject(hs, "name", "helper");
+        cJSON_AddStringToObject(hs, "command_line", "x");
+        cJSON_AddItemToArray(
+            cJSON_GetObjectItemCaseSensitive(with_helper, "tools"), hs);
+        e = engine_new(NULL, NULL);
+        check(repl_helper_build(&c, "s", with_helper, "/bin", e, seedp,
+                                sizeof seedp, cfgp, sizeof cfgp,
+                                &srv) == EXIT_OK,
+              "helper: build ok (cut case)");
+        if (srv) cJSON_Delete(srv);
+        engine_free(e);
+        {
+            char got[8192];
+            slurp_file(seedp, got, sizeof got);
+            check(strstr(got, "\"name\":\"fs\"") != NULL &&
+                      strstr(got, "\"name\":\"builtin\"") != NULL,
+                  "helper cut: other servers pass through");
+            check(strstr(got, "\"name\":\"helper\"") == NULL,
+                  "helper cut: the helper entry is dropped");
+        }
+        cJSON_Delete(with_helper);
+        cJSON_Delete(base);
+        repl_helper_cleanup(seedp, cfgp);
+        call_cfg_free(&c);
+    }
+
+    /* ---- a session with the helper: the tools record gains the server,
+       the spawn of the fake exe fails and renders connect_failed ---- */
+    {
+        fturn_t turns[] = {
+            { .recs = (const char *[]){
+                  "{\"type\":\"response\",\"text\":\"ok\",\"partial\":false}"},
+              .nrecs = 1, .kind = TURN_FINAL, .abort_after = -1 },
+        };
+        repl_opts_t o = { .default_prompt = prompt_system_prompts_agent,
+                          .builtin_mcp = true,
+                          .agents_md = true,
+                          .helper_tool = true };
+        g_factory_wire = fwire_new(turns, 1);
+        repl_cfg(&c, PROTO_OPENAI);
+        repl_out_t r = repl_session_opt(&c, &o, "hi\n", 3);
+        check(r.rc == EXIT_OK, "helper: session exits 0");
+        check(strstr(r.ob, "! connect_failed: mcp server 'helper':") != NULL,
+              "helper: the helper server is attached (connect attempted)");
+        check(strstr(r.ob, "ok\n") != NULL,
+              "helper: the turn still ran");
+        repl_session_free(&r);
+        call_cfg_free(&c);
+    }
+
     /* ---- the conversation store: append, byte-exact records ---- */
     {
         fturn_t turns[] = {

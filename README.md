@@ -39,7 +39,7 @@ The user asks simple arithmetic.
 
 Every separator line is stamped with the wall clock, and each turn that finishes its answer prints its timing: time to first token (prompt processing), thinking generation, response generation - plus the turn's token totals (input, output and their sum) when the endpoint reports usage.
 
-For work that needs hands there is `llmkit agent`: the same chat with the [built-in mcp tools](docs/builtin-mcp.md) attached - web search and fetch, file tools, process tools, skills - and the working directory's `AGENTS.md` injected after the system prompt. `--conversation-store <file>` persists the conversation as jsonl and resumes it: an existing store replays in full before the first prompt, then the session continues where it left off.
+For work that needs hands there is `llmkit agent`: the same chat with the [built-in mcp tools](docs/builtin-mcp.md) attached - web search and fetch, file tools, process tools, skills - and the working directory's `AGENTS.md` injected after the system prompt. A `helper` tool rides along: a copy of the same agent - same system prompt, same tools minus itself - callable as `helper(prompt)`, delegation without the recursion. `--no-helper` leaves it out. `--conversation-store <file>` persists the conversation as jsonl and resumes it: an existing store replays in full before the first prompt, then the session continues where it left off.
 
 ```sh
 $ llmkit agent --openai http://localhost:9931/v1 --model llama3.1 \
@@ -173,6 +173,9 @@ Runnable examples for every command live in [examples/](examples/) - see [docs/r
 - `--terminal-tool <server.tool>` - repeatable; marks tools terminal (the
   answer is the terminal tool's text, exit 9) - the server prefix must
   name a `--mcp-proxy` server of the same command line
+- `--verbose`, `--conversation-store <file>`, `--no-helper` - `agent`
+  only: full tool traffic, a persistent jsonl conversation, and leaving
+  the `helper` subagent tool out
 
 `mcp-repl` has its own three flags, exactly one transport required:
 

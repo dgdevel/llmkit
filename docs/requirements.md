@@ -1436,7 +1436,7 @@ llmkit agent (--anthropic | --openai | --openai-responses) <api_base>
              [--system-prompt <text>]
              [--header <name=value>]... [--mcp-proxy <config>]...
              [--terminal-tool <name.tool>]...
-             [--conversation-store <file>]
+             [--conversation-store <file>] [--no-helper]
 ```
 
 ### cli surface
@@ -1449,6 +1449,31 @@ included in its nonexistence. One flag is added:
   second occurrence or a missing value is a usage error (stderr, exit 1).
   Given to `repl` or `call` it is an unknown flag - the surface is the
   agent's own.
+- `--verbose` - optional, given at most once; restores the full tool
+  traffic display (untrimmed arguments, whole replies, thinking text
+  rendered).
+- `--no-helper` - optional, given at most once; leaves the helper
+  subagent tool out. Given to `repl` or `call` it is an unknown flag.
+
+### the helper subagent
+
+The agent's fourth extra is delegation: one `helper(prompt)` tool that
+is the same agent again - same endpoint, same system prompt, same tool
+servers - minus the helper itself (the subagent cannot spawn itself;
+no recursion). Implemented by composition of the two existing
+record-shaped features, no engine change: at session start the command
+builds one temp seed jsonl (header, the session's `llm` record, one
+`system` record of the effective prompt text, the session's `tools`
+record minus the helper entry, and an `agent-as-tool` record) and one
+temp `mcp-proxy` config (an `as-tool` stdio server running
+`llmkit agent-as-tool` on the seed, plus an `expose` renaming its
+`invoke` tool to `helper` and its `input` argument to `prompt`); the
+session's tools record gains the `helper` stdio server running
+`llmkit mcp-proxy` on that config. The helper server is not
+`required`: a failed spawn is the non-fatal `connect_failed`, rendered,
+and the session continues without the tool. Both temp files are
+removed when the session ends. The display collapses the helper's
+replies to the one-line brief summary, like the bundled server's.
 
 ### the built-in tools
 

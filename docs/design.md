@@ -971,6 +971,22 @@ defaults (the selfcheck drives both).
   the argv range before the shared parse (`repl_store_extract`), so
   `call_parse_ex` stays the one parser and repl/call never see the
   flag.
+- **the helper subagent** - `repl_helper_build` (repl.c) composes the
+  existing features, no engine change: one temp jsonl seed (header, the
+  session's `llm` record, one `system` record of the effective prompt
+  text, the session's `tools` record minus the `helper` entry itself -
+  the recursion cut - and the `agent-as-tool` record) and one temp
+  mcp-proxy config (a `tools` record with one `as-tool` server running
+  `agent-as-tool` on that seed, plus an `expose` renaming
+  `as-tool.invoke` to `helper` and its `input` argument to `prompt`).
+  The session's tools record then gains the `helper` stdio server
+  running `mcp-proxy` on that config - the model sees one
+  `helper(prompt)` tool, the subagent sees everything but itself. Not
+  `required`: a failed spawn degrades to a missing tool, rendered,
+  session continues. Both files unlink at session end; `--no-helper`
+  (pulled by `repl_nohelper_extract`) leaves the whole thing out. The
+  display strips the `helper.` prefix and collapses its reply to the
+  one-line brief like the bundled server's.
 `ponytail:` the store is one append-only jsonl file, no schema version,
 no lock file, no compaction - `prettyprint` reads it and a resumed
 session replays it, which is the whole feature.
