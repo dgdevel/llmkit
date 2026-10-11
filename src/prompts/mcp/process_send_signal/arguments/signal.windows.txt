@@ -1,0 +1,1 @@
+Signal to send: 'kill', or 'int'/'term'

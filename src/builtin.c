@@ -34,6 +34,11 @@
 #define BM_MKDIR(p) _mkdir(p)
 #define BM_RMDIR(p) _rmdir(p)
 #define BM_LSTAT(p, s) stat((p), (s))
+/* process_send_signal: this build's tool texts are the windows variants */
+#define prompt_mcp_process_send_signal_description \
+    prompt_mcp_process_send_signal_description_windows
+#define prompt_mcp_process_send_signal_arguments_signal \
+    prompt_mcp_process_send_signal_arguments_signal_windows
 #else
 #include <fcntl.h>
 #include <signal.h>
@@ -134,6 +139,11 @@ static const arg_def_t ARGS_process_wait[] = {
     {"pid", "integer", prompt_mcp_process_wait_arguments_pid, true},
     {"timeout", "integer", prompt_mcp_process_wait_arguments_timeout, true},
 };
+static const arg_def_t ARGS_process_send_signal[] = {
+    {"pid", "integer", prompt_mcp_process_send_signal_arguments_pid, true},
+    {"signal", "string", prompt_mcp_process_send_signal_arguments_signal,
+     true},
+};
 static const arg_def_t ARGS_skills_search[] = {
     {"keywords", "string", prompt_mcp_skills_search_arguments_keywords, true},
 };
@@ -159,6 +169,8 @@ static const tool_def_t TOOLS[] = {
      ARGS_process_status, 1},
     {"process_wait", prompt_mcp_process_wait_description,
      ARGS_process_wait, 2},
+    {"process_send_signal", prompt_mcp_process_send_signal_description,
+     ARGS_process_send_signal, 2},
     {"skills_search", prompt_mcp_skills_search_description, ARGS_skills_search,
      1},
     {"skills_read", prompt_mcp_skills_read_description, ARGS_skills_read, 1},
@@ -1139,7 +1151,8 @@ static int proc_spawn(const char *cmdline, proc_rec_t *p) {
     memset(&pi, 0, sizeof pi);
     if (ok)
         ok = CreateProcessW(NULL, cmd, NULL, NULL, TRUE,
-                            EXTENDED_STARTUPINFO_PRESENT, NULL, NULL,
+                            EXTENDED_STARTUPINFO_PRESENT |
+                                CREATE_NEW_PROCESS_GROUP, NULL, NULL,
                             &si.StartupInfo, &pi);
     if (si.lpAttributeList) {
         DeleteProcThreadAttributeList(si.lpAttributeList);
@@ -3861,6 +3874,129 @@ static void tool_process_wait(const cJSON *args, buf_t *out, bool *is_error) {
     sanitize_utf8(out);
 }
 
+/* ---- process_send_signal ---- */
+
+enum {
+    BMSIG_INT, BMSIG_TERM, BMSIG_HUP, BMSIG_USR1, BMSIG_USR2, BMSIG_KILL,
+    BMSIG_N
+};
+static const char *const BMSIG_NAMES[BMSIG_N] = {
+    "int", "term", "hup", "usr1", "usr2", "kill",
+};
+
+static int sig_parse(const char *name) {
+    for (int i = 0; i < BMSIG_N; i++)
+        if (!strcmp(name, BMSIG_NAMES[i])) return i;
+    return -1;
+}
+
+static void tool_process_send_signal(const cJSON *args, buf_t *out,
+                                     bool *is_error) {
+    long long pid = 0;
+    const char *signame = NULL;
+    if (!need_int(args, "pid", &pid, out) ||
+        !need_str(args, "signal", &signame, out)) {
+        *is_error = true;
+        return;
+    }
+    if (pid <= 0) {
+        buf_clear(out);
+        buf_append_str(out, "pid must be a positive process id");
+        *is_error = true;
+        return;
+    }
+    int sig = sig_parse(signame);
+    if (sig < 0) {
+        buf_clear(out);
+        buf_appendf(out, "unknown signal '%s': use one of int, term, hup, "
+                         "usr1, usr2, kill", signame);
+        *is_error = true;
+        return;
+    }
+    proc_rec_t *p = proc_find(pid);
+#ifdef _WIN32
+    /* the crt's SIGINT/SIGTERM exist but reach only this process; the
+       only cross-process mechanisms are ctrl events and Terminate */
+    if (sig != BMSIG_KILL && sig != BMSIG_INT && sig != BMSIG_TERM) {
+        buf_clear(out);
+        buf_appendf(out, "signal '%s' does not exist on windows; use "
+                         "int, term or kill", signame);
+        *is_error = true;
+        return;
+    }
+    if (sig == BMSIG_KILL) {
+        HANDLE h = p && p->hproc ? (HANDLE)p->hproc
+                                 : OpenProcess(PROCESS_TERMINATE, FALSE,
+                                               (DWORD)pid);
+        if (!h) {
+            DWORD e = GetLastError();
+            buf_clear(out);
+            buf_appendf(out, "cannot open pid %lld: %s", pid,
+                        e == ERROR_ACCESS_DENIED ? "access denied"
+                                                 : "no such process");
+            *is_error = true;
+            return;
+        }
+        BOOL ok = TerminateProcess(h, 1);
+        DWORD e = GetLastError();
+        if (h != (HANDLE)p->hproc) CloseHandle(h);
+        if (!ok) {
+            buf_clear(out);
+            buf_appendf(out, "TerminateProcess failed on pid %lld "
+                             "(error %lu)", pid, (unsigned long)e);
+            *is_error = true;
+            return;
+        }
+        buf_appendf(out, "pid %lld force-terminated (exit code 1); no "
+                         "cleanup handlers ran", pid);
+    } else {
+        /* ctrl events: only our own children - they are the only targets
+           with a known process group; needs a shared console too */
+        if (!p || !p->hproc) {
+            buf_clear(out);
+            buf_append_str(out, "int/term only work on processes this "
+                                "server spawned; use kill for anything "
+                                "else");
+            *is_error = true;
+            return;
+        }
+        /* children spawn with CREATE_NEW_PROCESS_GROUP, so the group id
+           is the pid; ctrl-break (not ctrl-c: disabled in new groups) */
+        if (!GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, (DWORD)pid)) {
+            buf_clear(out);
+            buf_appendf(out, "console ctrl event failed (error %lu): the "
+                             "child may not share this console; use kill",
+                        (unsigned long)GetLastError());
+            *is_error = true;
+            return;
+        }
+        buf_appendf(out, "ctrl-break sent to process group %lld; some "
+                         "programs ignore it - use kill if it survives",
+                    pid);
+    }
+#else
+    static const int nums[BMSIG_N] = {
+        SIGINT, SIGTERM, SIGHUP, SIGUSR1, SIGUSR2, SIGKILL
+    };
+    if (kill(p ? (pid_t)p->pid : (pid_t)pid, nums[sig]) != 0) {
+        buf_clear(out);
+        const char *why = errno == ESRCH ? "no such process"
+                        : errno == EPERM ? "permission denied"
+                        : strerror(errno);
+        buf_appendf(out, "kill %lld %s failed: %s", pid, signame, why);
+        *is_error = true;
+        return;
+    }
+    if (p) proc_reap(p);
+    if (p && p->exited)
+        buf_appendf(out, "signal %s sent to pid %lld; it exited with "
+                         "code %d", signame, pid, p->exit_code);
+    else
+        buf_appendf(out, "signal %s sent to pid %lld", signame, pid);
+#endif
+    sanitize_utf8(out);
+}
+
 /* ---- skills tools ---- */
 
 typedef struct skill_hit {
@@ -4033,6 +4169,7 @@ static const tool_fn TOOL_FNS[TOOLS_N] = {
     tool_file_read,  tool_file_create, tool_file_edit, tool_file_delete,
     tool_file_analyze,
     tool_process_exec, tool_process_status, tool_process_wait,
+    tool_process_send_signal,
     tool_skills_search, tool_skills_read,
 };
 

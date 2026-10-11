@@ -15,9 +15,9 @@ in all current protocol revisions up to `2026-07-28`.
 
 Everything is stateless except the process tools: the server keeps one
 record per spawned process (pid, exit state and one output temp file)
-for its own lifetime, so `process_status` and `process_wait` can report
-on any pid it spawned. Any other pid on the machine can be checked too,
-without the output.
+for its own lifetime, so `process_status`, `process_wait` and
+`process_send_signal` can report on - or signal - any pid it spawned.
+Any other pid on the machine can be checked too, without the output.
 
 ## Attaching it to a conversation
 
@@ -43,6 +43,13 @@ whenever a text or the script changes), so everything still ships as a
 single file. Edit the txt files and rebuild; an empty file is sent as an
 empty description.
 
+A platform-dependent description ships in both variants: the extra
+`<argument>.windows.txt` or `description.windows.txt` generates a
+`..._windows` symbol, and the windows build aliases the base symbol to
+it (`#ifdef` in `src/builtin.c`). Posix and windows tools/list answers
+therefore advertise exactly what each platform delivers - e.g.
+`process_send_signal` offers `hup`/`usr1`/`usr2` only on posix.
+
 | tool | arguments | returns |
 |---|---|---|
 | `web_search` | `keywords: string` | search results block |
@@ -57,6 +64,7 @@ empty description.
 | `process_exec` | `cmdline: string` | exit code or pid + output tail |
 | `process_status` | `pid: int` | same report for one spawned pid; any other pid: running state |
 | `process_wait` | `pid: int, timeout: int` | waits, then the same report |
+| `process_send_signal` | `pid: int, signal: string` | delivery confirmation, or the exit status of a spawned pid |
 | `skills_search` | `keywords: string` | matching skills as records |
 | `skills_read` | `name: string` | the skill's SKILL.md text |
 
@@ -274,6 +282,31 @@ process ended, the running state otherwise. `timeout` is clamped by
 validation to 0..600; 0 means one immediate check. A pid this server
 did not spawn gets the state-only report from `process_status` after
 the same bounded wait.
+
+### process_send_signal(pid, signal)
+
+Sends `signal` to `pid`. Named, not numbered - the names are a small
+portable subset, not the full posix zoo. Own children (spawned by this
+server) get the full treatment; other pids are addressed by id alone.
+
+Posix delivers the real signals: `int` SIGINT, `term` SIGTERM, `hup`
+SIGHUP, `usr1`/`usr2`, and `kill` SIGKILL (uncatchable). A spawned pid
+that dies on the spot has its exit code ride along in the
+confirmation line; anything slower is the caller's next
+`process_status` call.
+
+Windows has no cross-process signals. `kill` force-terminates via
+`TerminateProcess` - no cleanup handlers run, and the caller learns
+only the delivery, not a trustworthy exit reason. `int`/`term`
+deliver a `CTRL_BREAK_EVENT` to the child's process group, which is
+possible only for processes this server spawned (they start with
+`CREATE_NEW_PROCESS_GROUP`, so the group id is the pid) and only when
+they share this console; some programs ignore it, so the reply points
+to `kill` as the fallback. All other names are rejected up front, per
+the windows tool description - which differs from the posix one on
+purpose: each build bundles both text variants and `#ifdef _WIN32`
+picks the true one at compile time, so `tools/list` never advertises
+options the platform cannot honor.
 
 ### skills_search(keywords)
 

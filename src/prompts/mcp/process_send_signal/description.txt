@@ -1,0 +1,1 @@
+Send a POSIX signal to a process: 'int', 'term', 'hup', 'usr1', 'usr2', or 'kill'

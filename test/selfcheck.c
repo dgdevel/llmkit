@@ -1517,17 +1517,17 @@ static void test_builtin(void) {
             ? cJSON_GetObjectItemCaseSensitive(
                   cJSON_GetObjectItemCaseSensitive(r, "result"), "tools")
             : NULL;
-        check(cJSON_IsArray(tools) && cJSON_GetArraySize(tools) == 14,
-              "builtin: fourteen tools listed");
-        const char *want[14] = { "web_search",   "web_fetch",   "files_list",
-                                 "files_search", "file_read",   "file_create",
-                                 "file_edit",    "file_delete",
-                                 "file_analyze", "process_exec",
-                                 "process_status", "process_wait",
-                                 "skills_search", "skills_read" };
+        check(cJSON_IsArray(tools) && cJSON_GetArraySize(tools) == 15,
+              "builtin: fifteen tools listed");
+        const char *want[15] = {
+            "web_search",     "web_fetch",      "files_list",
+            "files_search",   "file_read",      "file_create",
+            "file_edit",      "file_delete",    "file_analyze",
+            "process_exec",   "process_status", "process_wait",
+            "process_send_signal", "skills_search", "skills_read" };
         bool names_ok = true, descs_set = true, args_set = true;
         if (cJSON_IsArray(tools))
-            for (int i = 0; i < 14; i++) {
+            for (int i = 0; i < 15; i++) {
                 const cJSON *t = cJSON_GetArrayItem(tools, i);
                 const cJSON *nm = cJSON_GetObjectItemCaseSensitive(t, "name");
                 if (!cJSON_IsString(nm) || strcmp(nm->valuestring, want[i]))
