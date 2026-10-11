@@ -160,9 +160,13 @@ static void repl_sink_fn(void *ctx, cJSON *rec) {
     const char *tx = rec_str(rec, "text");
     if (k == R_THINKING && s->quiet_think) {
         /* agent's quiet display: one line stands for the block, the
-           streamed text never renders (timing still counts it) */
-        if (!rec_bool(rec, "partial", false)) s->think_done = true;
-        if (!s->think_shown && tx && *tx) {
+           streamed text never renders (timing still counts it). the
+           line draws at the block's start - the final-only block's own
+           record or the first partial - so a thinking-only turn shows
+           its line even when no text chunk survives the wire */
+        bool partial = rec_bool(rec, "partial", false);
+        if (!partial) s->think_done = true;
+        if (!s->think_shown && (!partial || (tx && *tx))) {
             s->think_shown = true;
             s->d.sep_pending = true;
             dspy_styled(&s->d, s->d.st->italic, "thinking...");
