@@ -1143,7 +1143,7 @@ static void *proc_reader(void *arg) {
     int open = 2;
     while (open > 0) {
         DWORD w = WaitForMultipleObjects((DWORD)open, h, FALSE, INFINITE);
-        if (w < WAIT_OBJECT_0 || w >= WAIT_OBJECT_0 + (DWORD)open) break;
+        if (w >= WAIT_OBJECT_0 + (DWORD)open) break; /* incl. WAIT_FAILED */
         int i = (int)(w - WAIT_OBJECT_0);
         proc_drainw(p, h[i], src[i], &pend[i]);
         /* a read yielding nothing means the write end is closed and the
@@ -2748,6 +2748,7 @@ static void tool_file_create(const cJSON *args, buf_t *out, bool *is_error) {
    is irreversibly removed as before. directories move whole - no walk,
    no partial failures. */
 
+#ifndef _WIN32 /* xdg trash is a freedesktop thing; windows recycles via shell */
 /* is p a directory on the same filesystem as top */
 static bool same_fs_mount(const char *top, const char *p) {
     struct stat a, b;
@@ -2856,6 +2857,7 @@ static const char *xdg_trash_layout(const char *src) {
     }
     return NULL;
 }
+#endif /* !_WIN32 */
 
 #ifdef _WIN32
 /* utf-8 in, utf-16 out */
