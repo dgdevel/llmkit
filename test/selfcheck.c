@@ -2043,7 +2043,7 @@ static void test_builtin(void) {
                 &ie);
     check(!ie && t && strstr(t, "Exit code: 0") &&
               strstr(t, "Process output available in") &&
-              strstr(t, "(currently 5 lines)") &&
+              strstr(t, "(5 lines)") && !strstr(t, "currently 5 lines") &&
               !strstr(t, ": STDOUT: a\n") && strstr(t, ": STDOUT: d\n") &&
               strstr(t, ": STDOUT: e\n"),
           "builtin: process_exec quotes the tail, names the temp file");

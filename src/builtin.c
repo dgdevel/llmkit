@@ -1415,10 +1415,12 @@ static void proc_report(buf_t *out, proc_rec_t *p) {
         buf_append_str(out, p->tail[i]);
         buf_append_byte(out, '\n');
     }
-    if (p->nlines > BM_PROC_TAIL)
-        buf_appendf(out,
-                    "Process output available in %s (currently %llu lines)\n",
-                    p->out_path ? p->out_path : "?", p->nlines);
+    if (p->nlines > BM_PROC_TAIL) {
+        /* "currently" only makes sense while output can still grow */
+        buf_appendf(out, "Process output available in %s (%s%llu lines)\n",
+                    p->out_path ? p->out_path : "?",
+                    p->exited ? "" : "currently ", p->nlines);
+    }
     if (!p->exited)
         buf_append_str(out, "Use process_status or process_wait.\n");
     pthread_mutex_unlock(&p->m);
