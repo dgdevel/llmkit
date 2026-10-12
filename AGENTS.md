@@ -20,7 +20,10 @@ This document provides context and instructions for agents working on the `llmki
     - `llmproxy.c`: `llmkit proxy`, a plain-http endpoint forwarding to one upstream LLM.
     - `mcp.c`: MCP client protocol implementation.
     - `proxy.c`: `llmkit mcp-proxy` config pipeline and stdio server.
-    - `builtin.c`: Implementation of built-in MCP tools (file system, process, web, agent skills).
+    - `builtin.c` + `builtin/`: `llmkit builtin-mcp` server: `builtin.c`
+      holds the tool table and json-rpc dispatch, `builtin/` one file
+      per tool family (`files.c`, `analyze.c`, `process.c`, `web.c`,
+      `skills.c`) plus shared helpers (`util.c`, `internal.h`).
     - `call.c`, `repl.c`, `mcprepl.c`, `pretty.c`: Command front-ends (one-off call, interactive repl, mcp console, transcript rendering).
     - `editor.c` + `vendor/linenoise/`: interactive line editing behind the repl.
     - `platform.c`, `sse.c`, `buf.c`, `jsonl.c`: platform tty/pipes, SSE parsing, buffers, JSON Lines.
