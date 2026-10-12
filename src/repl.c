@@ -222,8 +222,8 @@ static void repl_sink_fn(void *ctx, cJSON *rec) {
     } else if (k == R_TOOL_REQUEST) {
         dspy_tool_request(&s->d, rec);
     } else if (k == R_TOOL_RESPONSE) {
-        dspy_brief_count(&s->d, rec_str(rec, "text"));
-        dspy_tool_response(&s->d, rec_str(rec, "text"));
+        dspy_brief_count(&s->d, rec);
+        dspy_tool_response(&s->d, rec);
     } else if (k == R_ERROR) {
         dspy_error_line(&s->d, rec_str(rec, "code"), rec_str(rec, "message"));
     }
@@ -835,7 +835,7 @@ done:
     buf_free(&line);
     /* the dspy sink's strdup'd brief state (agent display) */
     free(sink.d.brief_tools);
-    free(sink.d.brief_tool);
+    dspy_brief_clear(&sink.d);
     free(sink.d.brief_strip);
     if (tty) editor_free(&ed);
     else plain_free(&pr);

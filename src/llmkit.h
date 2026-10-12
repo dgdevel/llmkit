@@ -938,13 +938,16 @@ typedef struct dspy {
                          trimmed: first and last ten characters around
                          [...] when longer than twenty (agent display) */
     /* brief tool mode (llmkit agent): the collapsed tools' name list
-       (NULL = none), and the in-flight brief reply, NULL = full traffic */
+       (NULL = none), and the in-flight brief replies - a queue, one entry
+       per unanswered request: parallel tool calls answer in request order
+       (engine.c runs them sequentially), so the head entry is the call
+       whose response arrived */
     char *brief_tools;
-    char *brief_tool;
     char *brief_strip; /* agent display: the `server.` prefix dropped,
                           NULL = names render whole */
-    double brief_t; /* its request stamp (mono_now) */
-    size_t brief_bytes, brief_lines;
+    struct dspy_brief_q *brief_head; /* the in-flight entries, FIFO */
+    struct dspy_brief_q *brief_tail;
+    size_t brief_n; /* its length */
 } dspy_t;
 
 void dspy_write(dspy_t *s, const char *t, size_t n);
@@ -956,7 +959,7 @@ void dspy_styled(dspy_t *s, const char *on, const char *text);
 void dspy_error_line(dspy_t *s, const char *code, const char *msg);
 /* the tool traffic arms both record dispatchers share */
 void dspy_tool_request(dspy_t *s, const cJSON *rec);
-void dspy_tool_response(dspy_t *s, const char *tx);
+void dspy_tool_response(dspy_t *s, const cJSON *rec);
 /* agent's default: these tools collapse to one timing summary line */
 #define DSPY_BRIEF_TOOLS "web_fetch files_search file_read skills_read"
 void dspy_brief_tools(dspy_t *s, const char *names /* NULL = full output */);
@@ -966,7 +969,9 @@ void dspy_brief_tools(dspy_t *s, const char *names /* NULL = full output */);
    disarms, exposed names still drive match and wire */
 void dspy_brief_strip(dspy_t *s, const char *prefix);
 /* tally the reply's lines/bytes of the in-flight brief tool call */
-void dspy_brief_count(dspy_t *s, const char *tx);
+void dspy_brief_count(dspy_t *s, const cJSON *rec);
+/* free the in-flight brief queue (session teardown) */
+void dspy_brief_clear(dspy_t *s);
 /* a record's content text blocks joined with \n */
 void dspy_content_text(const cJSON *rec, buf_t *out);
 

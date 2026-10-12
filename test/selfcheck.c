@@ -3895,6 +3895,55 @@ static void test_agent(void) {
               "agent: unlisted tool keeps the full reply");
         repl_session_free(&r);
         call_cfg_free(&c);
+
+        /* ---- parallel tool requests: the brief slot must survive two
+           requests in flight, one round ---- */
+        {
+            fturn_t turns[] = {
+                { .recs = (const char *[]){
+                      /* two requests in one turn: what the wire emits
+                         when the model makes parallel calls */
+                      "{\"type\":\"tool_request\",\"tool\":\"builtin."
+                      "files_search\",\"arguments\":{\"path\":\"a\"},"
+                      "\"id\":\"t1\"}",
+                      "{\"type\":\"tool_request\",\"tool\":\"builtin."
+                      "file_read\",\"arguments\":{\"path\":\"b\"},"
+                      "\"id\":\"t2\"}"},
+                  .nrecs = 2, .kind = TURN_TOOLS, .abort_after = -1 },
+                { .recs = (const char *[]){
+                      "{\"type\":\"response\",\"text\":\"done\","
+                      "\"partial\":false}"},
+                  .nrecs = 1, .kind = TURN_FINAL, .abort_after = -1 },
+            };
+            ftool_t ftools[] = {
+                { .tool = "builtin.files_search", .text = "aaa\nbbb\n",
+                  .rc = 0 },
+                { .tool = "builtin.file_read", .text = "ccc\nddd\n",
+                  .rc = 0 }
+            };
+            g_ftools = (ftool_script_t){ ftools, 2, 0 };
+            repl_opts_t brief2 = { .default_prompt =
+                                          prompt_system_prompts_agent,
+                                  .builtin_mcp = true,
+                                  .agents_md = true };
+            g_factory_wire = fwire_new(turns, 2);
+            repl_cfg(&c, PROTO_OPENAI);
+            repl_out_t r = repl_session_opt_ft(&c, &brief2, "q\n", 2);
+            check(r.rc == EXIT_OK, "agent: parallel session exits 0");
+            check(strstr(r.ob, "aaa") == NULL &&
+                      strstr(r.ob, "bbb") == NULL &&
+                      strstr(r.ob, "ccc") == NULL &&
+                      strstr(r.ob, "ddd") == NULL,
+                  "agent: parallel brief swallows both replies");
+            {
+                char *norm = repl_norm(r.ob);
+                check(strstr(norm, "tool replied in") != NULL,
+                      "agent: parallel brief summary drawn");
+                free(norm);
+            }
+            repl_session_free(&r);
+            call_cfg_free(&c);
+        }
     }
 
     /* ---- quiet display defaults: trimmed arguments, one thinking
