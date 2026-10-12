@@ -198,9 +198,13 @@ static int stdio_rpc(mcp_server_t *s, cJSON *req, cJSON **reply,
     }
     cJSON_free(line);
     double reqid = rec_num(req, "id", 0);
-    double deadline = mono_now() + (timeout > 0 ? timeout : RPC_TIMEOUT);
+    /* timeout < 0 is no timeout (docs: tool_call_timeout absent = none);
+       0 keeps the 30s rpc default. The open-ended wait still ends on the
+       child's death: its reader thread closes the queue. */
+    bool no_to = timeout < 0;
+    double deadline = mono_now() + (no_to ? 0.0 : (timeout > 0 ? timeout : RPC_TIMEOUT));
     for (;;) {
-        double left = deadline - mono_now();
+        double left = no_to ? 1.0 : deadline - mono_now();
         if (left <= 0) {
             snprintf(err, errsz, "mcp server '%s' timed out", s->name);
             return 2;
@@ -209,6 +213,10 @@ static int stdio_rpc(mcp_server_t *s, cJSON *req, cJSON **reply,
         if (!t) {
             if (s->dead) {
                 snprintf(err, errsz, "mcp server '%s' died", s->name);
+                return 1;
+            }
+            if (no_to && g_stop_flag) { /* ctrl-c: the wait ends in order */
+                snprintf(err, errsz, "mcp server '%s' interrupted", s->name);
                 return 1;
             }
             continue; /* spurious wakeup: recompute the deadline */
@@ -334,7 +342,7 @@ static int http_rpc(mcp_server_t *s, cJSON *req, cJSON **reply, double timeout,
     r.body = body;
     r.body_len = strlen(body);
     r.connect_to = CONNECT_TIMEOUT;
-    r.total_to = timeout > 0 ? timeout : RPC_TIMEOUT;
+    r.total_to = timeout; /* <= 0: curl sets no total timeout */
     int rc = http_perform(&r);
 
     cJSON *msg = NULL;
