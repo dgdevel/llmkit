@@ -52,7 +52,7 @@ gh release edit v1.0.0 --notes-file /tmp/n.md
 ## distro packages only
 
 ```sh
-tools/package.sh v1.2.3            # all five targets
+tools/package.sh v1.2.3            # all six targets
 tools/package.sh v1.2.3 deb arch   # just these
 make packages TAG=v1.2.3           # same, via make
 ```
@@ -64,6 +64,7 @@ make packages TAG=v1.2.3           # same, via make
 | `rpm-el9` | `rockylinux:9` | `llmkit-1.2.3-1.el9.x86_64.rpm` | rhel / alma / rocky 9+ |
 | `arch` | `archlinux:base-devel` | `llmkit-1.2.3-1-x86_64.pkg.tar.zst` | arch, via `pacman -U` |
 | `win` | `africanfuture/msys2-base:linux-latest` | `llmkit-1.2.3-windows-x86_64.zip` | windows 10+ 64-bit |
+| `mac` | `llmkit-osxcross:11.3` (local build) | `llmkit-1.2.3-macos-x86_64.zip` | macOS 10.13+, rosetta 2 on apple silicon |
 
 Install commands for users: `apt install ./llmkit_..._.deb`,
 `dnf install ./llmkit-..._.rpm`, `pacman -U llmkit-..._.pkg.tar.zst`;
@@ -101,6 +102,24 @@ image in `tools/package.sh` (one variable per target) - e.g. building
   container at `/pkgcache`); a stamp of the curl version, the triplet and
   the configure flags decides reuse, so only the first build compiles
   curl and later releases copy it. Delete that dir to force a rebuild.
+- **macOS: cross-compiled with osxcross.** The toolchain image
+  (`crazymax/osxcross:11.3`, MacOSX 11.3 SDK, `OSX_VERSION_MIN=10.13`)
+  is `FROM scratch` - just the `/osxcross` directory with the `o64-clang`
+  wrappers, cctools `ld64`/`ar`/`strip` and the SDK. [tools/pkg/
+  mac.Dockerfile](../tools/pkg/mac.Dockerfile) copies it into a stock
+  ubuntu (`tools/package.sh` builds that as `llmkit-osxcross:11.3` on
+  first use), where `tools/pkg/mac.sh` cross-builds a pinned openssl,
+  a pinned libcurl against it (every optional third-party dependency
+  off) and the pinned cjson exactly like `win`, then links `llmkit`
+  against libSystem only - a fully static darwin binary does not exist,
+  so the zip holds the binary, license and readme. CA verification
+  anchors at `/etc/ssl/cert.pem`, the trust store macOS itself ships
+  (curl dropped its secure-transport backend in 8.22.0, so apple-system
+  TLS via libcurl is not an option). x86_64 only for now
+  (`-mmacosx-version-min=10.13`); apple silicon runs it via rosetta 2,
+  a lipo universal binary would need an arm64-capable image. The ssl +
+  curl prefixes cache in `${XDG_CACHE_HOME:-$HOME/.cache}/llmkit-pkg/mac`
+  like the windows one.
 - **versioning.** Tag `v1.2.3` -> package versions `1.2.3-1` (deb/arch) and
   `1.2.3-1.<disttag>` (rpm). The release tarball keeps the leading `v`.
 - **fail fast.** A failed target aborts the whole run; rerun with the

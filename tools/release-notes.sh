@@ -40,6 +40,9 @@ for f in dist/*; do
         *windows*.zip)
             sys="windows 10+ 64-bit, no install"
             ins="unzip, put llmkit.exe on PATH" ;;
+        *macos*.zip)
+            sys="macOS 10.13+ (x86_64 or rosetta 2), no install"
+            ins="unzip, put llmkit on PATH" ;;
         *)
             sys="any linux, release host's glibc or newer, needs libcurl + libcjson - prefer a package above"
             ins="unpack, put llmkit on PATH" ;;

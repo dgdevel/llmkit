@@ -77,6 +77,8 @@
  * 8. History persistence removed (llmkit keeps history in memory,
  *    design sec.12); the file-local comment is ascii-only like the
  *    rest of the repo.
+ * 9. <strings.h> included for strcasecmp (glibc's <string.h> leaks it,
+ *    darwin's does not - shows in the macos cross build).
  *
  * Bloat:
  * - History search like Ctrl+r in readline?
@@ -144,6 +146,8 @@
 #include <errno.h>
 #include <string.h>
 #include <ctype.h>
+#include <strings.h> /* LOCAL: strcasecmp - glibc's string.h pulls this
+                        in, darwin's does not (macos cross build) */
 #include <sys/types.h>
 #include <stdint.h>
 #include "linenoise.h"
