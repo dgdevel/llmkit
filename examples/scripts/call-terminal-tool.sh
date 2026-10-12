@@ -3,7 +3,7 @@
 # conversation stops as soon as the model has used it - no further llm
 # turn, and the answer printed is the tool's own text (here the directory
 # listing, not a summary of it). Requested, not an error - but the exit
-# code is 9 (design sec.12), so a set -e script has to accept it
+# code is 9 (design sec.13), so a set -e script has to accept it
 # explicitly. 0 means the model answered in plain text without calling
 # the tool; anything else is a real failure. Spawning the upstream needs
 # node/npx; the endpoint is the usual llama.cpp.

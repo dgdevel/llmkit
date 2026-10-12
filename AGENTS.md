@@ -15,7 +15,7 @@ This document provides context and instructions for agents working on the `llmki
 - `src/`: Core source code.
     - `main.c`: Entry point and subcommand dispatch (runner, call, repl, agent, mcp-repl, prettyprint, proxy, mcp servers).
     - `engine.c`: Core conversation engine (turn loop, tool calls, steering).
-    - `agent.c`: Agent runner logic (`llmkit agent`, agent-as-tool seed).
+    - `agent.c`: agent-as-tool runner (`llmkit agent-as-tool`); the `llmkit agent` chat lives in `repl.c`.
     - `wire_openai.c`, `wire_anthropic.c`: LLM provider wire clients (chat completions, responses, anthropic).
     - `llmproxy.c`: `llmkit proxy`, a plain-http endpoint forwarding to one upstream LLM.
     - `mcp.c`: MCP client protocol implementation.

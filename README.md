@@ -1,6 +1,6 @@
 # llmkit
 
-A single static-purpose executable for llm interaction from the shell and from other programs. One binary, nine commands:
+A single static-purpose executable for llm interaction from the shell and from other programs. One binary, ten commands:
 
 | command | what it does |
 |---|---|
@@ -108,7 +108,7 @@ Tools: add a `tools` record before the `user` record -
 
 `llmkit call --mcp-proxy cfg.jsonl --terminal-tool fs.confirm` marks tools the same way from the command line; the answer is then the tool's text. `llmkit agent-as-tool` seeds honor the attribute too: the `invoke` reply is the terminal tool's answer.
 
-No external tool server at hand? `llmkit builtin-mcp` is one: thirteen generic-use tools (web search and fetch, file list/search/read/create/edit/analyze, process exec and status, skills search and read) served from the same binary.
+No external tool server at hand? `llmkit builtin-mcp` is one: fifteen generic-use tools (web search and fetch, file list/search/read/create/edit/delete/analyze, process exec/status/wait/send-signal, skills search and read) served from the same binary.
 ```sh
 llmkit mcp-repl --stdio 'llmkit builtin-mcp'
 ```
