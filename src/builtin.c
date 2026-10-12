@@ -921,6 +921,7 @@ static size_t split_kw(char *s, char **out, size_t max) {
 #define BM_PROC_WAIT_MS 10000  /* process_exec completion wait */
 #define BM_PROC_WAIT_MAX_S 600 /* process_wait timeout ceiling, seconds */
 #define BM_PROC_TAIL 3         /* lines quoted in the reply */
+#define BM_PROC_HEAD 3         /* leading lines quoted in the reply */
 #define BM_PROC_LINE_CAP 65536 /* one line's byte cap (newline floods) */
 
 typedef struct proc_rec {
@@ -934,6 +935,8 @@ typedef struct proc_rec {
     unsigned long long nlines; /* annotated lines in the temp file */
     char *tail[BM_PROC_TAIL];  /* the last lines, oldest first */
     int ntail;
+    char *head[BM_PROC_HEAD];  /* the first lines, oldest first */
+    int nhead;
     char *out_path;            /* the temp file with the output */
     FILE *out;                 /* reader-owned while the reader lives */
     int out_fd;                /* the stdout pipe, reader-owned */
@@ -975,6 +978,7 @@ static void proc_emit(proc_rec_t *p, const char *src, const char *s,
         fputc('\n', p->out);
     }
     pthread_mutex_lock(&p->m);
+    if (p->nhead < BM_PROC_HEAD) p->head[p->nhead++] = strdup(ln.data);
     if (p->ntail == BM_PROC_TAIL) {
         free(p->tail[0]);
         memmove(p->tail, p->tail + 1, sizeof(char *) * (BM_PROC_TAIL - 1));
@@ -1402,7 +1406,8 @@ static void proc_reap(proc_rec_t *p) {
 
 #endif
 
-/* the shared reply body: state line, tail, temp file, advice */
+/* the shared reply body: state line, quoted output, temp file,
+   advice */
 static void proc_report(buf_t *out, proc_rec_t *p) {
     pthread_mutex_lock(&p->m);
     if (p->exited) {
@@ -1412,12 +1417,22 @@ static void proc_report(buf_t *out, proc_rec_t *p) {
     } else {
         buf_appendf(out, "PID %ld is still running.\n", p->pid);
     }
-    buf_append_str(out, "Last three output lines:\n");
-    for (int i = 0; i < p->ntail; i++) {
+    buf_append_str(out, "First and last three output lines:\n");
+    for (int i = 0; i < p->nhead; i++) {
+        buf_append_str(out, p->head[i]);
+        buf_append_byte(out, '\n');
+    }
+    /* short output: head and tail overlap, so each line prints once */
+    int skip = 0;
+    if (p->nlines > (unsigned)BM_PROC_HEAD + (unsigned)BM_PROC_TAIL)
+        buf_append_str(out, "[...]\n");
+    else if (p->nhead + p->ntail > (int)p->nlines)
+        skip = p->nhead + p->ntail - (int)p->nlines;
+    for (int i = skip; i < p->ntail; i++) {
         buf_append_str(out, p->tail[i]);
         buf_append_byte(out, '\n');
     }
-    if (p->nlines > BM_PROC_TAIL) {
+    if (p->nlines > (unsigned)BM_PROC_HEAD + (unsigned)BM_PROC_TAIL) {
         /* "currently" only makes sense while output can still grow */
         buf_appendf(out, "Process output available in %s (%s%llu lines)\n",
                     p->out_path ? p->out_path : "?",
@@ -4178,6 +4193,284 @@ static void analyze_pwsh(const char *text, size_t len, nodes_t *ns) {
     }
 }
 
+/* ---------- php: namespaces, uses, classes, functions ---------- */
+
+/* php blanking: html outside <?php ?> tags, // # and slash-star
+   comments, quoted literals and heredoc/nowdoc bodies all become
+   spaces (newlines survive), so none of it can look like structure.
+   malloc'd same-length copy */
+static char *php_blank(const char *text, size_t len) {
+    char *out = malloc(len + 1);
+    if (!out) {
+        perror("llmkit: malloc");
+        exit(EXIT_OUT_OF_CHANNEL);
+    }
+    bool php = false; /* in code (<?php opened) vs plain html */
+    int state = 0; /* 0 code 1 line comment 2 block comment 3 str
+                      4 char 5 heredoc body */
+    char hdelim[40]; /* the heredoc's delimiter word */
+    size_t hdn = 0;
+    size_t i = 0;
+    while (i < len) {
+        char c = text[i];
+        char nxt = i + 1 < len ? text[i + 1] : '\0';
+        if (!php) { /* html until a php open tag */
+            if (c == '<' && nxt == '?') {
+                php = true;
+                /* <?php / <?= openers: blank the whole word */
+                size_t wl = 2;
+                if (i + 4 <= len && !strncmp(text + i, "<?php", 5))
+                    wl = 5;
+                else if (i + 3 <= len && !strncmp(text + i, "<?=", 3))
+                    wl = 3;
+                while (wl-- && i < len) out[i++] = ' ';
+                continue;
+            }
+            out[i++] = c == '\n' ? '\n' : ' ';
+            continue;
+        }
+        if (state == 0) {
+            if (c == '?' && nxt == '>') {
+                php = false;
+                out[i++] = ' ';
+                out[i++] = ' ';
+            } else if (c == '/' && nxt == '/') {
+                out[i++] = ' ';
+                out[i++] = ' ';
+                state = 1;
+            } else if (c == '#') {
+                out[i++] = ' ';
+                state = 1;
+            } else if (c == '/' && nxt == '*') {
+                out[i++] = ' ';
+                out[i++] = ' ';
+                state = 2;
+            } else if (c == '"') {
+                out[i++] = ' ';
+                state = 3;
+            } else if (c == '\'') {
+                out[i++] = ' ';
+                state = 4;
+            } else if (c == '<' && nxt == '<' && i + 2 < len &&
+                       text[i + 2] == '<') {
+                /* heredoc/nowdoc: remember the delimiter, the body
+                   ends at a line holding it alone */
+                size_t j = i + 3;
+                while (j < len && (text[j] == ' ' || text[j] == '\t'))
+                    j++;
+                if (j < len && (text[j] == '"' || text[j] == '\''))
+                    j++; /* nowdoc's quotes are decoration */
+                size_t dn = 0;
+                while (j + dn < len &&
+                       (isalnum((unsigned char)text[j + dn]) ||
+                        text[j + dn] == '_') &&
+                       dn + 1 < sizeof hdelim)
+                    dn++;
+                hdn = dn;
+                memcpy(hdelim, text + j, hdn);
+                for (size_t k = i; k < j + dn; k++)
+                    out[k] = text[k] == '\n' ? '\n' : ' ';
+                i = j + dn;
+                state = hdn ? 5 : 0;
+            } else {
+                out[i++] = c;
+            }
+        } else if (state == 1) {
+            out[i] = c == '\n' ? '\n' : ' ';
+            if (c == '\n') state = 0;
+            i++;
+        } else if (state == 2) {
+            if (c == '*' && nxt == '/') {
+                out[i++] = ' ';
+                out[i++] = ' ';
+                state = 0;
+            } else {
+                out[i++] = c == '\n' ? '\n' : ' ';
+            }
+        } else if (state == 5) { /* heredoc body, ends at a line
+                                    starting with the delimiter */
+            out[i] = c == '\n' ? '\n' : ' ';
+            if (c == '\n' && hdn) {
+                size_t j = i + 1;
+                size_t dn = 0;
+                while (j + dn < len && dn < hdn &&
+                       text[j + dn] == hdelim[dn])
+                    dn++;
+                if (dn == hdn) {
+                    i++;
+                    while (i < j + hdn) out[i++] = ' ';
+                    state = 0;
+                    hdn = 0;
+                    continue;
+                }
+            }
+            i++;
+        } else { /* string or char literal, backslash escapes */
+            if (c == '\\' && nxt) {
+                out[i++] = ' ';
+                if (i < len) out[i++] = ' ';
+            } else if ((state == 3 && c == '"') ||
+                       (state == 4 && c == '\'')) {
+                out[i++] = ' ';
+                state = 0;
+            } else {
+                out[i] = c == '\n' ? '\n' : ' ';
+                i++;
+            }
+        }
+    }
+    out[len] = '\0';
+    return out;
+}
+
+/* does s[0..n) hold the opener (optionally prefixed with modifiers)
+   of a php aggregate: class/interface/trait/enum? */
+static bool php_agg_head(const char *s, size_t n) {
+    static const char *const words[] = {
+        "class", "interface", "trait", "enum", NULL};
+    for (int w = 0; words[w]; w++) {
+        size_t wl = strlen(words[w]);
+        size_t k = 0;
+        /* optional modifiers may stack before the keyword */
+        for (;;) {
+            if (k + 8 <= n && !strncmp(s + k, "abstract", 8) &&
+                (s[k + 8] == ' ' || s[k + 8] == '\t'))
+                k += 8;
+            else if (k + 8 <= n && !strncmp(s + k, "readonly", 8) &&
+                     (s[k + 8] == ' ' || s[k + 8] == '\t'))
+                k += 8;
+            else if (k + 5 <= n && !strncmp(s + k, "final", 5) &&
+                     (s[k + 5] == ' ' || s[k + 5] == '\t'))
+                k += 5;
+            else
+                break;
+        }
+        while (k < n && (s[k] == ' ' || s[k] == '\t')) k++;
+        if (k + wl <= n && !strncmp(s + k, words[w], wl) &&
+            word_ends(s, n, k, wl))
+            return true;
+    }
+    return false;
+}
+
+/* does the head open with the word w? */
+static bool starts_word(const char *s, const char *w) {
+    size_t wl = strlen(w);
+    return !strncmp(s, w, wl) && word_ends(s, strlen(s), 0, wl);
+}
+
+/* a named function head: php spells it out, [modifiers] function
+   name (...), so the word itself is the test (anonymous closures and
+   arrow fns have no name to report) */
+static bool php_func_head(const char *head, tok_t *out) {
+    size_t n = strlen(head);
+    for (size_t i = 0; i + 8 <= n; i++) {
+        if (!word_at(head, n, i, "function", 8)) continue;
+        size_t j = i + 8;
+        while (j < n && (head[j] == ' ' || head[j] == '\t')) j++;
+        size_t e = j;
+        while (e < n && (isalnum((unsigned char)head[e]) || head[e] == '_'))
+            e++;
+        if (e == j) return false; /* function ( : anonymous */
+        *out = (tok_t){head + j, e - j};
+        return true;
+    }
+    return false;
+}
+
+static void analyze_php(const char *text, size_t len, nodes_t *ns) {
+    char *src = php_blank(text, len);
+
+    int stack[64];        /* brace depth at each open aggregate */
+    size_t stack_n = 0;
+    int depth = 0;
+    char acc[AN_ACC_MAX]; /* the declaration head being built */
+    size_t acc_len = 0;
+    long acc_line = -1;
+    bool acc_blank = true; /* acc still all whitespace */
+    bool acc_bad = false;  /* head overran the cap: no node from it */
+
+    size_t pos = 0;
+    const char *line;
+    size_t ll;
+    long lineno = 0;
+
+    while (next_line(src, len, &pos, &line, &ll)) {
+        lineno++;
+
+        for (size_t c = 0; c < ll; c++) {
+            char ch = line[c];
+
+            if (ch != '{' && ch != '}' && ch != ';') {
+                if (!acc_bad) {
+                    if (acc_blank && ch != ' ' && ch != '\t') {
+                        acc_line = lineno;
+                        acc_blank = false;
+                    }
+                    if (acc_len + 1 < sizeof acc)
+                        acc[acc_len++] = ch;
+                    else
+                        acc_bad = true;
+                }
+                continue;
+            }
+
+            acc[acc_len] = '\0';
+            char head[AN_ACC_MAX];
+            squeeze_spaces(head, sizeof head, acc, acc_len);
+
+            if (ch == '{') {
+                tok_t fn;
+                bool agg = !acc_bad && head[0] &&
+                           php_agg_head(head, strlen(head));
+                /* a function head one brace inside an aggregate is a
+                   method; at the top level it is a plain function */
+                bool meth = !agg && !acc_bad && head[0] && stack_n &&
+                            depth == stack[stack_n - 1] + 1 &&
+                            php_func_head(head, &fn);
+                bool top = !agg && !acc_bad && head[0] && !stack_n &&
+                           php_func_head(head, &fn);
+                if (agg || meth || top) {
+                    char label[AN_LABEL_MAX + 8];
+                    label_copy(label, sizeof label, head, strlen(head));
+                    node_add(ns, acc_line, (int)stack_n, label);
+                    if (agg && stack_n < sizeof stack / sizeof stack[0])
+                        stack[stack_n++] = depth;
+                }
+                depth++;
+            } else if (ch == '}') {
+                if (depth > 0) depth--;
+                if (stack_n && stack[stack_n - 1] == depth) stack_n--;
+            } else { /* ';' */
+                tok_t fn;
+                if (!acc_bad && head[0] && !stack_n) {
+                    /* top level: namespaces and imports */
+                    if (starts_word(head, "namespace") ||
+                        starts_word(head, "use")) {
+                        char label[AN_LABEL_MAX + 8];
+                        label_copy(label, sizeof label, head,
+                                   strlen(head));
+                        node_add(ns, acc_line, 0, label);
+                    }
+                } else if (!acc_bad && head[0] && stack_n &&
+                           depth == stack[stack_n - 1] + 1 &&
+                           php_func_head(head, &fn)) {
+                    /* a bodyless method: abstract, or an interface's */
+                    char label[AN_LABEL_MAX + 8];
+                    label_copy(label, sizeof label, head, strlen(head));
+                    node_add(ns, acc_line, (int)stack_n, label);
+                }
+            }
+
+            acc_len = 0;
+            acc_bad = false;
+            acc_blank = true;
+            acc_line = -1;
+        }
+    }
+    free(src);
+}
+
 /* does a declaration head open with the `typedef` word? */
 static bool starts_typedef(const char *head) {
     return !strncmp(head, "typedef", 7) &&
@@ -4311,6 +4604,8 @@ static const char *const EXTS_BATCH[] = {
     ".bat", ".cmd", NULL};
 static const char *const EXTS_PWSH[] = {
     ".ps1", NULL};
+static const char *const EXTS_PHP[] = {
+    ".php", ".phtml", ".phps", NULL};
 
 static const analyzer_t ANALYZERS[] = {
     {"markdown", EXTS_MARKDOWN, analyze_markdown},
@@ -4319,6 +4614,7 @@ static const analyzer_t ANALYZERS[] = {
     {"shell",    EXTS_SHELL,    analyze_shell},
     {"batch",    EXTS_BATCH,    analyze_batch},
     {"powershell", EXTS_PWSH,   analyze_pwsh},
+    {"php",      EXTS_PHP,      analyze_php},
 };
 enum { ANALYZERS_N = sizeof ANALYZERS / sizeof ANALYZERS[0] };
 
@@ -4490,6 +4786,8 @@ static void tool_process_exec(const cJSON *args, buf_t *out, bool *is_error) {
         fclose(p->out);
         remove(p->out_path);
         free(p->out_path);
+        for (int i = 0; i < p->nhead; i++) free(p->head[i]);
+        for (int i = 0; i < p->ntail; i++) free(p->tail[i]);
         pthread_mutex_destroy(&p->m);
         free(p);
         buf_clear(out);

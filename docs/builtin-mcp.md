@@ -197,7 +197,10 @@ The type comes from the extension: markdown files (`.md`, `.markdown`,
 `.mdown`) come back as their heading tree, c-family sources (`.c .h .cpp
 .cc .cxx .hpp .hh .hxx .java .cs .js .jsx .ts .tsx`) as their structs
 with typed members, full function signatures and typedefs, python files
-(`.py`, `.pyi`) as their classes and defs with parameter lists. One line
+(`.py`, `.pyi`) as their classes and defs with parameter lists, php
+files (`.php`, `.phtml`, `.phps`) as their namespaces, imports,
+classes/interfaces/traits/enums and function or method signatures.
+One line
 per element: its line number, an indent per nesting level, then the
 element, under a header naming the path, the kind and the line count:
 
@@ -237,7 +240,11 @@ The reply for a finished process:
 ```
 Exit code: ${code}
 Duration: ${seconds, three decimals}
-Last three output lines:
+First and last three output lines:
+HH:MM:SS: STDOUT: ${line}
+HH:MM:SS: STDERR: ${line}
+HH:MM:SS: STDOUT: ${line}
+[...]
 HH:MM:SS: STDOUT: ${line}
 HH:MM:SS: STDERR: ${line}
 HH:MM:SS: STDOUT: ${line}
@@ -248,16 +255,19 @@ the process has not ended, so it has none yet):
 
 ```
 PID ${pid} is still running.
-Last three output lines:
+First and last three output lines:
 ...
 Use process_status or process_wait.
 ```
 
-`Last three output lines` carries whatever the process printed so far,
-at most three of them, each stamped with its stream. The full stamped
+`First and last three output lines` carries whatever the process
+printed so far: the first three lines, `[...]`, the last three. A
+process with six lines or fewer is quoted whole - head and tail
+overlap, so each line prints once and no `[...]` appears. Each line is
+stamped with its stream. The full stamped
 output is appended to one temp
 file per process (`$TMPDIR`, else `/tmp`, on posix; the user temp dir
-on windows) for the lifetime of the server, and once more than three
+on windows) for the lifetime of the server, and once more than six
 lines exist the reply names it:
 
 ```

@@ -2036,6 +2036,44 @@ static void test_builtin(void) {
           "builtin: file_analyze powershell functions and classes");
     free(t);
 
+    write_file("/tmp/llmkit-test-builtin/lib.php",
+               "<?php\n"
+               "namespace App\\Sub;\n"
+               "use App\\Other\\Thing;\n"
+               "use App\\Deep\\Helper as H;\n"
+               "// class NotAClass { }\n"
+               "# function not_a_function() {}\n"
+               "$s = \"class NotInAString\";\n"
+               "abstract class Base implements Iface {\n"
+               "    public const X = 1;\n"
+               "    abstract public function must(int $n): string;\n"
+               "    public static function go(int $x, string $y): bool {\n"
+               "        return true;\n"
+               "    }\n"
+               "}\n"
+               "interface Iface {\n"
+               "    public function must(int $n): string;\n"
+               "}\n"
+               "function helper(array $a): int {\n"
+               "    $fn = function ($q) { return $q; };\n"
+               "    return count($a);\n"
+               "}\n");
+    t = bc_call("file_analyze",
+                "{\"path\":\"/tmp/llmkit-test-builtin/lib.php\"}", &ie);
+    check(!ie && t && strstr(t, "  [php]  21 lines\n") &&
+              strstr(t, "namespace App\\Sub\n") &&
+              strstr(t, "use App\\Other\\Thing\n") &&
+              strstr(t, "abstract class Base implements Iface\n") &&
+              strstr(t, "public static function go(int $x, string $y): bool\n") &&
+              strstr(t, "abstract public function must(int $n): string\n") &&
+              strstr(t, "interface Iface\n") &&
+              strstr(t, "function helper(array $a): int\n") &&
+              !strstr(t, "NotAClass") && !strstr(t, "not_a_function") &&
+              !strstr(t, "NotInAString") &&
+              !strstr(t, "function ($q)") && !strstr(t, "return"),
+          "builtin: file_analyze php namespaces, classes, methods");
+    free(t);
+
     write_file("/tmp/llmkit-test-builtin/plain.md", "just text\n");
     t = bc_call("file_analyze",
                 "{\"path\":\"/tmp/llmkit-test-builtin/plain.md\"}", &ie);
@@ -2061,28 +2099,32 @@ static void test_builtin(void) {
           "builtin: file_analyze needs a path");
     free(t);
 
-    /* process tools: completed reply, stream-stamped lines, tail, temp
-       file */
+    /* process tools: completed reply, stream-stamped lines, head and
+       tail, temp file */
     t = bc_call("process_exec", "{\"cmdline\":\"echo one; echo two\"}", &ie);
     check(!ie && t && strstr(t, "Exit code: 0\n") &&
-              strstr(t, "Last three output lines:\n") &&
+              strstr(t, "First and last three output lines:\n") &&
               strstr(t, ": STDOUT: one\n") && strstr(t, ": STDOUT: two\n") &&
-              !strstr(t, "still running") &&
+              !strstr(t, "still running") && !strstr(t, "[...]") &&
               !strstr(t, "Process output available"),
           "builtin: process_exec completed reply with stamped lines");
     free(t);
 
     t = bc_call("process_exec",
                 "{\"cmdline\":"
-                "\"echo a; echo b; echo c; echo d; echo e\"}",
+                "\"seq 1 12\"}",
                 &ie);
     check(!ie && t && strstr(t, "Exit code: 0") &&
+              strstr(t, "First and last three output lines:\n") &&
+              strstr(t, ": STDOUT: 1\n") && strstr(t, ": STDOUT: 2\n") &&
+              strstr(t, ": STDOUT: 3\n") && strstr(t, "[...]\n") &&
+              strstr(t, ": STDOUT: 10\n") && strstr(t, ": STDOUT: 11\n") &&
+              strstr(t, ": STDOUT: 12\n") && !strstr(t, ": STDOUT: 4\n") &&
+              !strstr(t, ": STDOUT: 5\n") && !strstr(t, ": STDOUT: 9\n") &&
               strstr(t, "Process output available in") &&
-              strstr(t, "(5 lines)") && !strstr(t, "currently 5 lines") &&
-              !strstr(t, ": STDOUT: a\n") && strstr(t, ": STDOUT: d\n") &&
-              strstr(t, ": STDOUT: e\n"),
-          "builtin: process_exec quotes the tail, names the temp file");
-    {   /* the temp file holds all five stamped lines */
+              strstr(t, "(12 lines)") && !strstr(t, "currently 12 lines"),
+          "builtin: process_exec quotes head, gap and tail");
+    {   /* the temp file holds all twelve stamped lines */
         char path[512] = "";
         char *pin = t ? strstr(t, "Process output available in ") : NULL;
         if (pin)
@@ -2102,9 +2144,23 @@ static void test_builtin(void) {
             }
             fclose(pf);
         }
-        check(pf && lines == 5 && stamped,
+        check(pf && lines == 12 && stamped,
               "builtin: process temp file has all stamped lines");
     }
+    free(t);
+
+    /* five lines: shown whole, head and tail overlap, no gap - and
+       no temp-file note, nothing is hidden */
+    t = bc_call("process_exec",
+                "{\"cmdline\":"
+                "\"echo a; echo b; echo c; echo d; echo e\"}",
+                &ie);
+    check(!ie && t && strstr(t, "Exit code: 0") &&
+              strstr(t, ": STDOUT: a\n") && strstr(t, ": STDOUT: b\n") &&
+              strstr(t, ": STDOUT: c\n") && strstr(t, ": STDOUT: d\n") &&
+              strstr(t, ": STDOUT: e\n") && !strstr(t, "[...]") &&
+              !strstr(t, "Process output available"),
+          "builtin: process_exec short output shows every line once");
     free(t);
 
     /* stderr gets its own stamp */
@@ -2147,7 +2203,7 @@ static void test_builtin(void) {
     t = bc_call("process_status", fown, &ie);
     check(!ie && t && strstr(t, "is still running") &&
               strstr(t, "not spawned by this server") &&
-              !strstr(t, "Last three output lines"),
+              !strstr(t, "First and last three output lines"),
           "builtin: process_status of a foreign running pid");
     free(t);
 
@@ -2225,7 +2281,7 @@ static void test_builtin(void) {
         t = bc_call("process_wait", fargs, &ie);
         check(!ie && t && strstr(t, "is still running") &&
                   strstr(t, "not spawned by this server") &&
-                  !strstr(t, "Last three output lines"),
+                  !strstr(t, "First and last three output lines"),
               "builtin: process_wait foreign pid timeout expiry");
         free(t);
         kill(fpid, SIGKILL);
