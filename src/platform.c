@@ -14,9 +14,11 @@
 #include <io.h>
 #include <process.h>
 #else
+#include <dirent.h>
 #include <fcntl.h>
 #include <strings.h>
 #include <sys/ioctl.h>
+#include <sys/syscall.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -311,6 +313,43 @@ void spawn_wait(spawn_t *s) {
 
 #else /* posix */
 
+/* ---- child fd hygiene ---- */
+
+/* close every fd from 3 up in one syscall; 0 on success, -1 when the
+   syscall is unavailable or errors (the caller falls back) */
+static int close_range_call(unsigned int last) {
+#if defined(SYS_close_range) && defined(__linux__)
+    return syscall(SYS_close_range, 3, last, 0) == 0 ? 0 : -1;
+#else
+    (void)last;
+    return -1;
+#endif
+}
+
+/* the pre-exec child closes everything it did not just open: close_range
+   when the kernel offers it, else /proc/self/fd (only open fds), else a
+   loop capped at 1M so a pathological rlimit cannot stall the exec */
+static void close_inherited_fds(void) {
+    if (close_range_call(~0u) == 0) return;
+    DIR *d = opendir("/proc/self/fd");
+    if (d) {
+        struct dirent *de;
+        int dfd = dirfd(d);
+        while ((de = readdir(d))) {
+            char *end = NULL;
+            errno = 0;
+            long fd = strtol(de->d_name, &end, 10);
+            if (end && *end == '\0' && errno == 0 && fd >= 3 && fd != dfd)
+                close((int)fd);
+        }
+        closedir(d);
+        return;
+    }
+    long maxfd = sysconf(_SC_OPEN_MAX);
+    if (maxfd < 0 || maxfd > 1024 * 1024) maxfd = 1024 * 1024;
+    for (int fd = 3; fd < maxfd; fd++) close(fd);
+}
+
 int spawn_shell(const char *command_line, spawn_t *out) {
     int in_pipe[2], out_pipe[2];
     if (pipe(in_pipe)) return -1;
@@ -334,10 +373,12 @@ int spawn_shell(const char *command_line, spawn_t *out) {
            their pipes - SIGTERM through spawn_kill - never by tty input) */
         setpgid(0, 0);
         /* nothing else is inherited: other servers' pipes and any open
-           sockets belong to the parent, not to this server */
-        long maxfd = sysconf(_SC_OPEN_MAX);
-        if (maxfd < 0) maxfd = 16384;
-        for (int fd = 3; fd < maxfd; fd++) close(fd);
+           sockets belong to the parent, not to this server. close_range
+           (linux 5.9+) closes it all in one call; else the open-fd
+           directory walks only what exists; the loop is the last resort
+           (a huge _SC_OPEN_MAX - some systemd boxes sit at 2^30 - would
+           otherwise spend minutes in close() before exec) */
+        close_inherited_fds();
         execl("/bin/sh", "sh", "-c", command_line, (char *)NULL);
         _exit(127);
     }
