@@ -974,9 +974,9 @@ defaults (the selfcheck drives both).
 - **the helper subagent** - `repl_helper_build` (repl.c) composes the
   existing features, no engine change: one temp jsonl seed (header, the
   session's `llm` record, one `system` record of the helper's own
-  bundled prompt text (`system_prompts/helper.txt`), the session's
-  `tools` record minus the `helper` entry itself -
-  the recursion cut - and the `agent-as-tool` record) and one temp
+  bundled prompt text (system_prompts/helper_header.txt + the shared
+  common.txt tail), the session's `tools` record minus the `helper` entry
+  itself - the recursion cut - and the `agent-as-tool` record) and one temp
   mcp-proxy config (a `tools` record with one `as-tool` server running
   `agent-as-tool` on that seed, plus an `expose` renaming
   `as-tool.invoke` to `helper` and its `input` argument to `prompt`).

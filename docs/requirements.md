@@ -1490,8 +1490,9 @@ the `invalid_record` tier, exit 2.
 ### system prompt and AGENTS.md
 
 Without `--system-prompt` the session starts from the bundled agent
-prompt (`src/prompts/system_prompts/agent.txt`, the built-in tools'
-usage guidance); the flag's text replaces it as in repl. When the
+prompt (`src/prompts/system_prompts/agent_header.txt` plus the shared
+`common.txt` tail, the built-in tools' usage guidance); the flag's text
+replaces it as in repl. When the
 working directory contains an `AGENTS.md`, its content is injected as a
 second `system` content block, after the prompt's own block, prefixed
 with the line `##### Content of AGENTS.md #####` - two blocks in one

@@ -5,6 +5,7 @@ test/selfcheck.exe
 .*
 dist/
 src/prompts.gen.c
+src/prompts.gen.c.tmp.comp
 src/prompts.gen.h
 
 # valgrind run artifacts
