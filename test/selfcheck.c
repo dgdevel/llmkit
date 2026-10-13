@@ -1567,17 +1567,18 @@ static void test_builtin(void) {
             ? cJSON_GetObjectItemCaseSensitive(
                   cJSON_GetObjectItemCaseSensitive(r, "result"), "tools")
             : NULL;
-        check(cJSON_IsArray(tools) && cJSON_GetArraySize(tools) == 15,
-              "builtin: fifteen tools listed");
-        const char *want[15] = {
+        check(cJSON_IsArray(tools) && cJSON_GetArraySize(tools) == 17,
+              "builtin: seventeen tools listed");
+        const char *want[17] = {
             "web_search",     "web_fetch",      "files_list",
             "files_search",   "file_read",      "file_create",
-            "file_edit",      "file_delete",    "file_analyze",
+            "file_edit",      "file_delete",    "file_copy",
+            "file_move",      "file_analyze",
             "process_exec",   "process_status", "process_wait",
             "process_send_signal", "skills_search", "skills_read" };
         bool names_ok = true, descs_set = true, args_set = true;
         if (cJSON_IsArray(tools))
-            for (int i = 0; i < 15; i++) {
+            for (int i = 0; i < 17; i++) {
                 const cJSON *t = cJSON_GetArrayItem(tools, i);
                 const cJSON *nm = cJSON_GetObjectItemCaseSensitive(t, "name");
                 if (!cJSON_IsString(nm) || strcmp(nm->valuestring, want[i]))
@@ -1816,6 +1817,131 @@ static void test_builtin(void) {
                   stat("/tmp/llmkit-test-builtin/tree", &st),
               "builtin: file_delete removes a directory recursively");
         free(t);
+    }
+
+    /* file_copy: file to file, refuse then overwrite */
+    write_file("/tmp/llmkit-test-builtin/src.txt", "one\ntwo\n");
+    t = bc_call("file_copy",
+                "{\"sourcepath\":\"/tmp/llmkit-test-builtin/src.txt\","
+                "\"destpath\":\"/tmp/llmkit-test-builtin/dst.txt\"}", &ie);
+    check(!ie && t && strstr(t, "copied"), "builtin: file_copy file to file");
+    free(t);
+    {
+        char got[64];
+        slurp_file("/tmp/llmkit-test-builtin/dst.txt", got, sizeof got);
+        check(!strcmp(got, "one\ntwo\n"), "builtin: file_copy content");
+    }
+    t = bc_call("file_copy",
+                "{\"sourcepath\":\"/tmp/llmkit-test-builtin/src.txt\","
+                "\"destpath\":\"/tmp/llmkit-test-builtin/dst.txt\"}", &ie);
+    check(ie && t && strstr(t, "already exists"),
+          "builtin: file_copy refuses an existing target");
+    free(t);
+    write_file("/tmp/llmkit-test-builtin/src.txt", "replaced\n");
+    t = bc_call("file_copy",
+                "{\"sourcepath\":\"/tmp/llmkit-test-builtin/src.txt\","
+                "\"destpath\":\"/tmp/llmkit-test-builtin/dst.txt\","
+                "\"overwrite\":true}", &ie);
+    check(!ie && t && strstr(t, "copied"),
+          "builtin: file_copy overwrite replaces the target");
+    free(t);
+    {
+        char got[64];
+        slurp_file("/tmp/llmkit-test-builtin/dst.txt", got, sizeof got);
+        check(!strcmp(got, "replaced\n"),
+              "builtin: file_copy overwrite wrote the new content");
+    }
+
+    /* file_copy: file into a directory */
+    mkdir("/tmp/llmkit-test-builtin/sub", 0777);
+    t = bc_call("file_copy",
+                "{\"sourcepath\":\"/tmp/llmkit-test-builtin/src.txt\","
+                "\"destpath\":\"/tmp/llmkit-test-builtin/sub\"}", &ie);
+    check(!ie && t && strstr(t, "copied") && strstr(t, "sub/src.txt"),
+          "builtin: file_copy into a directory names the child");
+    free(t);
+    {
+        char got[64];
+        slurp_file("/tmp/llmkit-test-builtin/sub/src.txt", got, sizeof got);
+        check(!strcmp(got, "replaced\n"),
+              "builtin: file_copy into a directory wrote the file");
+    }
+
+    /* file_copy: directory tree into a directory, refuse inside itself */
+    mkdir("/tmp/llmkit-test-builtin/tree", 0777);
+    mkdir("/tmp/llmkit-test-builtin/tree/deep", 0777);
+    write_file("/tmp/llmkit-test-builtin/tree/a.txt", "a\n");
+    write_file("/tmp/llmkit-test-builtin/tree/deep/b.txt", "b\n");
+    t = bc_call("file_copy",
+                "{\"sourcepath\":\"/tmp/llmkit-test-builtin/tree\","
+                "\"destpath\":\"/tmp/llmkit-test-builtin/sub\"}", &ie);
+    check(!ie && t && strstr(t, "copied"),
+          "builtin: file_copy copies a directory into a directory");
+    free(t);
+    {
+        char got[64];
+        struct stat tst;
+        slurp_file("/tmp/llmkit-test-builtin/sub/tree/deep/b.txt", got,
+                   sizeof got);
+        check(!strcmp(got, "b\n") &&
+                  !stat("/tmp/llmkit-test-builtin/sub/tree/deep/b.txt", &tst),
+              "builtin: file_copy descends the tree");
+    }
+    t = bc_call("file_copy",
+                "{\"sourcepath\":\"/tmp/llmkit-test-builtin/tree\","
+                "\"destpath\":\"/tmp/llmkit-test-builtin/tree\"}", &ie);
+    check(ie && t && strstr(t, "inside itself"),
+          "builtin: file_copy refuses a directory into itself");
+    free(t);
+
+    /* file_move: rename, existing target, and into a directory */
+    write_file("/tmp/llmkit-test-builtin/old.txt", "to move\n");
+    t = bc_call("file_move",
+                "{\"sourcepath\":\"/tmp/llmkit-test-builtin/old.txt\","
+                "\"destpath\":\"/tmp/llmkit-test-builtin/new.txt\"}", &ie);
+    {
+        struct stat mst;
+        check(!ie && t && strstr(t, "moved") &&
+                  stat("/tmp/llmkit-test-builtin/old.txt", &mst),
+              "builtin: file_move renames");
+        free(t);
+    }
+    write_file("/tmp/llmkit-test-builtin/old.txt", "again\n");
+    t = bc_call("file_move",
+                "{\"sourcepath\":\"/tmp/llmkit-test-builtin/old.txt\","
+                "\"destpath\":\"/tmp/llmkit-test-builtin/new.txt\"}", &ie);
+    check(ie && t && strstr(t, "already exists"),
+          "builtin: file_move refuses an existing target");
+    free(t);
+    t = bc_call("file_move",
+                "{\"sourcepath\":\"/tmp/llmkit-test-builtin/old.txt\","
+                "\"destpath\":\"/tmp/llmkit-test-builtin/new.txt\","
+                "\"overwrite\":true}", &ie);
+    {
+        struct stat mst;
+        char got[64];
+        check(!ie && t && strstr(t, "moved") &&
+                  stat("/tmp/llmkit-test-builtin/old.txt", &mst),
+              "builtin: file_move overwrite moves anyway");
+        slurp_file("/tmp/llmkit-test-builtin/new.txt", got, sizeof got);
+        check(!strcmp(got, "again\n"),
+              "builtin: file_move overwrite landed the new content");
+        free(t);
+    }
+    t = bc_call("file_move",
+                "{\"sourcepath\":\"/tmp/llmkit-test-builtin/new.txt\","
+                "\"destpath\":\"/tmp/llmkit-test-builtin/sub\"}", &ie);
+    {
+        struct stat mst;
+        check(!ie && t && strstr(t, "moved") &&
+                  stat("/tmp/llmkit-test-builtin/new.txt", &mst),
+              "builtin: file_move into a directory removes the source");
+        free(t);
+    }
+    {
+        struct stat tst;
+        check(!stat("/tmp/llmkit-test-builtin/sub/new.txt", &tst),
+              "builtin: file_move into a directory landed the child");
     }
 
     t = bc_call("files_list", "{\"path\":\"/tmp/llmkit-test-builtin\","

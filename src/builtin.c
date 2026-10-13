@@ -1,6 +1,6 @@
 /* builtin.c - llmkit builtin-mcp: a stdio mcp server offering generic-use
-   tools (web search/fetch, file list/search/read/create/edit/analyze,
-   process exec/status, skills search/read). No config: `llmkit builtin-mcp`
+   tools (web search/fetch, file list/search/read/create/edit/copy/move/
+   delete/analyze, process exec/status, skills search/read). No config: `llmkit builtin-mcp`
    serves json-rpc on stdin/stdout. Tool and argument descriptions live
    in src/prompts/mcp/<tool>/description.txt and .../arguments/<arg>.txt,
    bundled into the binary at build time by tools/gen-prompts.sh (an
@@ -84,6 +84,20 @@ static const arg_def_t ARGS_file_edit[] = {
 static const arg_def_t ARGS_file_delete[] = {
     {"path", "string", prompt_mcp_file_delete_arguments_path, true},
 };
+static const arg_def_t ARGS_file_copy[] = {
+    {"sourcepath", "string", prompt_mcp_file_copy_arguments_sourcepath,
+     true},
+    {"destpath", "string", prompt_mcp_file_copy_arguments_destpath, true},
+    {"overwrite", "boolean", prompt_mcp_file_copy_arguments_overwrite,
+     false},
+};
+static const arg_def_t ARGS_file_move[] = {
+    {"sourcepath", "string", prompt_mcp_file_move_arguments_sourcepath,
+     true},
+    {"destpath", "string", prompt_mcp_file_move_arguments_destpath, true},
+    {"overwrite", "boolean", prompt_mcp_file_move_arguments_overwrite,
+     false},
+};
 static const arg_def_t ARGS_file_analyze[] = {
     {"path", "string", prompt_mcp_file_analyze_arguments_path, true},
 };
@@ -119,6 +133,8 @@ static const tool_def_t TOOLS[] = {
     {"file_create", prompt_mcp_file_create_description, ARGS_file_create, 3},
     {"file_edit", prompt_mcp_file_edit_description, ARGS_file_edit, 4},
     {"file_delete", prompt_mcp_file_delete_description, ARGS_file_delete, 1},
+    {"file_copy", prompt_mcp_file_copy_description, ARGS_file_copy, 3},
+    {"file_move", prompt_mcp_file_move_description, ARGS_file_move, 3},
     {"file_analyze", prompt_mcp_file_analyze_description, ARGS_file_analyze,
      1},
     {"process_exec", prompt_mcp_process_exec_description, ARGS_process_exec,
@@ -149,6 +165,8 @@ void tool_file_read(const cJSON *args, buf_t *out, bool *is_error);
 void tool_file_create(const cJSON *args, buf_t *out, bool *is_error);
 void tool_file_edit(const cJSON *args, buf_t *out, bool *is_error);
 void tool_file_delete(const cJSON *args, buf_t *out, bool *is_error);
+void tool_file_copy(const cJSON *args, buf_t *out, bool *is_error);
+void tool_file_move(const cJSON *args, buf_t *out, bool *is_error);
 /* src/builtin/analyze.c */
 void tool_file_analyze(const cJSON *args, buf_t *out, bool *is_error);
 /* src/builtin/process.c */
@@ -163,6 +181,7 @@ void tool_skills_read(const cJSON *args, buf_t *out, bool *is_error);
 static const tool_fn TOOL_FNS[TOOLS_N] = {
     tool_web_search, tool_web_fetch,  tool_files_list, tool_files_search,
     tool_file_read,  tool_file_create, tool_file_edit, tool_file_delete,
+    tool_file_copy, tool_file_move,
     tool_file_analyze,
     tool_process_exec, tool_process_status, tool_process_wait,
     tool_process_send_signal,

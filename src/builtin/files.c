@@ -667,6 +667,210 @@ void tool_file_delete(const cJSON *args, buf_t *out, bool *is_error) {
     buf_free(&err);
 }
 
+/* ---- file_copy / file_move ---- */
+
+/* one byte-true copy of a regular file: 0 on success, an errno value on
+   failure (a failed stream call without errno becomes EIO) */
+static int copy_reg(const char *src, const char *dst) {
+    FILE *in = fopen(src, "rb");
+    if (!in) return errno ? errno : EIO;
+    FILE *out = fopen(dst, "wb");
+    if (!out) {
+        int e = errno ? errno : EIO;
+        fclose(in);
+        return e;
+    }
+    char chunk[64 * 1024];
+    size_t n;
+    int e = 0;
+    while (!e && (n = fread(chunk, 1, sizeof chunk, in)) > 0)
+        if (fwrite(chunk, 1, n, out) != n) e = EIO;
+    if (!e && ferror(in)) e = EIO;
+    if (fclose(out) != 0 && !e) e = EIO;
+    fclose(in);
+    return e;
+}
+
+/* recursive copy: directories are recreated and descended, everything
+   else is copied as a file. the first failure lands in err and stops
+   the walk, leaving what was already written in place. 0 on success */
+static int copy_tree(const char *src, const char *dst, buf_t *err,
+                     int depth) {
+    if (depth > 64) {
+        buf_appendf(err, "recursion limit at '%s'", src);
+        return -1;
+    }
+    struct stat st;
+    if (BM_LSTAT(src, &st)) {
+        buf_appendf(err, "'%s': %s", src, strerror(errno));
+        return -1;
+    }
+    if (!S_ISREG(st.st_mode) && !S_ISDIR(st.st_mode)) {
+        buf_appendf(err, "'%s' is not a regular file or directory", src);
+        return -1;
+    }
+    if (!S_ISDIR(st.st_mode)) {
+        int e = copy_reg(src, dst);
+        if (e) buf_appendf(err, "'%s': %s", dst, strerror(e));
+        return e ? -1 : 0;
+    }
+    if (BM_MKDIR(dst) != 0 && errno != EEXIST) {
+        buf_appendf(err, "'%s': %s", dst, strerror(errno));
+        return -1;
+    }
+    DIR *d = opendir(src);
+    if (!d) {
+        buf_appendf(err, "'%s': %s", src, strerror(errno));
+        return -1;
+    }
+    struct dirent *de;
+    int rc = 0;
+    while (!rc && (de = readdir(d))) {
+        if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, "..")) continue;
+        char csrc[BM_PATH_MAX], cdst[BM_PATH_MAX];
+        if (snprintf(csrc, sizeof csrc, "%s/%s", src, de->d_name) >=
+                (int)sizeof csrc ||
+            snprintf(cdst, sizeof cdst, "%s/%s", dst, de->d_name) >=
+                (int)sizeof cdst) {
+            buf_appendf(err, "'%s/...' name too long", src);
+            rc = -1;
+            break;
+        }
+        rc = copy_tree(csrc, cdst, err, depth + 1);
+    }
+    closedir(d);
+    return rc;
+}
+
+/* shared body of file_copy and file_move: destpath names the target
+   itself, or the directory the source lands inside (destpath/<source
+   basename>) when destpath is an existing directory. an existing
+   destination is an error unless overwrite=true, and a file never
+   replaces a directory nor the other way round. a move is one rename(2)
+   inside a filesystem; across two it is a full copy followed by an
+   irreversible removal of the source. */
+static void tool_file_copy_move(const cJSON *args, buf_t *out,
+                                bool *is_error, bool move) {
+    const char *src = NULL, *dst = NULL;
+    if (!bm_need_str(args, "sourcepath", &src, out) ||
+        !bm_need_str(args, "destpath", &dst, out)) {
+        *is_error = true;
+        return;
+    }
+    bool overwrite = rec_bool(args, "overwrite", false);
+    if (!strlen(src) || !strlen(dst)) {
+        buf_clear(out);
+        buf_append_str(out, "sourcepath and destpath must not be empty");
+        *is_error = true;
+        return;
+    }
+    struct stat sst;
+    if (stat(src, &sst)) {
+        buf_clear(out);
+        buf_appendf(out, "cannot access '%s': %s", src, strerror(errno));
+        *is_error = true;
+        return;
+    }
+    struct stat dst_st;
+    bool into_dir = stat(dst, &dst_st) == 0 && S_ISDIR(dst_st.st_mode);
+    char target[BM_PATH_MAX];
+    if (snprintf(target, sizeof target, "%s%s%s", dst, into_dir ? "/" : "",
+                 into_dir ? base_ptr(src) : "") >= (int)sizeof target) {
+        buf_clear(out);
+        buf_appendf(out, "destpath too long");
+        *is_error = true;
+        return;
+    }
+    /* a directory copied into itself would recurse until the path cap */
+    size_t sl = strlen(src);
+    if (S_ISDIR(sst.st_mode) && strlen(target) > sl &&
+        !strncmp(target, src, sl) && target[sl] == '/') {
+        buf_clear(out);
+        buf_appendf(out, "cannot %s a directory inside itself",
+                    move ? "move" : "copy");
+        *is_error = true;
+        return;
+    }
+    struct stat tst;
+    if (!BM_LSTAT(target, &tst)) {
+        if (!overwrite) {
+            buf_clear(out);
+            buf_appendf(out, "'%s' already exists (pass overwrite=true)",
+                        target);
+            *is_error = true;
+            return;
+        }
+        if (S_ISDIR(tst.st_mode) && !S_ISDIR(sst.st_mode)) {
+            buf_clear(out);
+            buf_appendf(out, "cannot replace directory '%s' with a file",
+                        target);
+            *is_error = true;
+            return;
+        }
+        if (!S_ISDIR(tst.st_mode) && S_ISDIR(sst.st_mode)) {
+            buf_clear(out);
+            buf_appendf(out, "cannot replace file '%s' with a directory",
+                        target);
+            *is_error = true;
+            return;
+        }
+    }
+    if (move && rename(src, target) == 0) {
+        buf_clear(out);
+        buf_appendf(out, "moved %s to %s", src, target);
+        return;
+    }
+    if (move && errno != EXDEV) {
+        buf_clear(out);
+        buf_appendf(out, "move '%s' to '%s': %s", src, target,
+                    strerror(errno));
+        *is_error = true;
+        return;
+    }
+    if (!ensure_parent_dirs(target)) {
+        buf_clear(out);
+        buf_appendf(out, "cannot create the parent directories of '%s'",
+                    target);
+        *is_error = true;
+        return;
+    }
+    buf_t err;
+    buf_init(&err);
+    if (copy_tree(src, target, &err, 0)) {
+        buf_clear(out);
+        buf_appendf(out, "copy '%s' to '%s' failed: %s", src, target,
+                    err.data ? err.data : "unknown error");
+        buf_free(&err);
+        *is_error = true;
+        return;
+    }
+    buf_free(&err);
+    if (move) { /* cross-device: the copy is in, the source goes away */
+        buf_t rmerr;
+        buf_init(&rmerr);
+        rm_tree(src, &rmerr, 0);
+        if (rmerr.data && rmerr.data[0]) {
+            buf_clear(out);
+            buf_appendf(out, "copied to '%s' but removing '%s' failed: %s",
+                        target, src, rmerr.data);
+            buf_free(&rmerr);
+            *is_error = true;
+            return;
+        }
+        buf_free(&rmerr);
+    }
+    buf_clear(out);
+    buf_appendf(out, "%s %s to %s", move ? "moved" : "copied", src, target);
+}
+
+void tool_file_copy(const cJSON *args, buf_t *out, bool *is_error) {
+    tool_file_copy_move(args, out, is_error, false);
+}
+
+void tool_file_move(const cJSON *args, buf_t *out, bool *is_error) {
+    tool_file_copy_move(args, out, is_error, true);
+}
+
 
 typedef struct fline {
     const char *s;

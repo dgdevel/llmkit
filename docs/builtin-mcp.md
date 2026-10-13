@@ -36,6 +36,8 @@ A platform-dependent description ships in both variants. The extra `<argument>.w
 | `file_create` | `path: string, content: string, overwrite: bool = false` | confirmation |
 | `file_edit` | `path: string, oldString: string, newString: string, line_number: int` | confirmation |
 | `file_delete` | `path: string` | confirmation |
+| `file_copy` | `sourcepath: string, destpath: string, overwrite: bool = false` | confirmation |
+| `file_move` | `sourcepath: string, destpath: string, overwrite: bool = false` | confirmation |
 | `file_analyze` | `path: string` | the file's structure, one line per element |
 | `process_exec` | `cmdline: string` | exit code or pid + output tail |
 | `process_status` | `pid: int` | same report for one spawned pid. Any other pid: running state |
@@ -114,6 +116,14 @@ Moves the file or directory at `path` into the user's trash instead of destroyin
 Name collisions in the trash get a " 2", " 3" ... suffix. The freedesktop sidecar `.trashinfo` records the original path and the deletion date, so a file manager can restore the file. The tool still answers `deleted <path>`.
 
 When no trash is reachable (cross-device move, read-only or absent trash dir that cannot be created, no home), the old irreversible removal runs. It is depth-first post-order: each child is removed before its parent. Directories go through `rmdir(3)` only once empty. A failure therefore leaves the untouched remainder in place and reports the deepest path that failed with its `strerror` reason. Dangling symlinks are unlinked rather than followed. Depth is capped at 64.
+
+### file_copy(sourcepath, destpath, overwrite=false)
+
+Copies the file or directory tree at `sourcepath` to `destpath`. `destpath` names the target itself; when it is an existing directory, the copy lands inside it as `destpath/<source basename>`. An existing target is an error unless `overwrite` is true. A file never replaces a directory nor the other way round. Copying a directory into itself is refused. Directories are recreated and descended (depth cap 64), files are copied byte for byte; the first failure stops the copy and reports the path and reason, leaving what was already written in place. Only regular files are copied (special nodes error out).
+
+### file_move(sourcepath, destpath, overwrite=false)
+
+Moves the file or directory tree at `sourcepath` to `destpath`. Same `destpath` and `overwrite` rules as `file_copy`. Within one filesystem the move is a single `rename(2)`. Across two it is a full copy followed by an irreversible removal of the source (the trash is not involved); a failure to remove the source after a successful copy is an error naming what stayed behind.
 
 ### file_analyze(path)
 
