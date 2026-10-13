@@ -47,7 +47,7 @@ One process per conversation (`llmkit runner`) or per agent server
 - **main** - owns the conversation engine, all stdout writes and the curl
   easy handle. All sequencing (turns, tool calls) is single-threaded here.
 - **stdin reader** - blocking `read` loop, byte-level rules of sec.3, pushes
-  parsed records into a queue. Keeps reading during turns: this is what makes
+  parsed records into a queue. It keeps reading during turns, and this makes
   steering observable while the stream runs.
 - **one reader per stdio mcp server** - blocking line reads from the child,
   pushes json-rpc messages into that server's queue.
@@ -72,11 +72,11 @@ instead of `termios`, `QueryPerformanceCounter` instead of
 `CLOCK_MONOTONIC`. pthreads stay (winpthreads). Differences that show:
 
 - the repl editor reads ctrl-c as a `0x03` byte (processed input off, so
-  the stage rule works between turns); while a turn runs the console is
+  the stage rule works between turns). While a turn runs the console is
   cooked again, so ctrl-c raises the signal and takes the orderly-stop
   path like on linux.
 - `platform_init` at startup sets the console to utf-8 + VT escapes and
-  puts redirected std streams in binary mode, keeping the `\n`-only byte
+  puts redirected std streams in binary mode. This keeps the `\n`-only byte
   contract on pipes and files.
 
 ## 3. input pipeline
@@ -104,7 +104,7 @@ Byte level, in order, per chunk read from stdin:
 
 A failing `read` on stdin (an error, not EOF) is the error catalog's stdin
 failure: a fatal `io_error` record, emitted at detection like every error
-record; from then on no input exists - EOF semantics for everything else,
+record. From then on no input exists, EOF semantics for everything else,
 so the drop rule has nothing left to drop.
 
 Record state machine (main thread view; `records_since_flush` counts
@@ -129,7 +129,7 @@ response) holds for everything enqueued before the boundary.
 Main thread, per turn:
 
 1. drain the stdin queue (state machine above).
-2. build the request from the transcript (sec.7) and the effective config
+2. build the request from the transcript (sec.7) and the effective configuration
    (`llm`, `tools`, `options`, `system` snapshots; change timing per
    requirements sec.5).
 3. pre-send validations that depend on effective values: anthropic
@@ -142,7 +142,7 @@ Main thread, per turn:
 5. turn end: `response` final record, or complete `tool_request` records.
    Tool turns: execute each request strictly in order (sec.6), emit
    `tool_response` per request plus non-fatal `tool_failed` / `tool_timeout`
-   on failure; then next turn. A terminal tool (sec.6) ends the run at its
+   on failure, then next turn. A terminal tool (sec.6) ends the run at its
    own `tool_response`, failure and timeout included - no retry, the model
    never sees the result: the remaining requests of the turn are suspended
    and answered `is_error` (the steering synthesis), unflushed records get
@@ -150,7 +150,7 @@ Main thread, per turn:
    record is emitted for the ending, the exit code is 9 (sec.13).
 6. stop conditions: final `response` with no steering pending (exit 0),
    terminal tool answered (exit 9, no error record), `max_tool_rounds` (the
-   would-exceed turn is not started; fatal `max_tool_rounds_exceeded`),
+   the turn that exceeds the limit is not started, fatal `max_tool_rounds_exceeded`),
    fatal `error`, external stop (sec.8).
 
 `usage` and `finish_reason` attach to the final record of the turn
@@ -167,7 +167,7 @@ handle per endpoint, reused across turns; connection reuse is irrelevant to
 server side prefix caches, fresh or reused both work.
 
 Non-streaming (`stream` false): the complete body maps to the same final
-records a streamed turn would emit - no partials, one record per content
+records a streamed turn emits - no partials, one record per content
 block. openai: `choices[0].message` (`content` -> `response`,
 `reasoning_content`/`reasoning` -> `thinking`, `tool_calls[]` ->
 `tool_request`s), plus `finish_reason` and `usage`. openai_responses:
@@ -261,7 +261,7 @@ fractional `llm_connect_timeout`/`llm_read_timeout` values are floored;
   become one `user` message with `{type:"tool_result", tool_use_id}` blocks,
   same order.
 - Signed thinking: resent verbatim (`{type:"thinking", thinking, signature}`)
-  when that turn ended in tool requests; dropped per the requirements'
+  when that turn ended in tool requests, dropped per the requirements'
   unsigned-thinking rule otherwise (tool records of that turn omitted from
   the request too).
 - Streaming mapping:
@@ -319,8 +319,8 @@ fractional `llm_connect_timeout`/`llm_read_timeout` values are floored;
   struct, re-derived by every reconcile, so a `tools` record change
   revalidates at the boundary it applies at. The engine resolves an exposed
   `name.tool` through the same prefix split `tools/call` uses; execution of
-  a terminal tool is the sec.4 stop condition. The attribute is config, it
-  never enters the serialized tool list - no request byte changes.
+  a terminal tool is the sec.4 stop condition. The attribute is configuration,
+  it never enters the serialized tool list - no request byte changes.
 - `tools/call` `{name, arguments}`; the `name` sent to the server is the part
   after the server prefix. Result: text content blocks concatenate with `\n`
   into `tool_response.text`; `isError: true` -> `is_error: true` plus
@@ -345,7 +345,7 @@ identical to the request of turn N-1 - is enforced structurally:
 - Every record is parsed into a cJSON tree once, at ingest. Trees are never
   reordered, mutated or re-parsed; cJSON serializes a given tree to the same
   bytes every time (insertion-ordered fields, fixed number format). So
-  re-serializing the same records can't drift.
+  re-serializing the same records cannot drift.
 - Per conversation, an append-only byte buffer holds the serialized message
   array - `messages` for openai and anthropic, `input` for openai_responses.
   A new turn appends its message bytes. The request body is envelope + buffer; only envelope fields
@@ -355,10 +355,10 @@ identical to the request of turn N-1 - is enforced structurally:
   tree in, same bytes out. (A number lexeme like `1e3` may print as `1000`
   - consistently, every turn, which is all the invariant needs. Integers
   beyond 2^53 in tool arguments round-trip through doubles: precision can
-  be lost, deterministically; `ponytail:` store raw argument bytes only if
+  be lost, deterministically. `ponytail:` store raw argument bytes only if
   a real tool ever needs exact big integers.)
 - Invalidation: a `system`, `tools`, or `llm` change, or transcript growth by
-  a new turn, are the only prefix writers; each rebuilds from its point
+  a new turn, are the only prefix writers. Each rebuilds from its point
   onward. Under openai a `system` change rewrites `messages[0]` - a miss from
   the top, inherent to the protocol. An `llm` change rebuilds everything and
   resets cache expectations.
@@ -369,14 +369,14 @@ identical to the request of turn N-1 - is enforced structurally:
 Anthropic `cache_control` breakpoints, 4 maximum, **append only**: a marker,
 once written into a block, is never moved or removed - moving or removing one
 rewrites old prefix bytes and invalidates every cache entry behind it, which
-would make the runner the cause of a full miss.
+makes the runner the cause of a full miss.
 
 Marker budget, in order:
 
 1. the end of the static prefix - the last tool definition when tools
    exist, else the last block of the `system` param (anthropic accepts a
    block array there) - one marker covers `system` + `tools`, since system
-   precedes tools in the body; a separate system marker would waste a slot.
+   precedes tools in the body; a separate system marker wastes a slot.
 2. + 3. + 4. the last content block of the last message of each completed
    turn, placed as the turn completes. A breakpoint caches everything before
    it, so slots spent as late as possible cover the most prefix; the cost of
@@ -527,7 +527,7 @@ new wire, mcp or loop code; one new `src/call.c`, a dispatch line in
   hygiene is sec.3's minus the line splitting: every `0x0d` dropped, strict
   UTF-8, a leading BOM rejected, NUL rejected - violations take the
   `invalid_record` tier (stderr line, exit 2): the compiled `user` record
-  would fail the same validation.
+  fails the same validation.
 - **sink** - `response` records: one `fwrite` + `fflush` of `text`, the sec.2
   rule (deltas are small, interactive use wants them immediate). `error`
   records, fatal or not: one stderr line each, `llmkit call: <code>:
@@ -586,7 +586,7 @@ No new wire, mcp or loop code.
   typed echo both need, and the queue is never flushed (`TCSANOW`, not
   `TCSAFLUSH`): pasted type-ahead survives the cycle, one submit per
   line, exactly the requirements' paste discipline (bracketed paste is
-  deliberately not armed - a folded paste would swallow the newlines).
+  deliberately not armed - a folded paste swallows the newlines).
   Between lines the terminal is cooked again, so a turn runs against a
   cooked one on both platforms alike and ctrl-c reaches the engine's
   stop flag; raw mode reads bytes as they are typed. The editing set is
@@ -644,7 +644,7 @@ No new wire, mcp or loop code.
   the block framing: a separator opens each block - the first record of
   its kind since the last block closed, and only when its text is
   non-empty: the wire's block-close records carry the signature or usage
-  with empty text, and a separator armed by one would leak into the next
+  with empty text, and a separator armed by one leaks into the next
   user block; `partial: true` continues the open block. User bold, thinking italic, response raw, `tool_request`
   bold `name` plus compact `arguments` on one line, `tool_response` bold
   text, `start` markers nothing. The trailing newline rule is call's,
@@ -679,7 +679,7 @@ No new wire, mcp or loop code.
 | 8 | `interrupted`, including the second-SIGINT hard exit |
 | 9 | conversation ended by a terminal tool (requirements sec.2.7): the last record is that tool's `tool_response`, no error record |
 
-When several fatal records could apply, the first one emitted decides.
+When several fatal records can apply, the first one emitted decides.
 Non-fatal error records never influence the exit code. Exit 9 pairs with no
 error record at all - the terminal ending is requested, not an error - and
 outranks a simultaneous `interrupted` (sec.8).
@@ -913,7 +913,7 @@ the same sink fed record by record instead of from a file - and
   (anthropic's top-level `system`, the responses `instructions` or a
   system/developer message, a chat system/developer message), one
   italic block per request - responses as the records the
-  wires would emit - the mappings are compact local twins of
+  wires emit - the mappings are compact local twins of
   `wire_openai.c` / `wire_anthropic.c` field extraction, sunk through
   `emit_fn` into `pretty_live` instead of the engine (the wires are
   coupled to the transcript; the viewer renders and forgets). Streamed
@@ -948,7 +948,7 @@ defaults (the selfcheck drives both).
   the other argv->record builders) is `call_build_tools` plus one
   stdio entry, name `builtin`, command line `'<self_exe>' builtin-mcp`
   through `call_shell_quote`. `repl_run_ex` applies it after
-  `call_compile` - engine config snapshots replace, so the one record
+  `call_compile` - engine configuration snapshots replace, so the one record
   owns proxies and built-in alike, `validate_tools`'s duplicate-name
   rule included.
 - **AGENTS.md** - read from the working directory, BOM stripped,

@@ -1,6 +1,6 @@
 # llmkit
 
-A single static-purpose executable for llm interaction from the shell and from other programs. One binary, ten commands:
+llmkit is one executable for llm interaction from the shell and from other programs. One binary, ten commands:
 
 | command | what it does |
 |---|---|
@@ -15,14 +15,19 @@ A single static-purpose executable for llm interaction from the shell and from o
 | `llmkit prettyprint <conversation.jsonl>` | renders a recorded conversation jsonl with the repl's typography (stdin without a file) |
 | `llmkit proxy <flags>` | a plain-http llm endpoint that forwards to one upstream and prints the passing conversation prettyprint-style |
 
-Written in C11. Talks to any openai-compatible endpoint (chat completions and responses apis) and any anthropic-compatible endpoint. Tools are mcp servers: `stdio`, `http` (streamable http) and `sse` (legacy) transports, in all current protocol revisions up to `2026-07-28`.
+llmkit is written in C11. It talks to any openai-compatible endpoint (chat completions and responses apis) and any anthropic-compatible endpoint. Tools are mcp (Model Context Protocol) servers. The transports are `stdio`, `http` (streamable http), and `sse` (legacy). All current protocol revisions up to `2026-07-28` are supported.
 
-`repl` is the easiest to use, `agent` give builtin tools to the `repl`, `call` is aimed at use in scripting, `runner` is the full package for applications interaction. Other utilities are provided for interaction with mcps and debugging.
+The `repl` command is the easiest to use. The `agent` command gives the builtin tools to the `repl`. The `call` command serves scripting. The `runner` command is the full interface for applications. The other commands serve interaction with mcps and debugging.
 
 ## Examples
 
-For talking to a model there is `llmkit repl`: the turns are typed, every line is one turn of one growing conversation.  
-The whole exchange renders as it happens - thinking italic, tool calls and their results bold, ascii rules framing each block - on terminals that support the typography, plain everywhere else. Ctrl-C stops the running turn without leaving (the session continues where the transcript left off) or clears the input line; a second Ctrl-C at a clear prompt exits 8, Ctrl-D exits cleanly. Piping stdin turns it into a scripted session with the same rendering, one turn per line.
+For talking to a model, use `llmkit repl`. You type the turns. Every line is one turn of one growing conversation.
+
+The exchange renders as it happens. Thinking is italic. Tool calls and their results are bold. Ascii rules frame each block. Terminals that support the typography show the styling. Plain terminals show the text only.
+
+Ctrl-C stops the running turn without leaving. The session continues where the transcript left off. At a filled input line, Ctrl-C clears the line. A second Ctrl-C at a clear prompt exits with code 8. Ctrl-D exits cleanly.
+
+If you pipe stdin, the session becomes scripted. The rendering stays the same. One line is one turn.
 
 ```sh
 $ llmkit repl --openai http://localhost:9931/v1 --model llama3.1
@@ -37,9 +42,13 @@ The user asks simple arithmetic.
 >
 ```
 
-Every separator line is stamped with the wall clock, and each turn that finishes its answer prints its timing: time to first token (prompt processing), thinking generation, response generation - plus the turn's token totals (input, output and their sum) when the endpoint reports usage.
+Every separator line is stamped with the wall clock. Each turn that finishes its answer prints its timing. The timing shows the time to first token (prompt processing), thinking generation, and response generation. It also shows the token totals of the turn (input, output, and their sum) when the endpoint reports usage.
 
-For work that needs hands there is `llmkit agent`: the same chat with the [built-in mcp tools](docs/builtin-mcp.md) attached - web search and fetch, file tools, process tools, skills - and the working directory's `AGENTS.md` injected after the system prompt. A `helper` tool rides along: a copy of the same agent - same system prompt, same tools minus itself - callable as `helper(prompt)`, delegation without the recursion. `--no-helper` leaves it out. `--conversation-store <file>` persists the conversation as jsonl and resumes it: an existing store replays in full before the first prompt, then the session continues where it left off.
+For work that needs tools, use `llmkit agent`. It is the same chat with the [built-in mcp tools](docs/builtin-mcp.md) attached. These tools are web search and fetch, file tools, process tools, and skills. The `AGENTS.md` file of the working directory is injected after the system prompt.
+
+A `helper` tool rides along. It is a copy of the same agent: same system prompt, same tools minus itself. You call it as `helper(prompt)`. This gives delegation without the recursion. `--no-helper` leaves it out.
+
+`--conversation-store <file>` persists the conversation as jsonl (one json object per line) and resumes it. An existing store replays in full before the first prompt. Then the session continues where it left off.
 
 ```sh
 $ llmkit agent --openai http://localhost:9931/v1 --model llama3.1 \
@@ -51,10 +60,10 @@ builtin.files_search {"path":".","regex":"FAIL"}
 [10:31:06] ---------------------------------------------------------------------
 ...
 ```
-`agent` is aimed at frugality, has no configuration file or automatic conversation memory, and target local llm users with very low token usage.
 
+The `agent` command aims at frugality. It has no configuration file and no automatic conversation memory. It targets local llm users with very low token usage.
 
-On the tool side of the house there is `llmkit mcp-repl`: a repl dedicated to one mcp server, the tool-debugging front-end. No model in the loop - the command line names one server (`--stdio`, `--http`, `--sse`), the connection's `tools/list` becomes the vocabulary, and every line is one direct call:
+On the tool side, there is `llmkit mcp-repl`. It is a repl dedicated to one mcp server, the tool-debugging front-end. No model is in the loop. The command line names one server (`--stdio`, `--http`, `--sse`). The `tools/list` reply of the connection becomes the vocabulary. Every line is one direct call:
 
 ```sh
 $ llmkit mcp-repl --stdio './calculator-mcp'
@@ -72,9 +81,11 @@ divide(float a, float b): divide a by b
 [10:31:09] 0.003s
 ```
 
-Arguments are json literals, bound positionally onto the tool's schema (`add(1, 1)` sends `{"a":1,"b":2}`; an integer literal is a json number, valid for a float parameter). Tab completes tool names from the listing, `tools` re-lists, `help` explains, `quit` or Ctrl-D ends (exit 0, Ctrl-C at a clear prompt exit 8). Tool errors, unknown tools and syntax mistakes render as `!`-lines and the session lives on.
+Arguments are json literals. They bind positionally onto the schema of the tool. `add(1, 1)` sends `{"a":1,"b":2}`. An integer literal is a json number, valid for a float parameter.
 
-For one-shot use from the shell there is `llmkit call`: flags in, the answer as plain text on stdout, thinking omitted, no records to write -
+Tab completes tool names from the listing. `tools` re-lists. `help` explains. `quit` or Ctrl-D ends the session with exit code 0. Ctrl-C at a clear prompt exits with code 8. Tool errors, unknown tools, and syntax mistakes render as `!`-lines. The session lives on.
+
+For one-shot use from the shell, there is `llmkit call`. Flags go in. The answer comes out as plain text on stdout. Thinking is omitted. There are no records to write.
 
 ```sh
 $ llmkit call --openai http://localhost:9931/v1 --model llama3.1 \
@@ -83,9 +94,9 @@ $ llmkit call --openai http://localhost:9931/v1 --model llama3.1 \
 I'm fine, thank you!
 ```
 
-`--prompt -` reads the prompt from stdin, so it pipes and captures:
+`--prompt -` reads the prompt from stdin. This makes pipes and captures possible:
 `ANSWER=$(llmkit call --openai "$API_BASE" --prompt - < input.txt)`.
-Anything past one prompt is `runner` territory.
+Anything past one prompt needs `runner`.
 
 ```sh
 { echo '{"type":"llm","endpoint_protocol":"openai","api_base":"http://localhost:9931/v1","model":"llama3.1","inference_options":{"max_tokens":1024}}'
@@ -100,24 +111,24 @@ stdout (one json object per line):
 {"type":"response","text":"Hello! How can I help you today?","partial":false,"finish_reason":"stop","usage":{...}}
 ```
 
-Tools: add a `tools` record before the `user` record -
+Tools: add a `tools` record before the `user` record.
 
 ```json
 {"type":"tools","tools":[{"type":"stdio","name":"fs","command_line":"npx -y @modelcontextprotocol/server-filesystem /tmp"}]}
 ```
 
-`llmkit call --mcp-proxy cfg.jsonl --terminal-tool fs.confirm` marks tools the same way from the command line; the answer is then the tool's text. `llmkit agent-as-tool` seeds honor the attribute too: the `invoke` reply is the terminal tool's answer.
+`llmkit call --mcp-proxy cfg.jsonl --terminal-tool fs.confirm` marks tools the same way from the command line. The answer is then the text of the tool. `llmkit agent-as-tool` seeds honor the attribute too. The `invoke` reply is the answer of the terminal tool.
 
-No external tool server at hand? `llmkit builtin-mcp` is one: fifteen generic-use tools (web search and fetch, file list/search/read/create/edit/delete/analyze, process exec/status/wait/send-signal, skills search and read) served from the same binary.
+No external tool server at hand? `llmkit builtin-mcp` is one. It serves fifteen generic-use tools from the same binary: web search and fetch, file list/search/read/create/edit/delete/analyze, process exec/status/wait/send-signal, skills search and read.
 ```sh
 llmkit mcp-repl --stdio 'llmkit builtin-mcp'
 ```
 
-See [docs/builtin-mcp.md](docs/builtin-mcp.md) for the tool contracts, response formats and the description editing spot.
+See [docs/builtin-mcp.md](docs/builtin-mcp.md) for the tool contracts, the response formats, and the description editing spot.
 
-A saved transcript reads back human again with `llmkit prettyprint`: the runner's jsonl in - a file argument or stdin - the repl's rendering out, every user block under its heavy rule, thinking italic, tool traffic bold, one usage line per turn that reports one. Nothing is sent anywhere; the file is only read and drawn.
+A saved transcript reads back human again with `llmkit prettyprint`. The runner's jsonl goes in, from a file argument or from stdin. The repl's rendering comes out. Every user block sits under its heavy rule. Thinking is italic. Tool traffic is bold. One usage line prints per turn that reports one. Nothing is sent anywhere. The file is only read and drawn.
 
-To watch a live conversation instead of a recorded one there is `llmkit proxy`: it listens on plain http, forwards every POST to one fixed llm endpoint and renders whatever passes - requests and responses, streaming included - with the same typography on stdout. Point any client's base url at it:
+To watch a live conversation instead of a recorded one, use `llmkit proxy`. It listens on plain http. It forwards every POST to one fixed llm endpoint. It renders whatever passes with the same typography on stdout. The traffic includes requests and responses, streaming included. Point the base url of any client at it:
 
 ```sh
 $ llmkit proxy --openai http://localhost:9931/v1
@@ -125,13 +136,13 @@ llmkit proxy: listening on http://127.0.0.1:8080 (plain tcp, no tls)
 llmkit proxy: forwarding to openai http://localhost:9931/v1/chat/completions
 ```
 
-The protocol flag names the language the upstream speaks (`--anthropic`, `--openai`, `--openai-responses`), so both directions parse: a request renders as the conversation it carries, a response renders live as it streams - partials, tool calls, thinking and the closing usage line, exactly the prettyprint view. The listening side is plain tcp only (no tls); the upstream may be https, curl carries that half. `--listen [host:]port` moves the endpoint, `--key` supplies auth the client did not send.
+The protocol flag names the language the upstream speaks (`--anthropic`, `--openai`, `--openai-responses`). Both directions parse. A request renders as the conversation it carries. A response renders live as it streams: partials, tool calls, thinking, and the closing usage line. This is exactly the prettyprint view. The listening side is plain tcp only, without tls. The upstream can be https. curl carries that half. `--listen [host:]port` moves the endpoint. `--key` supplies auth that the client did not send.
 
-Runnable examples for every command live in [examples/](examples/) - see [docs/records.md](docs/records.md) for the minimal and complete form of each record.
+Runnable examples for every command live in [examples/](examples/). See [docs/records.md](docs/records.md) for the minimal and complete form of each record.
 
 ## Command Line Reference
 
-`usage: llmkit <command> [args]` - the commands:
+`usage: llmkit <command> [args]`. The commands:
 
 | command | arguments |
 |---|---|
@@ -147,7 +158,7 @@ Runnable examples for every command live in [examples/](examples/) - see [docs/r
 | `llmkit help` | none: the usage text on stdout |
 | `llmkit version` | none: the version on stdout |
 
-`call` and `repl` share one hand-rolled flag parser (no getopt): flags in any order, the value is the next argv token, no `--flag=value` form, no short forms, no abbreviation. Exactly one protocol flag and the `api_base` positional are required; everything else is optional.
+The `call` and `repl` commands share one hand-rolled flag parser, without getopt. Flags go in any order. The value is the next argv token. There is no `--flag=value` form, no short form, no abbreviation. Exactly one protocol flag and the `api_base` positional are required. Everything else is optional.
 
 - `--anthropic` / `--openai` / `--openai-responses` - the endpoint protocol,
   exactly one of the three
@@ -156,31 +167,31 @@ Runnable examples for every command live in [examples/](examples/) - see [docs/r
 - `--key <token>` - the api key, once
 - `--model <name>` - the model name, once
 - `--max-tokens <n>` - positive integer, an inference knob, once
-- `--reasoning-effort <value>` - the reasoning effort, once; the value is
-  passed through unconstrained (providers differ: `high`, `medium`, `low`,
-  numbers, ...) - an unsupported value surfaces as the endpoint's own
-  `api_error`; under `--anthropic` the option is silently not sent
-- `--system-prompt <text>` - the system prompt, once; `repl` starts from
-  a bundled default prompt when the flag is absent, the flag's text
-  replaces it
-- `--prompt <text|->` - `call` only: the one prompt; `-` reads it from
-  stdin
-- `--header <name>=<value>` - extra http header; repeatable, a later
-  same-name flag replaces the earlier value
-- `--mcp-proxy <config.jsonl>` - repeatable; each config runs one
+- `--reasoning-effort <value>` - the reasoning effort, once. The value is
+  passed through unconstrained. Providers differ: `high`, `medium`, `low`,
+  numbers, and more. An unsupported value surfaces as the endpoint's own
+  `api_error`. Under `--anthropic`, the option is silently not sent.
+- `--system-prompt <text>` - the system prompt, once. `repl` starts from
+  a bundled default prompt when the flag is absent. The flag's text
+  replaces it.
+- `--prompt <text|->` - `call` only: the one prompt. `-` reads it from
+  stdin.
+- `--header <name>=<value>` - extra http header, repeatable. A later
+  same-name flag replaces the earlier value.
+- `--mcp-proxy <config.jsonl>` - repeatable. Each config file runs one
   `llmkit mcp-proxy <config>` child server, named after the file: basename
-  minus last extension, any extension
-- `--terminal-tool <server.tool>` - repeatable; marks tools terminal (the
-  answer is the terminal tool's text, exit 9) - the server prefix must
-  name a `--mcp-proxy` server of the same command line
+  minus last extension, any extension.
+- `--terminal-tool <server.tool>` - repeatable. Marks tools terminal. The
+  answer is the terminal tool's text and the exit code is 9. The server
+  prefix must name a `--mcp-proxy` server of the same command line.
 - `--verbose`, `--conversation-store <file>`, `--no-helper` - `agent`
   only: full tool traffic, a persistent jsonl conversation, and leaving
-  the `helper` subagent tool out
+  the `helper` subagent tool out.
 
-`mcp-repl` has its own three flags, exactly one transport required:
+`mcp-repl` has its own flags. Exactly one transport flag is required:
 
-- `--stdio <command>` - spawn the shell command line, json-rpc over the
-  child's stdio
+- `--stdio <command>` - spawn the shell command line. json-rpc runs over
+  the stdio of the child.
 - `--http <url>` - streamable http transport
 - `--sse <url>` - the legacy http+sse transport
 - `--protocol <revision>` - the mcp revision to speak, default
@@ -191,13 +202,14 @@ Runnable examples for every command live in [examples/](examples/) - see [docs/r
 `proxy` takes the endpoint on its protocol flag and serves plain http:
 
 - `--anthropic` / `--openai` / `--openai-responses` `<api_base>` - the
-  protocol the upstream speaks, exactly one; the value is the upstream
-  base url (requests route to its `<api_base>/messages`,
-  `<api_base>/chat/completions` or `<api_base>/responses`)
-- `--listen <host:port>` - the local endpoint, ipv4 names or numbers,
-  host may be empty (all interfaces); default `127.0.0.1:8080`, no tls
-- `--key <token>` - auth for the upstream when the client sent none
-  (`x-api-key` under `--anthropic`, `Authorization: Bearer` otherwise)
+  protocol the upstream speaks, exactly one. The value is the upstream
+  base url. Requests route to its `<api_base>/messages`,
+  `<api_base>/chat/completions`, or `<api_base>/responses`.
+- `--listen <host:port>` - the local endpoint, ipv4 names or numbers.
+  The host can be empty (all interfaces). The default is
+  `127.0.0.1:8080`, no tls.
+- `--key <token>` - auth for the upstream when the client sent none.
+  `x-api-key` under `--anthropic`, `Authorization: Bearer` otherwise.
 
 ## Building
 
@@ -207,37 +219,37 @@ Linux, a C11 compiler, plus:
 - **libcurl** (easy api, >= 7.80)
 - pthreads
 
-The line editor is [linenoise](https://github.com/antirez/linenoise),
-vendored in `src/vendor/linenoise` (patched onto llmkit's own tty layer,
-so the same editor runs in the windows console too - no package needed).
+The line editor is [linenoise](https://github.com/antirez/linenoise). It is vendored in `src/vendor/linenoise` and patched onto the tty layer of llmkit. The same editor runs in the windows console too. No package is needed.
 
 ```sh
 make          # -> ./llmkit
 make check    # builds and runs the selfcheck (no network needed)
 ```
 
-Windows build are done from Linux using msys2. See `tools/package.sh` for details.
+Windows builds are done from Linux using msys2. See `tools/package.sh` for details.
 
 ## behavior notes
 
-- Exit code 0 only when the conversation ended with a successful final
-  `response`; every fatal condition has its own exit code (see design
-  sec.13). Exit 9 is the terminal-tool ending: requested, not an error.
-- SIGINT is an orderly stop: buffered text is flushed as a trailing
-  partial record, running tools complete, a second SIGINT kills the
+- The exit code is 0 only when the conversation ended with a successful
+  final `response`. Every fatal condition has its own exit code (see
+  design sec.13). Exit 9 is the terminal-tool ending. It is requested,
+  not an error.
+- SIGINT is an orderly stop. Buffered text is flushed as a trailing
+  partial record. Running tools complete. A second SIGINT kills the
   process immediately.
 - Mid-conversation `llm` / `tools` / `options` / `system` changes are
   supported and apply at the next turn boundary.
-- Text only in this version; UTF-8 enforced everywhere; `\n` line endings.
+- Text only in this version. UTF-8 is enforced everywhere. Line endings
+  are `\n`.
 
 ## license
 
 Copyright (c) 2026 Daniele Guttuso
 
-Distributed under the **European Union Public Licence v1.2 (EUPL-1.2)** -
+Distributed under the European Union Public Licence v1.2 (EUPL-1.2),
 `SPDX-License-Identifier: EUPL-1.2`. The full license text is available at
 <https://joinup.ec.europa.eu/collection/eupl/eupl-text-eupl-12> and in the
-official translations published there. By EUPL sec.13 the work is also
-additionally distributable under later EUPL versions, and - where the
-license so provides - under the GPL-2.0 / GPL-3.0 / LGPL / AGPL / MPL /
-CeCILL compatible-list licenses.
+official translations published there. By EUPL sec.13, the work is also
+additionally distributable under later EUPL versions. Where the license
+so provides, it is also distributable under the GPL-2.0 / GPL-3.0 / LGPL /
+AGPL / MPL / CeCILL compatible-list licenses.

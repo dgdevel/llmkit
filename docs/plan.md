@@ -1,96 +1,23 @@
 # llmkit implementation plan
 
 Build order for [design.md](design.md), which implements
-[requirements.md](requirements.md). Bottom-up: pure parsing and
-serialization first - cheapest to test, everything depends on them - then
-the wire clients, then the engine, then the subprocess and network edge
-features, and the two extra entry points last: they are thin compositions
-of the finished core. Every phase lands with its tests, so `make check`
-grows with the build instead of arriving at the end; design sec.15's selfcheck
-categories map onto the phases one to one.
+[requirements.md](requirements.md). The build goes bottom-up. Pure parsing and serialization come first, because they are cheapest to test and everything depends on them. Then come the wire clients, the engine, and the subprocess and network edge features. The two extra entry points come last, because they are thin compositions of the finished core. Every phase lands with its tests. `make check` grows with the build instead of arriving at the end. The selfcheck categories of design sec.15 map onto the phases one to one.
 
-1. **scaffold** - makefile, subcommand dispatch, help/version, exit code
-   plumbing. Dependencies (`libcjson`, `libcurl`) verified present.
-   Test: the binary runs; usage errors exit 1.
-2. **foundations** - byte buffers (the append-only prefix buffer among
-   them), utf-8 validation, the input pipeline: byte rules, json parsing,
-   record validation, dispatch. Tests: byte-level vectors - bom, cr
-   dropping, invalid utf-8, malformed json, unknown type, missing fields,
-   duplicate server name.
-3. **sse parser** - the one shared event parser behind every wire dialect.
-   Tests: fixed vectors for both openai apis, anthropic and mcp, split at
-   awkward byte boundaries.
-4. **serialization** - record->wire mapping per protocol, deterministic body
-   order, the prefix buffer, anthropic cache_control overlay. Tests: the
-   prefix invariant directly - turn N's message bytes byte-compared against
-   turn N-1's request, across protocols, with tools, steering and an llm
-   switch; sampling-only changes leave the prefix untouched.
-5. **endpoint clients** - the two wire modules on curl, streaming and
-   non-streaming. Tests: stream parity (the same scripted response both
-   ways -> identical final records), finish_reason normalization,
-   api_error/http_error mapping, the timeout knobs.
-6. **platform + engine** - threads, queues, signals, spawn; the state
-   machine and turn loop: flush consumption, steering, the drop rule,
-   pre-send validations, stop conditions, exit codes. Tests: the state
-   machine against an in-process fake endpoint - the flush / steering /
-   no-op flush / drop rule matrix, max_tool_rounds, the anthropic
-   validations - plus the sigint scenarios: mid stream, mid tool, before
-   start, double sigint.
-7. **mcp client** - stdio, streamable http and legacy sse transports, the
-   v1 and v2 flows, tools/call, timeouts, `required` semantics. Tests:
-   scripted fake servers as child processes.
-8. **mcp-proxy** - config pipeline, expose/hide resolution, schema rewrite,
-   the stdio server loop. Tests: selection and validation rules, rewrite
-   determinism, inverse argument mapping on forwarding.
-9. **agent-as-tool** - seed bootstrap, the invoke loop over the engine,
-   retain_context in both modes with rollback. Tests: seed validation,
-   reply shape, rollback on fatal error.
-10. **endgame** - full `make check`, the exit code table verified end to
-    end, manual smoke pass of the documented flows: piped one-shot input,
-    continuation replay, steering from a kept-open stdin.
+1. scaffold: makefile, subcommand dispatch, help/version, exit code plumbing. The dependencies (`libcjson`, `libcurl`) are verified present. Test: the binary runs. Usage errors exit 1.
+2. foundations: byte buffers (the append-only prefix buffer among them), utf-8 validation, and the input pipeline: byte rules, json parsing, record validation, dispatch. Tests: byte-level vectors. They cover bom, cr dropping, invalid utf-8, malformed json, unknown type, missing fields, and duplicate server name.
+3. sse parser: the one shared event parser behind every wire dialect. Tests: fixed vectors for both openai apis, anthropic and mcp, split at awkward byte boundaries.
+4. serialization: record->wire mapping per protocol, deterministic body order, the prefix buffer, and the anthropic cache_control overlay. Tests: the prefix invariant directly. Turn N's message bytes are byte-compared against turn N-1's request, across protocols, with tools, steering, and an llm switch. Sampling-only changes leave the prefix untouched.
+5. endpoint clients: the two wire modules on curl, streaming and non-streaming. Tests: stream parity (the same scripted response both ways gives identical final records), finish_reason normalization, api_error/http_error mapping, and the timeout knobs.
+6. platform + engine: threads, queues, signals, and spawn. Then the state machine and turn loop: flush consumption, steering, the drop rule, pre-send validations, stop conditions, and exit codes. Tests: the state machine against an in-process fake endpoint. The matrix covers flush, steering, no-op flush, and the drop rule, plus max_tool_rounds and the anthropic validations. The sigint scenarios cover mid stream, mid tool, before start, and double sigint.
+7. mcp client: stdio, streamable http, and legacy sse transports. It covers the v1 and v2 flows, tools/call, timeouts, and `required` semantics. Tests: scripted fake servers as child processes.
+8. mcp-proxy: config pipeline, expose/hide resolution, schema rewrite, and the stdio server loop. Tests: the selection and validation rules, rewrite determinism, and the inverse argument mapping on forwarding.
+9. agent-as-tool: seed bootstrap, the invoke loop over the engine, and retain_context in both modes with rollback. Tests: seed validation, reply shape, and rollback on fatal error.
+10. endgame: full `make check`, the exit code table verified end to end, and a manual smoke pass of the documented flows: piped one-shot input, continuation replay, and steering from a kept-open stdin.
 
-Post-freeze increments, same discipline - each lands with its tests and
-rides on the finished core:
+Post-freeze increments follow the same discipline. Each lands with its tests and rides on the finished core:
 
-11. **call** - the argv->record front-end of requirements sec.11 / design sec.11:
-    flag parser, compiler to records over the agent seed path, plain-text
-    sink with stderr error lines, `--mcp-proxy` self-spawn with shell
-    quoting, `--prompt -` stdin read. Tests: compilation vectors through
-    the serialization seam, usage-error exits, one fake-endpoint
-    end-to-end per protocol (text out, `thinking` dropped, trailing
-    newline, exit 0); `llmkit help` and the README command table updated
-    in the same change.
-12. **terminal tools** - requirements sec.2.7, sec.8 `terminal_tools`, sec.11
-    `--terminal-tool`; design sec.4 stop condition, sec.6 attribute
-    handling, sec.8 sigint precedence, sec.9 reply, sec.11 flag and sink,
-    sec.13 exit 9: shape validation in `validate_tools`, name resolution
-    and the per-server terminal set in `mcp_reconcile`, the engine stop
-    (batch suspension, drop rule, no error record, exit 9), the agent
-    invoke terminal reply and its retention under `retain_context`, the
-    call flag, its folding into the compiled `tools` record and the sink
-    rule. Tests: engine vectors through the fake endpoint and the
-    tool-exec seam (terminal ends exit 9, batch suspension, failed
-    terminal tool still ends, steering and unflushed records dropped,
-    sigint during the terminal tool exits 9 not 8), validation vectors
-    (non-string entry, name missing from a connected listing), `call`
-    compilation vectors and the usage error, agent reply shape, exit
-    code 9 end to end.
-13. **repl** - requirements sec.12, the interactive chat front-end
-    (design sec.12): the `call` flag compiler minus `--prompt`
-    plus the compiled `options` record (`stream_interval` 0), the session
-    loop - one `user` record per submitted input, engine run to turn end,
-    prompt again - and the display sink: ascii separator rules, bold and
-    italic typography gated on terminal capability with per-attribute
-    fallback, thinking and tool traffic rendered, sigint abort followed
-    by continue over the continuation rules, the two-stage prompt rule
-    (clear typed input, then exit 8), the repl exit codes. Tests:
-    compilation vectors (options record, `--prompt` usage error),
-    scripted stdin sessions against the fake endpoint - multi-turn,
-    thinking and tool rendering, empty input, interrupt then continue,
-    the prompt clear and clear-again stages, terminal ending exit 9,
-    EOF exit codes - and the styling fallback off-tty; `llmkit help`,
-    the README command table and examples updated in the same change.
+11. call: the argv->record front-end of requirements sec.11 and design sec.11. It covers the flag parser, the compiler to records over the agent seed path, the plain-text sink with stderr error lines, the `--mcp-proxy` self-spawn with shell quoting, and the `--prompt -` stdin read. Tests: compilation vectors through the serialization seam, usage-error exits, and one fake-endpoint end-to-end per protocol (text out, `thinking` dropped, trailing newline, exit 0). `llmkit help` and the README command table are updated in the same change.
+12. terminal tools: requirements sec.2.7, sec.8 `terminal_tools`, sec.11 `--terminal-tool`. The design sections are sec.4 stop condition, sec.6 attribute handling, sec.8 sigint precedence, sec.9 reply, sec.11 flag and sink, and sec.13 exit 9. The work: shape validation in `validate_tools`, name resolution and the per-server terminal set in `mcp_reconcile`, the engine stop (batch suspension, drop rule, no error record, exit 9), the agent invoke terminal reply and its retention under `retain_context`, the call flag, its folding into the compiled `tools` record, and the sink rule. Tests: engine vectors through the fake endpoint and the tool-exec seam. A terminal end exits 9. The batch suspends. A failed terminal tool still ends the run. Steering and unflushed records drop. Sigint during the terminal tool exits 9, not 8. Validation vectors cover a non-string entry and a name missing from a connected listing. The `call` compilation vectors cover the usage error. Agent reply shape and exit code 9 are verified end to end.
+13. repl: requirements sec.12, the interactive chat front-end (design sec.12). It is the `call` flag compiler minus `--prompt`, plus the compiled `options` record (`stream_interval` 0). The session loop writes one `user` record per submitted input, runs the engine to turn end, and prompts again. The display sink covers the ascii separator rules, the bold and italic typography gated on terminal capability with per-attribute fallback, rendered thinking and tool traffic, sigint abort followed by continue over the continuation rules, the two-stage prompt rule (clear typed input, then exit 8), and the repl exit codes. Tests: compilation vectors (options record, `--prompt` usage error) and scripted stdin sessions against the fake endpoint. The sessions cover multi-turn, thinking and tool rendering, empty input, interrupt then continue, the prompt clear and clear-again stages, terminal ending exit 9, and EOF exit codes. The styling fallback is tested off-tty. `llmkit help`, the README command table, and the examples are updated in the same change.
 
-Out of scope per design sec.15: network integration tests in-tree; a
-`test/live.sh` against a real endpoint appears when the first endpoint bug
-shows up.
+Out of scope per design sec.15: network integration tests in-tree. A `test/live.sh` against a real endpoint appears when the first endpoint bug shows up.

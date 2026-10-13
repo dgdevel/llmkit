@@ -68,9 +68,9 @@ See [jsonl record types](#8-jsonl-record-types) for the input specs.
   [steering](#24-steering).
 
 Continuation rule: the input with the output appended forms the new input for
-a continuation, with one replacement: every `flush` record of the old input is
+a continuation, with one replacement. Every `flush` record of the old input is
 replaced in place by the `start` marker the runner emitted for it. A replayed
-`flush` would start the conversation when it is not meant to; a replayed
+A replayed `flush` starts the conversation when it is not meant to. A replayed
 `start` is inert.
 
 Example without steering:
@@ -276,7 +276,7 @@ order, paired by `id`.
 Replay constraints:
 
 - anthropic requires the first message to have role `user`; a transcript that
-  would start otherwise is rejected with an `error` record, code
+  starts otherwise is rejected with an `error` record, code
   `invalid_record`, before any request is sent - at conversation start and
   again whenever a request is built after a mid conversation `llm` switch to
   anthropic.
@@ -314,7 +314,7 @@ Rules *(proposed)*:
 
 - `stream` defaults to true; when false the endpoint is called without
   streaming and the turn emits final records only, no partials - the same
-  final records a streamed turn of the same response would emit.
+  final records a streamed turn of the same response emits.
 - Unknown option names produce an `error` record with code `invalid_record`,
   fatal. Catches typos.
 - Options that exist in the set but not for the current `endpoint_protocol`
@@ -330,8 +330,8 @@ Rules *(proposed)*:
 
 ## 5. duplicate and change semantics
 
-Config records are snapshots of runner state, never part of the transcript
-sent to the endpoint:
+Configuration records are snapshots of runner state, never part of the
+transcript sent to the endpoint:
 
 - `llm`: a new `llm` record replaces the previous one. From the next turn on,
   the whole transcript so far is sent to the new endpoint. Records already
@@ -356,8 +356,8 @@ Transcript records:
   `thinking` records when building requests, since signatures are only valid
   for the model that produced them.
 
-Change timing: config record changes apply at the first turn boundary at or
-after the record.
+Change timing: configuration record changes apply at the first turn boundary
+at or after the record.
 
 Validation: unknown `type`, malformed json line, or missing required fields
 produce an `error` record with code `invalid_record`, fatal.
@@ -459,7 +459,7 @@ Common fields:
 | `type` | yes | `stdio`, `http` or `sse` |
 | `name` | yes | unique name of the mcp server, uniqueness enforced (`invalid_record`, fatal); used as prefix for the tool names exposed to the model (`name.tool_name`) |
 | `protocol` | no | mcp protocol revision, `2025-11-25` (v1) by default; any published v1 revision from `2024-11-05` to `2025-11-25` is accepted, and `2026-07-28` (v2) is supported; a server answering with a revision the runner does not support is a `connect_failed`; v2 is stateless, no `initialize` handshake - the per revision flow is pinned in the design |
-| `required` | no | boolean, signals if a failure to connect and offer the tool to the model is a deal breaker and should stop processing the conversation instead |
+| `required` | no | boolean, signals if a failure to connect and offer the tool to the model is a deal breaker and must stop processing the conversation instead |
 | `terminal_tools` | no | list of the server's tool names - as the server lists them, the part after the server prefix of the exposed `name.tool_name` - whose selection and use ends the conversation, see [terminal tools](#27-terminal-tools); order is irrelevant and a repeated name is not an error; a non-string entry, or a name a connected server does not list, is `invalid_record`, fatal - catches typos; a server that failed to connect is not validated, its tools are not offered to the model anyway; a `tools` record change revalidates at the boundary it applies, like the connection rules *(proposed)* |
 
 Fields per `type`:
@@ -493,7 +493,7 @@ A record holding execution parameters for the runner.
 
 | field | description |
 |---|---|
-| `max_tool_rounds` | maximum number of llm round trips before the conversation is stopped with a fatal `max_tool_rounds_exceeded` error record; a turn counts as one round trip however many `tool_request` records it carries; the turn that would exceed the limit is not started; absent means no limit |
+| `max_tool_rounds` | maximum number of llm round trips before the conversation is stopped with a fatal `max_tool_rounds_exceeded` error record; a turn counts as one round trip however many `tool_request` records it carries; the turn that exceeds the limit is not started; absent means no limit |
 | `tool_call_timeout` | timeout in seconds for a single tool call; on expiry the call is aborted and answered with a `tool_response`, `is_error` true, plus a non-fatal `tool_timeout` error record *(proposed)*; absent means no timeout |
 | `stream_interval` | seconds between emitted partial records during streaming, default 1, fractional values allowed (e.g. 0.05); chunks received within the interval are merged into one record; 0 disables grouping and every chunk becomes its own partial record; partial records only exist while `stream` is true |
 | `llm_connect_timeout` | seconds allowed to establish the connection to the llm endpoint, default 5; expiry surfaces as a fatal `connect_failed` error record |
@@ -705,7 +705,7 @@ catalog states otherwise:
 - Duplicate server `name` in a `tools` record (fatal).
 - `terminal_tools` entry that is not a string, or a named tool a connected
   server does not list (fatal).
-- Transcript that would start with a non-user message under anthropic
+- Transcript that starts with a non-user message under anthropic
   (fatal).
 - Unsupported `header` `version` (fatal).
 - Bare `flush`, no new records since the previous one (non-fatal, no-op).
@@ -1133,7 +1133,7 @@ file2.log.                                     <- plain
   runner's process, continues: the prompt returns, and the next
   submitted input continues the conversation as a continuation - the
   stopped turn's records included, the unsigned thinking dropped per the
-  replay rules, exactly as a replayed transcript would.
+  replay rules, exactly like a replayed transcript.
 - A second SIGINT while the orderly stop is still running terminates the
   process immediately: the runner's rule, exit 8, nothing further
   rendered.
@@ -1313,7 +1313,7 @@ tool response block, partials of one block appending under its single
 separator, system prompts and thinking italic, tool traffic bold,
 errors as `!`-lines, an empty block nothing. A `system` record renders
 one italic block per record - the caller's instructions, its content
-text blocks joined with newline. The remaining config and control
+text blocks joined with newline. The remaining configuration and control
 records render nothing. The
 timestamp of each separator and summary line is the moment it is
 printed - a transcript carries no clocks, so the repl's timing line is
@@ -1511,7 +1511,7 @@ lives in memory and dies with the process. With it:
   `tool_request`, `tool_response` and `error` record, streaming
   partials included (a streamed block exists whole only as partial
   chunks plus its empty-text final; the sequence is what folds back).
-  Config and control records are not conversation and never stored.
+  Configuration and control records are not conversation and never stored.
   The store is append-only during a session, flushed per line.
 - **resume** - the session starts by reading the store, when the file
   exists: the records fold into the new transcript (the conversation
@@ -1527,8 +1527,8 @@ lives in memory and dies with the process. With it:
   cannot be opened for reading is a fresh conversation (no file) or
   `! io_error`, exit 7 (anything else); one that cannot be opened for
   appending is `! io_error`, exit 7. A write failure during the session
-  is noted and rendered at its end (`! io_error`, exit 7 when the
-  session would otherwise exit 0); the session itself is not cut.
+  is noted and rendered at its end (`! io_error`). This exit code replaces an
+  otherwise clean exit 0. The session itself is not cut.
 - **what a resume loses** - an interrupted turn's trailing partial is
   stored and shown on replay, but unsigned thinking rides the same
   rules as always; timing lines are display, not records, and are not
