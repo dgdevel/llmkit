@@ -630,8 +630,9 @@ int repl_run_ex(const call_cfg_t *c, const repl_opts_t *o, int in_fd,
                      "%shelper", *strip ? " " : "");
         if (*strip) dspy_brief_strip(&sink.d, strip);
     }
-    /* agent's quiet display, --verbose restores the full traffic: long
-       string arguments render elided, thinking collapses to one line */
+    /* agent's quiet display, --verbose restores the full traffic: the
+       trim list's tools render long string arguments elided, thinking
+       collapses to one line */
     sink.d.trim_args = o->trim_args;
     sink.quiet_think = o->quiet_think;
 

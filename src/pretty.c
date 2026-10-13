@@ -126,11 +126,39 @@ static bool dspy_brief_match(const dspy_t *s, const char *tool) {
     return false;
 }
 
+/* the tool name is on the trim list; entries name tools whole
+   (helper.prompt) or bare, matching the exposed name after its last
+   dot (builtin.file_create) */
+static bool dspy_trim_match(const char *tool) {
+    if (!tool) return false;
+    for (int pass = 0; pass < 2; pass++) {
+        const char *name = tool;
+        if (pass) {
+            const char *dot = strrchr(tool, '.');
+            if (!dot || !dot[1]) break;
+            name = dot + 1;
+        }
+        size_t tl = strlen(name);
+        const char *p = DSPY_TRIM_TOOLS;
+        while (p && *p) {
+            while (*p == ' ') p++;
+            if (!*p) break;
+            const char *q = strchr(p, ' ');
+            size_t nl = q ? (size_t)(q - p) : strlen(p);
+            if (nl == tl && !memcmp(p, name, tl)) return true;
+            p = q;
+        }
+    }
+    return false;
+}
+
 /* the tool traffic arms both record dispatchers share: the tool name
    with its arguments tree, and the response text, bold */
 void dspy_tool_request(dspy_t *s, const cJSON *rec) {
     s->cur = -1;
     const char *tool = rec_str(rec, "tool");
+    const char *full = tool; /* pre-strip: the trim list names the
+                                exposed form, prefix included */
     if (tool && s->brief_strip) { /* agent display: name only; the strip
                                      list is space-separated prefixes, the
                                      first match strips its own dot */
@@ -153,8 +181,12 @@ void dspy_tool_request(dspy_t *s, const cJSON *rec) {
     const cJSON *args = cJSON_GetObjectItemCaseSensitive(rec, "arguments");
     if (cJSON_IsObject(args)) {
         if (line.len) buf_append_byte(&line, ' ');
-        /* the agent's quiet display trims the long string arguments */
-        if (s->trim_args) buf_append_tree_trim(&line, args);
+        /* the agent's quiet display trims the long string arguments -
+           the trim list names the tools whose big strings are noise
+           (file bodies, the helper's prompt); everything else renders
+           whole, long or not */
+        if (s->trim_args && dspy_trim_match(full))
+            buf_append_tree_trim(&line, args);
         else buf_append_tree(&line, args);
     }
     if (line.len) s->sep_pending = true; /* empty renders nothing */

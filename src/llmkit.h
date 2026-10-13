@@ -99,13 +99,14 @@ void ptr_push(void ***v, size_t *n, size_t *cap, void *item);
 /* append a JSON-encoded string literal (with quotes) */
 void buf_append_jstr(buf_t *b, const char *s);
 /* append a JSON string literal of s's first head and last tail bytes
-   around [...] as one elided value (agent's trimmed tool arguments) */
+   around [...] as one elided value (the trim list's tool arguments) */
 void buf_append_jstr_headtail(buf_t *b, const char *s, size_t head,
                               size_t tail);
 /* append the serialization of a cJSON tree (unformatted) */
 void buf_append_tree(buf_t *b, const cJSON *t);
 /* the same, but string values longer than twenty bytes render elided -
-   their first and last ten around [...] (agent display only) */
+   their first and last ten around [...] (agent display only, the trim
+   list's tools) */
 void buf_append_tree_trim(buf_t *b, const cJSON *t);
 /* append a JSON number from a double, cJSON-style (deterministic) */
 void buf_append_jnum(buf_t *b, double d);
@@ -874,7 +875,8 @@ typedef struct repl_opts {
     bool quiet_think;           /* thinking collapses to one `thinking...`
                                    line per turn; the agent's default,
                                    --verbose renders it whole */
-    bool trim_args;             /* long string arguments render elided on
+    bool trim_args;             /* the trim list's tools (DSPY_TRIM_TOOLS)
+                                   render long string arguments elided on
                                    the request lines; the agent's quiet
                                    default, --verbose restores them */
     bool helper_tool;           /* agent: attach the `helper` subagent -
@@ -934,9 +936,10 @@ typedef struct dspy {
     bool last_nl;     /* last written byte was \n */
     int cur;          /* open streamed block: R_THINKING/R_RESPONSE, -1 */
     bool sep_pending; /* a block opened, its rule not yet drawn (lazy) */
-    bool trim_args;   /* tool request lines render their string arguments
-                         trimmed: first and last ten characters around
-                         [...] when longer than twenty (agent display) */
+    bool trim_args;   /* tool request lines on the trim list render
+                         their string arguments elided: first and last
+                         ten characters around [...] when longer than
+                         twenty (agent display) */
     /* brief tool mode (llmkit agent): the collapsed tools' name list
        (NULL = none), and the in-flight brief replies - a queue, one entry
        per unanswered request: parallel tool calls answer in request order
@@ -962,6 +965,10 @@ void dspy_tool_request(dspy_t *s, const cJSON *rec);
 void dspy_tool_response(dspy_t *s, const cJSON *rec);
 /* agent's default: these tools collapse to one timing summary line */
 #define DSPY_BRIEF_TOOLS "web_fetch files_search file_read skills_read"
+/* agent's quiet default: these tools' long string arguments render
+   elided (file bodies, the helper's whole-task prompt); the rest stay
+   whole, long or not - their length is information */
+#define DSPY_TRIM_TOOLS "file_edit file_create helper.prompt"
 void dspy_brief_tools(dspy_t *s, const char *names /* NULL = full output */);
 /* the request line renders `<prefix>.<tool>` as `<tool>` for each
    space-separated prefix (the agent surface's bundled server and its

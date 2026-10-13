@@ -3946,10 +3946,12 @@ static void test_agent(void) {
         }
     }
 
-    /* ---- quiet display defaults: trimmed arguments, one thinking
-       line; --verbose restores the full traffic ---- */
+    /* ---- quiet display defaults: the trim list's tools elide their
+       long string arguments, one thinking line; --verbose restores the
+       full traffic ---- */
     {
-        /* 40 content bytes: head and tail ten around the elision */
+        /* 40 content bytes: head and tail ten around the elision; the
+           unlisted tool keeps its long argument whole */
         fturn_t turns[] = {
             { .recs = (const char *[]){
                   "{\"type\":\"tool_request\",\"tool\":\"builtin."
@@ -3957,6 +3959,16 @@ static void test_agent(void) {
                   "\"content\":\"0123456789abcdefghij...wxyz9876543210\","
                   "\"overwrite\":false},\"id\":\"t1\"}"},
               .nrecs = 1, .kind = TURN_TOOLS, .abort_after = -1 },
+            { .recs = (const char *[]){
+                  "{\"type\":\"tool_request\",\"tool\":\"builtin."
+                  "web_search\",\"arguments\":{\"keywords\":"
+                  "\"0123456789abcdefghij...wxyz9876543210\"},"
+                  "\"id\":\"t2\"}",
+                  "{\"type\":\"tool_request\",\"tool\":\"helper.prompt\","
+                  "\"arguments\":{\"prompt\":\"plan: "
+                  "0123456789abcdefghij...wxyz9876543210\"},"
+                  "\"id\":\"t3\"}"},
+              .nrecs = 2, .kind = TURN_TOOLS, .abort_after = -1 },
             { .recs = (const char *[]){
                   "{\"type\":\"thinking\",\"text\":\"secret plan\","
                   "\"partial\":true}",
@@ -3967,8 +3979,12 @@ static void test_agent(void) {
               .nrecs = 3, .kind = TURN_FINAL, .abort_after = -1 },
         };
         ftool_t ftools[] = { { .tool = "builtin.file_create",
+                               .text = "ok", .rc = 0 },
+                             { .tool = "builtin.web_search",
+                               .text = "ok", .rc = 0 },
+                             { .tool = "helper.prompt",
                                .text = "ok", .rc = 0 } };
-        g_ftools = (ftool_script_t){ ftools, 1, 0 };
+        g_ftools = (ftool_script_t){ ftools, 3, 0 };
 
         /* the agent's quiet default (cmd_agent_repl's opts, quiet both) */
         repl_opts_t quiet = { .default_prompt = prompt_system_prompts_agent,
@@ -3976,7 +3992,7 @@ static void test_agent(void) {
                               .agents_md = true,
                               .quiet_think = true,
                               .trim_args = true };
-        g_factory_wire = fwire_new(turns, 2);
+        g_factory_wire = fwire_new(turns, 3);
         repl_cfg(&c, PROTO_OPENAI);
         repl_out_t r = repl_session_opt_ft(&c, &quiet, "q\n", 2);
         check(r.rc == EXIT_OK, "agent: quiet session exits 0");
@@ -3985,11 +4001,21 @@ static void test_agent(void) {
         check(strstr(r.ob, "\"content\":\"0123456789[...]9876543210\"") !=
                   NULL,
               "agent: quiet trims the long string argument");
-        check(strstr(r.ob, "0123456789abcdefghij") == NULL,
-              "agent: quiet hides the whole argument");
+        check(strstr(r.ob, "\"content\":\"0123456789abcdefghij") == NULL,
+              "agent: quiet hides the file_create body");
         check(strstr(r.ob, "\"path\":\"x.txt\"") != NULL &&
                   strstr(r.ob, "\"overwrite\":false") != NULL,
               "agent: quiet keeps the short arguments whole");
+        /* the unlisted tool keeps its long argument whole - its length
+           is information; helper.prompt (dotted, whole-name match)
+           trims like the file tools */
+        check(strstr(r.ob, "\"keywords\":"
+                           "\"0123456789abcdefghij...wxyz9876543210\"") !=
+                  NULL,
+              "agent: quiet keeps unlisted tools' long arguments whole");
+        check(strstr(r.ob, "\"prompt\":\"plan: 0123[...]9876543210\"") !=
+                  NULL,
+              "agent: quiet trims the helper prompt argument");
         /* the thinking text never renders, one line stands for it */
         check(strstr(r.ob, "secret plan") == NULL,
               "agent: quiet hides the thinking text");
@@ -4003,7 +4029,8 @@ static void test_agent(void) {
                              .builtin_mcp = true,
                              .agents_md = true,
                              .full_tools = true };
-        g_factory_wire = fwire_new(turns, 2);
+        g_ftools.pos = 0; /* rerun the same script */
+        g_factory_wire = fwire_new(turns, 3);
         repl_cfg(&c, PROTO_OPENAI);
         r = repl_session_opt_ft(&c, &loud, "q\n", 2);
         check(r.rc == EXIT_OK, "agent: loud session exits 0");
