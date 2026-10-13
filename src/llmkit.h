@@ -968,7 +968,7 @@ void dspy_tool_response(dspy_t *s, const cJSON *rec);
 /* agent's quiet default: these tools' long string arguments render
    elided (file bodies, the helper's whole-task prompt); the rest stay
    whole, long or not - their length is information */
-#define DSPY_TRIM_TOOLS "file_edit file_create helper.prompt"
+#define DSPY_TRIM_TOOLS "file_edit file_create helper"
 void dspy_brief_tools(dspy_t *s, const char *names /* NULL = full output */);
 /* the request line renders `<prefix>.<tool>` as `<tool>` for each
    space-separated prefix (the agent surface's bundled server and its

@@ -1150,6 +1150,29 @@ static const char *FAKE_MCP_PY =
     "        print(json.dumps({'jsonrpc':'2.0','id':rid,'error':{'code':"
     "-32601,'message':'nope'}}), flush=True)\n";
 
+static const char *FAKE_HELPER_MCP_PY =
+    "import sys, json\n"
+    "for line in sys.stdin:\n"
+    "    line = line.strip()\n"
+    "    if not line: continue\n"
+    "    m = json.loads(line)\n"
+    "    method = m.get('method')\n"
+    "    rid = m.get('id')\n"
+    "    if method == 'initialize':\n"
+    "        print(json.dumps({'jsonrpc':'2.0','id':rid,'result':"
+    "{'protocolVersion':m['params']['protocolVersion'],'capabilities':{},"
+    "'serverInfo':{'name':'fake-helper','version':'1'}}}), flush=True)\n"
+    "    elif method == 'tools/list':\n"
+    "        print(json.dumps({'jsonrpc':'2.0','id':rid,'result':{'tools':"
+    "[{'name':'helper','description':'the helper','inputSchema':{'type':"
+    "'object','properties':{'text':{'type':'string'}},"
+    "'required':['text']}}]}}), flush=True)\n"
+    "    elif method == 'tools/call':\n"
+    "        a = m['params'].get('arguments',{})\n"
+    "        print(json.dumps({'jsonrpc':'2.0','id':rid,'result':"
+    "{'content':[{'type':'text','text':'helper: '+a.get('text','')}]}}), "
+    "flush=True)\n";
+
 static void write_file(const char *path, const char *content) {
     FILE *f = fopen(path, "w");
     fwrite(content, 1, strlen(content), f);
@@ -1169,17 +1192,23 @@ static void slurp_file(const char *path, char *got, size_t cap) {
 
 static void test_mcp_stdio(void) {
     write_file("/tmp/llmkit-test-fake-mcp.py", FAKE_MCP_PY);
+    write_file("/tmp/llmkit-test-fake-helper-mcp.py", FAKE_HELPER_MCP_PY);
     cap_t cap = { 0 };
     engine_t *e = engine_new(cap_fn, &cap);
     char tools[512];
     snprintf(tools, sizeof tools,
              "{\"type\":\"tools\",\"tools\":[{\"type\":\"stdio\",\"name\":\"srv\","
-             "\"command_line\":\"python3 /tmp/llmkit-test-fake-mcp.py\"}]}");
+             "\"command_line\":\"python3 /tmp/llmkit-test-fake-mcp.py\"},"
+             "{\"type\":\"stdio\",\"name\":\"helper\","
+             "\"command_line\":\"python3 /tmp/llmkit-test-fake-helper-mcp.py\"}]}");
     cJSON *trec = cJSON_Parse(tools);
     check(mcp_reconcile((mcp_mgr_t *)e->mcp, e, trec) == 0, "mcp connect ok");
     const tool_listing_t *tl = mcp_listing((mcp_mgr_t *)e->mcp);
-    check(tl->n == 2, "mcp listing has two tools");
+    check(tl->n == 3, "mcp listing has three tools");
     check_str(tl->v[0].exposed_name, "srv.echo", "exposed name is prefixed");
+    /* the helper server flattens: bare `helper`, no server prefix */
+    check_str(tl->v[2].exposed_name, "helper",
+              "the helper tool flattens to a bare name");
     char *snap = cJSON_PrintUnformatted(tl->v[0].tool);
     check(snap && strstr(snap, "echo text") != NULL,
           "listing snapshot carries the description");
@@ -1194,6 +1223,15 @@ static void test_mcp_stdio(void) {
                       err, sizeof err, 5);
     check(rc == 0 && !is_error, "echo call ok");
     check_str(out.data ? out.data : "", "echo: hi", "echo text round trip");
+    buf_clear(&out);
+    cJSON_Delete(args);
+
+    args = cJSON_Parse("{\"text\":\"hi\"}");
+    rc = mcp_call((mcp_mgr_t *)e->mcp, "helper", args, &out, &is_error, err,
+                  sizeof err, 5);
+    check(rc == 0 && !is_error, "the flattened helper call routes");
+    check_str(out.data ? out.data : "", "helper: hi",
+              "the flattened helper routes to the helper server");
     buf_clear(&out);
     cJSON_Delete(args);
 
@@ -4090,7 +4128,7 @@ static void test_agent(void) {
                   "web_search\",\"arguments\":{\"keywords\":"
                   "\"0123456789abcdefghij...wxyz9876543210\"},"
                   "\"id\":\"t2\"}",
-                  "{\"type\":\"tool_request\",\"tool\":\"helper.prompt\","
+                  "{\"type\":\"tool_request\",\"tool\":\"helper\","
                   "\"arguments\":{\"prompt\":\"plan: "
                   "0123456789abcdefghij...wxyz9876543210\"},"
                   "\"id\":\"t3\"}"},
@@ -4108,7 +4146,7 @@ static void test_agent(void) {
                                .text = "ok", .rc = 0 },
                              { .tool = "builtin.web_search",
                                .text = "ok", .rc = 0 },
-                             { .tool = "helper.prompt",
+                             { .tool = "helper",
                                .text = "ok", .rc = 0 } };
         g_ftools = (ftool_script_t){ ftools, 3, 0 };
 
@@ -4133,8 +4171,8 @@ static void test_agent(void) {
                   strstr(r.ob, "\"overwrite\":false") != NULL,
               "agent: quiet keeps the short arguments whole");
         /* the unlisted tool keeps its long argument whole - its length
-           is information; helper.prompt (dotted, whole-name match)
-           trims like the file tools */
+           is information; helper (bare, whole-name match) trims like
+           the file tools */
         check(strstr(r.ob, "\"keywords\":"
                            "\"0123456789abcdefghij...wxyz9876543210\"") !=
                   NULL,

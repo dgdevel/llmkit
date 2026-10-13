@@ -514,8 +514,17 @@ static void listing_rebuild(mcp_mgr_t *m) {
             tool_entry_t *te = &m->listing.v[m->listing.n++];
             te->srv = s;
             te->tool = cJSON_Duplicate((cJSON *)t, 1);
-            char *ex = malloc(strlen(s->name) + strlen(nm) + 2);
-            sprintf(ex, "%s.%s", s->name, nm);
+            /* the helper subagent flattens to a bare `helper`: one tool
+               on a one-tool server, the server prefix adds no signal
+               and the spec promises one `helper(prompt)` tool */
+            bool flat = !strcmp(s->name, "helper") && !strcmp(nm, "helper");
+            size_t exl = flat ? strlen(nm) + 1
+                              : strlen(s->name) + strlen(nm) + 2;
+            char *ex = malloc(exl);
+            if (flat)
+                strcpy(ex, nm);
+            else
+                sprintf(ex, "%s.%s", s->name, nm);
             te->exposed_name = ex;
             te->terminal = cfg_marks_terminal(s->cfg, nm);
         }
@@ -705,26 +714,55 @@ int mcp_request_raw(mcp_server_t *srv, const char *method,
 
 int mcp_call(mcp_mgr_t *m, const char *tool, cJSON *args, buf_t *text_out,
              bool *is_error, char *err, size_t errsz, double timeout) {
-    const char *dot = strchr(tool, '.');
-    if (!dot) {
+    /* the flattened helper: bare `helper`, no server prefix; resolve it
+       through the listing so the upstream tool name comes from the
+       server's own listing (the proxy renames `invoke` to `helper`) */
+    bool flat = !strcmp(tool, "helper");
+    const char *dot = flat ? NULL : strchr(tool, '.');
+    if (!dot && !flat) {
         snprintf(err, errsz, "tool '%s' has no server prefix", tool);
         return 1;
     }
     char srvname[256];
-    size_t sl = (size_t)(dot - tool);
-    if (sl >= sizeof srvname) {
-        snprintf(err, errsz, "tool server name too long in '%.64s...'", tool);
-        return 1;
+    mcp_server_t *s = NULL; /* the flat path sets it from the listing */
+    const char *upstream;
+    if (flat) {
+        upstream = "helper";
+        const tool_listing_t *tl = &m->listing;
+        for (size_t i = 0; i < tl->n; i++)
+            if (!strcmp(tl->v[i].exposed_name, "helper")) {
+                s = tl->v[i].srv;
+                upstream = rec_str(tl->v[i].tool, "name");
+                break;
+            }
+        if (!s) {
+            snprintf(err, errsz, "unknown tool 'helper'");
+            return 1;
+        }
+        snprintf(srvname, sizeof srvname, "%s", s->name);
+    } else {
+        size_t sl = (size_t)(dot - tool);
+        if (sl >= sizeof srvname) {
+            snprintf(err, errsz, "tool server name too long in '%.64s...'",
+                     tool);
+            return 1;
+        }
+        memcpy(srvname, tool, sl);
+        srvname[sl] = '\0';
+        upstream = dot + 1;
+        s = mcp_find(m, srvname);
+        if (!s) {
+            snprintf(err, errsz, "unknown tool server '%s'", srvname);
+            return 1;
+        }
     }
-    memcpy(srvname, tool, sl);
-    srvname[sl] = '\0';
-    mcp_server_t *s = mcp_find(m, srvname);
-    if (!s || !s->connected) {
+    if (!s->connected) { /* flat path: listing only holds connected
+                            servers, so this is the dotted path's guard */
         snprintf(err, errsz, "unknown tool server '%s'", srvname);
         return 1;
     }
     cJSON *result = NULL;
-    int rc = mcp_call_raw(s, dot + 1, args, &result, err, errsz, timeout);
+    int rc = mcp_call_raw(s, upstream, args, &result, err, errsz, timeout);
     if (rc) return rc;
 
     /* map the result to text (requirements sec.6) */

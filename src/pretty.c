@@ -127,7 +127,7 @@ static bool dspy_brief_match(const dspy_t *s, const char *tool) {
 }
 
 /* the tool name is on the trim list; entries name tools whole
-   (helper.prompt) or bare, matching the exposed name after its last
+   (helper) or bare, matching the exposed name after its last
    dot (builtin.file_create) */
 static bool dspy_trim_match(const char *tool) {
     if (!tool) return false;

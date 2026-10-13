@@ -982,7 +982,10 @@ defaults (the selfcheck drives both).
   `as-tool.invoke` to `helper` and its `input` argument to `prompt`).
   The session's tools record then gains the `helper` stdio server
   running `mcp-proxy` on that config - the model sees one
-  `helper(prompt)` tool, the subagent sees everything but itself. Not
+  `helper(prompt)` tool, the subagent sees everything but itself. The
+  `helper` server flattens (mcp.c): its one tool lists and dispatches
+  under the bare name `helper`, not `helper.helper` - the server prefix
+  adds no signal and the tool spec's argument is `prompt`. Not
   `required`: a failed spawn degrades to a missing tool, rendered,
   session continues. Both files unlink at session end; `--no-helper`
   (pulled by `repl_nohelper_extract`) leaves the whole thing out. The
