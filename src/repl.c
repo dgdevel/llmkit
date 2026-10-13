@@ -697,17 +697,15 @@ int repl_run_ex(const call_cfg_t *c, const repl_opts_t *o, int in_fd,
     }
     if (o->helper_tool) {
         /* the helper subagent: this same agent as one `helper(prompt)`
-           tool; its seed copies the session's llm, system prompt and
-           every tool server but the helper itself (the recursion cut) */
-        buf_t sys;
-        buf_init(&sys);
-        if (e->system) dspy_content_text(e->system, &sys);
+           tool; its seed copies the session's llm and every tool server
+           but the helper itself (the recursion cut); its system prompt
+           is the helper's own bundled text (system_prompts/helper.txt),
+           not the session's */
         cJSON *helper_srv = NULL;
-        rc = repl_helper_build(&cfg, sys.len ? sys.data : cfg.system,
+        rc = repl_helper_build(&cfg, prompt_system_prompts_helper,
                                e->tools_cfg, exe_path, e, helper_seed,
                                sizeof helper_seed, helper_cfg,
                                sizeof helper_cfg, &helper_srv);
-        buf_free(&sys);
         if (rc) goto done;
         cJSON *tools =
             e->tools_cfg
