@@ -440,6 +440,11 @@ Same core, second entry point. `llmkit agent-as-tool <seed.jsonl>`:
   bootstrap stdout carries only mcp traffic. Concurrent `tools/call`
   requests are serialized, one conversation at a time; replies are written
   in request order.
+- The same records print live on stderr, the out-of-band channel (like the
+  usage line): the helper's whole conversation as it happens, every line
+  prefixed `(helper) ` - the invoke input `> text`, responses and thinking
+  plain, tool traffic `-> tool {arguments}` / `<- text`, fatal errors
+  `! code: message`.
 - Each `invoke` builds a record list - seed records + `user` carrying
   `input` - and runs the engine over it unchanged (mapping, options, error
   rules). Reply: concatenated final `response` text; a run ended by a

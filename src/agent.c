@@ -15,6 +15,25 @@ typedef struct agent_sink {
     cap_rec_t *head, *tail;
 } agent_sink_t;
 
+/* the live mirror's line writer: one (helper) line per text line,
+   long strings included - stdout is the mcp channel, stderr is the
+   out-of-band one */
+static void helper_print_lines(const char *prefix, const char *text) {
+    if (!text || !*text) return;
+    const char *p = text;
+    for (;;) {
+        const char *nl = strchr(p, '\n');
+        size_t n = nl ? (size_t)(nl - p) : strlen(p);
+        fputs("(helper) ", stderr);
+        if (prefix && *prefix) fputs(prefix, stderr);
+        fwrite(p, 1, n, stderr);
+        fputc('\n', stderr);
+        if (!nl || !nl[1]) break;
+        p = nl + 1;
+    }
+    fflush(stderr);
+}
+
 static void agent_sink_fn(void *ctx, cJSON *rec) {
     agent_sink_t *s = ctx;
     cap_rec_t *c = calloc(1, sizeof *c);
@@ -22,6 +41,38 @@ static void agent_sink_fn(void *ctx, cJSON *rec) {
     if (s->tail) s->tail->next = c;
     else s->head = c;
     s->tail = c;
+    /* the same record prints live too: the helper's whole conversation
+       as it happens, capture for the reply unchanged */
+    int k = rec_classify(rec);
+    if (k == R_RESPONSE) {
+        helper_print_lines(NULL, rec_str(rec, "text"));
+    } else if (k == R_THINKING) {
+        helper_print_lines("thinking ", rec_str(rec, "text"));
+    } else if (k == R_TOOL_REQUEST) {
+        const char *tool = rec_str(rec, "tool");
+        const cJSON *args =
+            cJSON_GetObjectItemCaseSensitive(rec, "arguments");
+        char *a = cJSON_IsObject(args)
+                      ? cJSON_PrintUnformatted((cJSON *)args)
+                      : NULL;
+        fputs("(helper) -> ", stderr);
+        if (tool) fputs(tool, stderr);
+        if (a) {
+            fputc(' ', stderr);
+            fputs(a, stderr);
+            cJSON_free(a);
+        }
+        fputc('\n', stderr);
+        fflush(stderr);
+    } else if (k == R_TOOL_RESPONSE) {
+        helper_print_lines("<- ", rec_str(rec, "text"));
+    } else if (k == R_ERROR) {
+        const char *code = rec_str(rec, "code");
+        const char *msg = rec_str(rec, "message");
+        fprintf(stderr, "(helper) ! %s: %s\n", code ? code : "error",
+                msg ? msg : "");
+        fflush(stderr);
+    }
 }
 
 static void agent_sink_reset(agent_sink_t *s) {
@@ -353,6 +404,7 @@ static int agent_handle(void *ctx, const char *method, cJSON *params,
             return 1;
         }
         invoke_reset_transcript(a);
+        helper_print_lines("> ", input);
         invoke_out_t out;
         invoke_run(a, input, &out);
         cJSON *res = cJSON_CreateObject();
