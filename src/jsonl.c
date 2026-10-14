@@ -273,36 +273,41 @@ cJSON *jsonl_parse_line(const char *line) {
 }
 
 int jsonl_feed(jsonl_pusher_t *p, const char *bytes, size_t n) {
-    /* byte rule 1: drop every 0x0d byte (covers \r\n and raw CR); strict
-       utf-8 over the hold plus the stripped new bytes */
-    buf_t all;
-    buf_init(&all);
-    if (p->hold.len) buf_append(&all, p->hold.data, p->hold.len);
+    /* byte rule 1: drop every 0x0d byte (covers \r\n and raw CR) */
+    size_t old_len = p->hold.len;
     for (size_t i = 0; i < n; i++)
-        if (bytes[i] != '\x0d') buf_append_byte(&all, bytes[i]);
-    if (!utf8_valid((const uint8_t *)all.data, all.len)) {
-        buf_free(&all);
+        if (bytes[i] != '\x0d') buf_append_byte(&p->hold, bytes[i]);
+
+    /* strict utf-8: validate new bytes and potential split char at boundary */
+    size_t check_start = (old_len > 3) ? old_len - 3 : 0;
+    if (!utf8_valid((const uint8_t *)p->hold.data + check_start, p->hold.len - check_start)) {
+        buf_free(&p->hold);
+        p->hold.len = 0;
         return -1;
     }
+
     size_t start = 0;
-    for (size_t i = 0; i < all.len; i++) {
-        if (all.data[i] == '\n') {
+    for (size_t i = 0; i < p->hold.len; i++) {
+        if (p->hold.data[i] == '\n') {
             size_t ln = i - start;
             char *line = malloc(ln + 1);
-            memcpy(line, all.data + start, ln);
+            memcpy(line, p->hold.data + start, ln);
             line[ln] = '\0';
             if (memchr(line, '\0', ln)) { /* embedded NUL: malformed */
                 free(line);
-                buf_free(&all);
+                buf_free(&p->hold);
+                p->hold.len = 0;
                 return -1;
             }
             p->on_line(p->ctx, line);
             start = i + 1;
         }
     }
-    buf_clear(&p->hold);
-    buf_append(&p->hold, all.data + start, all.len - start);
-    buf_free(&all);
+    if (start > 0) {
+        size_t keep = p->hold.len - start;
+        memmove(p->hold.data, p->hold.data + start, keep);
+        p->hold.len = keep;
+    }
     return 0;
 }
 

@@ -1169,8 +1169,12 @@ static bool resp_hdr_skip(const char *name) {
     return false;
 }
 
+static pthread_mutex_t pr_mutex = PTHREAD_MUTEX_INITIALIZER;
+
 static void live_emit(void *ctx, cJSON *rec) {
+    pthread_mutex_lock(&pr_mutex);
     pretty_live_record(ctx, rec);
+    pthread_mutex_unlock(&pr_mutex);
     cJSON_Delete(rec);
 }
 
@@ -1552,8 +1556,19 @@ done:
     return keep;
 }
 
-static void serve_connection(sock_t c, const llm_proxy_cfg_t *cfg,
-                             pretty_live_t *pr) {
+typedef struct {
+    sock_t c;
+    const llm_proxy_cfg_t *cfg;
+    pretty_live_t *pr;
+} proxy_conn_t;
+
+static void *serve_connection_thread(void *arg) {
+    proxy_conn_t *ct = arg;
+    sock_t c = ct->c;
+    const llm_proxy_cfg_t *cfg = ct->cfg;
+    pretty_live_t *pr = ct->pr;
+    free(ct);
+
     creader_t r;
     cr_init(&r, c);
     for (;;) {
@@ -1599,13 +1614,34 @@ static void serve_connection(sock_t c, const llm_proxy_cfg_t *cfg,
     }
     cr_free(&r);
     sock_close(c);
+    return NULL;
+}
+
+static void serve_connection(sock_t c, const llm_proxy_cfg_t *cfg,
+                             pretty_live_t *pr) {
+    proxy_conn_t *ct = malloc(sizeof *ct);
+    if (!ct) {
+        sock_close(c);
+        return;
+    }
+    ct->c = c;
+    ct->cfg = cfg;
+    ct->pr = pr;
+
+    pthread_t t;
+    if (pthread_create(&t, NULL, serve_connection_thread, ct) != 0) {
+        free(ct);
+        sock_close(c);
+        return;
+    }
+    pthread_detach(t);
 }
 
 static int listen_tcp(const char *host, const char *port,
                       char bound[64]) {
     struct addrinfo hints, *res = NULL;
     memset(&hints, 0, sizeof hints);
-    hints.ai_family = AF_INET; /* v4 listen: no ipv6 socket, doc'd */
+    hints.ai_family = AF_UNSPEC; /* support both v4 and v6 */
     hints.ai_socktype = SOCK_STREAM;
     hints.ai_flags = AI_PASSIVE;
     int rc = getaddrinfo(host && *host ? host : NULL, port, &hints, &res);
@@ -1627,7 +1663,7 @@ static int listen_tcp(const char *host, const char *port,
     if (bind(s, res->ai_addr, res->ai_addrlen) != 0) {
         fprintf(stderr,
                 "llmkit proxy: cannot bind %s:%s: %s\n",
-                host && *host ? host : "0.0.0.0", port, strerror(errno));
+                host && *host ? host : "::", port, strerror(errno));
         freeaddrinfo(res);
         sock_close(s);
         return (int)SOCK_INVALID;
@@ -1639,14 +1675,25 @@ static int listen_tcp(const char *host, const char *port,
         sock_close(s);
         return (int)SOCK_INVALID;
     }
-    struct sockaddr_in sa;
-    socklen_t sl = sizeof sa;
-    if (getsockname(s, (struct sockaddr *)&sa, &sl) == 0) {
-        char ip[INET_ADDRSTRLEN] = "?";
-        inet_ntop(AF_INET, &sa.sin_addr, ip, sizeof ip);
-        snprintf(bound, 64, "%s:%u", ip, (unsigned)ntohs(sa.sin_port));
+    struct sockaddr_storage ss;
+    socklen_t sl = sizeof ss;
+    if (getsockname(s, (struct sockaddr *)&ss, &sl) == 0) {
+        char ip[NI_MAXHOST] = "?";
+        if (getnameinfo((struct sockaddr *)&ss, sl, ip, sizeof ip,
+                        NULL, 0, NI_NUMERICHOST) == 0) {
+            char pport[16] = "";
+            char *pn = NULL;
+            if (getnameinfo((struct sockaddr *)&ss, sl, NULL, 0,
+                            pn, sizeof pport, 0) == 0) {
+                snprintf(bound, 64, "%s:%s", ip, pn ? pn : port);
+            } else {
+                snprintf(bound, 64, "%s:%s", ip, port);
+            }
+        } else {
+            snprintf(bound, 64, "unknown");
+        }
     } else {
-        snprintf(bound, 64, "%s", host && *host ? host : "0.0.0.0");
+        snprintf(bound, 64, "%s", host && *host ? host : "::");
     }
     return (int)s;
 }
