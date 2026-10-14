@@ -73,8 +73,8 @@ double mono_now(void) {
 
 /* days since 1970-01-01 from a civil date (howard hinnant's algorithm):
    months march..february so the leap day ends the year, which turns the
-   leap test into one comparison */
-#ifdef _WIN32
+   leap test into one comparison. hand-rolled because timegm is not iso
+   c: mingw lacks it and the macos sdk hides it under strict -std=c11 */
 static long long days_from_civil(long long y, long long m, long long d) {
     y -= m <= 2;
     long long era = (y >= 0 ? y : y - 399) / 400;
@@ -83,21 +83,16 @@ static long long days_from_civil(long long y, long long m, long long d) {
     long long doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; /* [0, 146096] */
     return era * 146097 + doe - 719468;
 }
-#endif
 
 time_t ll_timegm(struct tm *tm) {
-#ifdef _WIN32
-    /* mingw has no timegm: days from the civil date, then the clock - the
-       parser fills normalized fields, so no range fixing is needed */
+    /* days from the civil date, then the clock - the parser fills
+       normalized fields, so no range fixing is needed */
     long long days =
         days_from_civil((long long)tm->tm_year + 1900, tm->tm_mon + 1,
                         tm->tm_mday);
     long long secs = days * 86400 + tm->tm_hour * 3600 + tm->tm_min * 60 +
                      tm->tm_sec;
     return (time_t)secs;
-#else
-    return timegm(tm);
-#endif
 }
 
 /* ---- queue: mutex + condvar, unbounded ---- */
