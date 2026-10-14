@@ -458,7 +458,13 @@ Same core, second entry point. `llmkit agent-as-tool <seed.jsonl>`:
   `user` record and turns. On fatal error the store truncates back to the
   last successful invoke's marker (the bare seed if none) before the next
   invoke. A terminal ending is a successful ending: retained like a final
-  `response`, no truncation.
+  `response`, no truncation. `tools/list` advertises a second tool,
+  `context_reset`: it truncates to the bare seed and re-seats the rollback
+  marker there - the same store operation the fatal rollback performs,
+  parent-triggered. It exists only in retain mode: forget mode has fixed
+  amnesiac semantics and nothing to reset. On a local llm the reset is the
+  pressure valve for prefill cost: an ever-growing transcript pays a longer
+  prefill on every invoke, the bare seed does not.
 - Nested agents are ordinary child processes; spawn cycles are not detected
   (per the requirements).
 

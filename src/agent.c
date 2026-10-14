@@ -387,13 +387,48 @@ static int agent_handle(void *ctx, const char *method, cJSON *params,
             if (inp) cJSON_AddStringToObject(inp, "description", id2);
         }
         cJSON_AddItemToArray(tools, tool);
+        /* retain mode advertises context_reset: the parent can reset the
+           accumulated transcript to the bare seed between phases */
+        if (a->retain) {
+            cJSON *rst = cJSON_CreateObject();
+            cJSON_AddStringToObject(rst, "name", "context_reset");
+            cJSON_AddStringToObject(
+                rst, "description",
+                "reset the helper's memory to the bare seed: later invokes "
+                "start fresh; results already returned stay with the caller");
+            cJSON_AddItemToArray(tools, rst);
+        }
         cJSON_AddItemToObject(res, "tools", tools);
         *result_out = res;
         return 0;
     }
     if (!strcmp(method, "tools/call")) {
         const char *name = rec_str(params, "name");
-        if (!name || strcmp(name, "invoke")) {
+        if (!name) {
+            *errmsg_out = strdup("unknown tool");
+            return 1;
+        }
+        if (!strcmp(name, "context_reset")) {
+            if (!a->retain) {
+                *errmsg_out = strdup(
+                    "context_reset requires retain_context in the seed");
+                return 1;
+            }
+            tlist_clear(&a->eng->tr);
+            seed_reingest(&a->eng->tr, &a->seed);
+            a->mark = a->eng->tr.n;
+            helper_print_lines("* ", "context reset to the bare seed");
+            cJSON *rres = cJSON_CreateObject();
+            cJSON *rcontent = cJSON_CreateArray();
+            cJSON *rblk = cJSON_CreateObject();
+            cJSON_AddStringToObject(rblk, "type", "text");
+            cJSON_AddStringToObject(rblk, "text", "context reset");
+            cJSON_AddItemToArray(rcontent, rblk);
+            cJSON_AddItemToObject(rres, "content", rcontent);
+            *result_out = rres;
+            return 0;
+        }
+        if (strcmp(name, "invoke")) {
             *errmsg_out = strdup("unknown tool");
             return 1;
         }

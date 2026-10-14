@@ -346,7 +346,7 @@ Marker the runner emits on stdout when a `flush` actually starts or resumes the 
 
 ## agent-as-tool
 
-Configures the single `invoke` tool that `llmkit agent-as-tool` exposes on its mcp interface. It is valid only in a seed file. The runner treats it as an unknown type (fatal). Both fields are optional.
+Configures the `invoke` tool that `llmkit agent-as-tool` exposes on its mcp interface. It is valid only in a seed file. The runner treats it as an unknown type (fatal). Both fields are optional. A seed with `retain_context` (see the options record) also exposes a `context_reset` tool: the caller can drop the helper's accumulated memory and return it to the bare seed.
 
 minimal:
 

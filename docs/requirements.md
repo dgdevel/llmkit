@@ -498,7 +498,7 @@ A record holding execution parameters for the runner.
 | `stream_interval` | seconds between emitted partial records during streaming, default 1, fractional values allowed (e.g. 0.05); chunks received within the interval are merged into one record; 0 disables grouping and every chunk becomes its own partial record; partial records only exist while `stream` is true |
 | `llm_connect_timeout` | seconds allowed to establish the connection to the llm endpoint, default 5; expiry surfaces as a fatal `connect_failed` error record |
 | `llm_read_timeout` | seconds the runner waits for response data from the endpoint, first byte and between chunks alike, default 1200 (20 minutes: a local llm on a slow machine can think for a long time before the first token); expiry surfaces as a fatal `http_error` |
-| `retain_context` | boolean, default false; meaningful only in an `llmkit agent-as-tool` seed, see the invoke tool; the runner accepts and ignores it |
+| `retain_context` | boolean, default false; meaningful only in an `llmkit agent-as-tool` seed, see the invoke tool; setting it also exposes the `context_reset` tool to the caller; the runner accepts and ignores it |
 
 ### agent-as-tool
 
@@ -744,8 +744,14 @@ fixed prefix of every conversation:
 
 ### the invoke tool
 
-The server exposes exactly one tool, `invoke`, with exactly one string
-argument `input`; their descriptions come from the `agent-as-tool` record.
+The server exposes the `invoke` tool, with exactly one string argument
+`input`; their descriptions come from the `agent-as-tool` record. In retain
+mode (see below) it also exposes `context_reset`, a no-argument tool that
+truncates the accumulated transcript back to the bare seed: later invokes
+start fresh, results already returned stay with the caller. After a reset
+the rollback marker is the bare seed again. It is advertised only in retain
+mode; in forget mode memory semantics are fixed, so there is nothing to
+reset.
 
 - Each call runs one conversation - the seed plus a `user` record carrying
   `input` - under the runner's conversation loop, mapping, options and error
@@ -760,7 +766,9 @@ argument `input`; their descriptions come from the `agent-as-tool` record.
   `response` or by a terminal tool ([terminal tools](#27-terminal-tools))
   are retained: a fatal `error` rolls the transcript back to the
   last successful `invoke`, the bare seed if none. Either way the transcript
-  stays append only and cache hits keep accumulating.
+  stays append only and cache hits keep accumulating. The caller may call
+  `context_reset` at any point to drop the accumulation and return to the
+  bare seed.
 - The reply is the concatenated text of the final `response` record, nothing
   else: no partial records, no `thinking`, no intermediate tool traffic
   exists on this interface. A conversation ended by a terminal tool

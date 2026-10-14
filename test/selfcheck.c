@@ -2880,6 +2880,7 @@ static void test_agent_tool(void) {
     fflush(to);
     check(fgets(line, sizeof line, from) != NULL &&
               strstr(line, "\"name\":\"invoke\"") != NULL &&
+              strstr(line, "\"name\":\"context_reset\"") != NULL &&
               strstr(line, "the agent") != NULL &&
               strstr(line, "the input") != NULL,
           "agent: tools/list exposes invoke with the seed descriptions");
@@ -2902,6 +2903,24 @@ static void test_agent_tool(void) {
               strstr(line, "all done") != NULL,
           "agent: second invoke over the retained transcript");
 
+    /* context_reset drops the accumulation: next invoke runs on the bare
+       seed only */
+    fprintf(to, "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/call\","
+                "\"params\":{\"name\":\"context_reset\"}}\n");
+    fflush(to);
+    check(fgets(line, sizeof line, from) != NULL &&
+              strstr(line, "context reset") != NULL &&
+              strstr(line, "isError") == NULL,
+          "agent: context_reset replies ok");
+
+    fprintf(to, "{\"jsonrpc\":\"2.0\",\"id\":6,\"method\":\"tools/call\","
+                "\"params\":{\"name\":\"invoke\",\"arguments\":"
+                "{\"input\":\"fresh\"}}}\n");
+    fflush(to);
+    check(fgets(line, sizeof line, from) != NULL &&
+              strstr(line, "all done") != NULL,
+          "agent: invoke after reset over the bare seed");
+
     fclose(to);
     int st = 0;
     waitpid(pid, &st, 0);
@@ -2912,18 +2931,23 @@ static void test_agent_tool(void) {
        keeps one accumulated transcript starting as the bare seed), and the
        retained first invoke must appear in the second invoke's requests */
     FILE *lg = fopen(log, "r");
-    bool hist = false, first = false;
+    bool hist = false, first = false, postreset = false;
     if (lg) {
         char lbuf[8192];
         while (fgets(lbuf, sizeof lbuf, lg)) {
             if (strstr(lbuf, "seed-history-marker")) hist = true;
             if (strstr(lbuf, "seed-answer") && strstr(lbuf, "\"go\""))
                 first = true;
+            /* after context_reset: seed present, prior invokes absent */
+            if (strstr(lbuf, "\"fresh\"") && strstr(lbuf, "seed-answer") &&
+                !strstr(lbuf, "\"go\"") && !strstr(lbuf, "\"again\""))
+                postreset = true;
         }
         fclose(lg);
     }
     check(hist, "agent retain: the seed history reaches the endpoint");
     check(first, "agent retain: the first invoke is retained in the next");
+    check(postreset, "agent: context_reset drops the accumulated turns");
     spawn_kill(&sp);
 }
 
