@@ -22,7 +22,9 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#ifdef __linux__
 #include <sys/prctl.h>
+#endif
 #endif
 
 /* ---- signals ---- */
@@ -408,17 +410,21 @@ int spawn_shell(const char *command_line, spawn_t *out) {
            the whole foreground group otherwise; children are managed via
            their pipes - SIGTERM through spawn_kill - never by tty input) */
         setpgid(0, 0);
-        /* die with the caller: every helper and mcp server is a child of
-           this process, and an orphaned one keeps its whole (possibly
-           expensive) turn running for nothing. The kernel delivers
-           SIGTERM at the instant the parent dies - even a SIGKILLed or
-           crashed caller cannot leave one behind - and the killed child
-           runs the same teardown for its own children (pdeathsig set in
-           its own pre-exec), so the death cascades. A pre-existing
-           parent is never trusted: a reparented (orphan-adopted) child
-           would see ppid 1 and die immediately. */
-        if (getppid() == (pid_t)spawn_ppid) prctl(PR_SET_PDEATHSIG, SIGTERM);
-        /* nothing else is inherited: other servers' pipes and any open
+        /* die with the caller (linux: pdeathsig): every helper and mcp
+           server is a child of this process, and an orphaned one keeps its
+           whole (possibly expensive) turn running for nothing. The kernel
+           delivers SIGTERM at the instant the parent dies - even a
+           SIGKILLed or crashed caller cannot leave one behind - and the
+           killed child runs the same teardown for its own children
+           (pdeathsig set in its own pre-exec), so the death cascades. A
+           pre-existing parent is never trusted: a reparented
+           (orphan-adopted) child would see ppid 1 and die immediately. On
+           macOS there is no pdeathsig; an orphaned helper lives until its
+           own turn ends - acceptable for a dev-only target. */
+        #if defined(__linux__)
+                if (getppid() == (pid_t)spawn_ppid) prctl(PR_SET_PDEATHSIG, SIGTERM);
+        #endif
+                /* nothing else is inherited: other servers' pipes and any open
            sockets belong to the parent, not to this server. close_range
            (linux 5.9+) closes it all in one call; else the open-fd
            directory walks only what exists; the loop is the last resort

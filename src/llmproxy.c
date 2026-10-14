@@ -34,6 +34,11 @@ static int net_init(void) {
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
+/* -std=c11 puts bsd headers in strict-ansi mode: macos netdb.h hides
+   ni_maxhost; posix guarantees >= 1025, so define it if absent */
+#ifndef NI_MAXHOST
+#define NI_MAXHOST 1025
+#endif
 typedef int sock_t;
 #define SOCK_INVALID (-1)
 static void sock_close(sock_t s) { close(s); }
