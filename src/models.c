@@ -175,7 +175,7 @@ static cJSON *model_normalize(const cJSON *m, char *err, size_t errsz) {
                 tm.tm_hour = h;
                 tm.tm_min = mi;
                 tm.tm_sec = s;
-                unix_created = (double)timegm(&tm);
+                unix_created = (double)ll_timegm(&tm);
                 /* fractional seconds: fold into the unix count */
                 if (rest[0] == '.') {
                     double frac = 0, scale = 0.1;

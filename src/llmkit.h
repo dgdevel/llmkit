@@ -11,6 +11,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <sys/types.h>
+#include <time.h>
 #include <pthread.h>
 
 #include <curl/curl.h>
@@ -134,6 +135,11 @@ int thread_start_detached(thread_fn fn, void *arg);
 
 /* monotonic clock seconds */
 double mono_now(void);
+
+/* timegm portable: tm read as utc only (no tz, no dst), the same
+   contract as the posix call mingw lacks; the models.c iso-8601 parser
+   is the caller */
+time_t ll_timegm(struct tm *tm);
 
 /* shell spawn with pipes (posix: /bin/sh -c; win: %ComSpec% /c);
    returns 0, or -1 with all fields reset */
