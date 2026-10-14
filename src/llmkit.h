@@ -798,6 +798,8 @@ typedef struct linenoiseCompletions editor_candidates_t;
    contract on top: enter and Ctrl-D submit (Ctrl-D on an empty buffer
    is EOF), the two Ctrl-C stages, NUL rejected. Tab goes to the
    on_tab hook when one is set. */
+typedef void (*editor_tab_fn)(void *ctx, const char *line,
+                              editor_candidates_t *c);
 typedef struct editor {
     FILE *out;
     int in_fd;
@@ -805,7 +807,7 @@ typedef struct editor {
     buf_t line;         /* the submitted line, empty when interrupted */
     char *lbuf;         /* linenoise's growable edit buffer */
     struct linenoiseState ls; /* the live edit session, valid in editor_line */
-    void (*on_tab)(void *ctx, const char *line, editor_candidates_t *c);
+    editor_tab_fn on_tab;
     void *tab_ctx;
 } editor_t;
 
@@ -815,6 +817,13 @@ int editor_line(editor_t *ed); /* ED_* */
 void editor_hist_push(editor_t *ed, const char *line);
 /* the on_tab hook's one helper: add one whole-line candidate */
 void editor_add_candidate(editor_candidates_t *c, const char *line);
+/* filesystem completion over the line's trailing @-sigiled word: the
+   word's directory lists, entries matching its tail extend the line
+   (directories with a trailing slash). The editor's whole-line
+   candidates contract; no-op when the line ends without a sigiled
+   word. */
+void editor_complete_path(void *ctx, const char *line,
+                          editor_candidates_t *c);
 
 /* the non-tty line reader: same results, same byte hygiene */
 typedef struct plain_reader {

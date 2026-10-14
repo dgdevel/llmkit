@@ -640,10 +640,15 @@ static int pick_read_line(plain_reader_t *pr, buf_t *out) {
    cancel (ctrl-c / empty-line clear), 2 failure */
 static int pick_read_model(slash_state_t *sl, const cJSON *models) {
     if (sl->ed) {
+        /* the picker owns the tab hook for its read: the session's own
+           (path completion) swaps out for the model ids, then back */
+        editor_tab_fn save_tab = sl->ed->on_tab;
+        void *save_ctx = sl->ed->tab_ctx;
         sl->ed->on_tab = complete_model;
         sl->ed->tab_ctx = (void *)models;
         int r = editor_line(sl->ed);
-        sl->ed->on_tab = NULL;
+        sl->ed->on_tab = save_tab;
+        sl->ed->tab_ctx = save_ctx;
         if (r == ED_SUBMIT) {
             buf_clear(&sl->pick);
             buf_append(&sl->pick, sl->ed->line.data, sl->ed->line.len);
@@ -965,11 +970,13 @@ int repl_run_ex(const call_cfg_t *c, const repl_opts_t *o, int in_fd,
     plain_reader_t pr;
     char prompt[48]; /* the editor draws it; escapes cost no columns */
     snprintf(prompt, sizeof prompt, "%s> ", st.bold);
-    if (tty)
+    if (tty) {
         /* the typed line is the user block: the prompt carries the bold
            sequence, the editor counts its width past the escape */
         editor_init(&ed, out, in_fd, prompt);
-    else
+        /* tab completes the trailing @-sigiled path word */
+        ed.on_tab = editor_complete_path;
+    } else
         plain_init(&pr, in_fd);
     int last_ending = EXIT_OK; /* EOF before any input exits 0 */
     bool need_rule = true;     /* rule vs no-rule prompt redraws */
@@ -1144,6 +1151,27 @@ int repl_run_ex(const call_cfg_t *c, const repl_opts_t *o, int in_fd,
         }
 
         if (!tty) render_user_block(&sink, line.data);
+
+        /* the @ sigil is prompt-side only: a word-initial @ before a
+           path drops from the record - the model reads the bare path.
+           History keeps the typed form (recall shows what was typed),
+           and only the final word's sigil goes - mid-line ones stay */
+        {
+            bool stripped = false;
+            size_t i = 0;
+            while (i < line.len) {
+                if (line.data[i] == '@' && (i == 0 || line.data[i - 1] == ' ') &&
+                    i + 1 < line.len && line.data[i + 1] != ' ') {
+                    memmove(line.data + i, line.data + i + 1,
+                            line.len - i - 1);
+                    line.len--;
+                    stripped = true;
+                    continue;
+                }
+                i++;
+            }
+            if (stripped) line.data[line.len] = '\0';
+        }
 
         {
             cJSON *user = call_build_user(line.data);

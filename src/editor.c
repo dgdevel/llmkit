@@ -8,11 +8,22 @@
    engine's stop flag on both platforms alike. */
 #include "llmkit.h"
 
+#include <dirent.h>
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
+
+/* memrchr is glibc's: the portable search, last occurrence first */
+static void *path_memrchr(const void *s, int c, size_t n) {
+    const unsigned char *p = s;
+    for (size_t i = n; i > 0; i--)
+        if (p[i - 1] == (unsigned char)c) return (void *)(p + i - 1);
+    return NULL;
+}
 
 #define HIST_CAP 128       /* in-memory, arrow recall only (design sec.12) */
 #define LNBUF_INIT 4096    /* linenoise's initial edit buffer */
@@ -102,6 +113,95 @@ void editor_free(editor_t *ed) {
     free(ed->lbuf);
     ed->lbuf = NULL;
     buf_free(&ed->line);
+}
+
+/* ---- path completion (@ sigil) ---- */
+
+/* the word characters a path may carry between its delimiters */
+static bool path_word_byte(char c) {
+    return c && !strchr(" \t", c);
+}
+
+/* the filesystem word a cursor-typed line ends with, when it started
+   with the @ sigil: the text from the last blank (or the line start)
+   to the end. Returns NULL when the final word carries no sigil. The
+   line is the editor's whole buffer (the contract's shape: candidates
+   are whole lines). */
+static const char *path_token(const char *line) {
+    size_t end = strlen(line);
+    size_t start = end;
+    while (start > 0 && path_word_byte(line[start - 1])) start--;
+    return start < end && line[start] == '@' ? line + start + 1 : NULL;
+}
+
+/* one directory's entries matching prefix, as whole-line candidates:
+   the @ sigil and the dir part stay, each entry follows, directories
+   gain a trailing slash (the next tab descends). Hidden entries match
+   only when the prefix itself starts with a dot. */
+void editor_complete_path(void *ctx, const char *line,
+                          editor_candidates_t *c) {
+    (void)ctx;
+    const char *tok = path_token(line);
+    if (!tok) return;
+    size_t toklen = strlen(tok);
+    /* the dir to list: the prefix's dirname, "." when none */
+    const char *slash = path_memrchr(tok, '/', toklen);
+    char dir[1024];
+    const char *base;
+    size_t baselen;
+    if (slash) {
+        size_t dlen = (size_t)(slash - tok);
+        if (dlen == 0) { /* the root "/" */
+            snprintf(dir, sizeof dir, "/");
+            base = slash + 1;
+        } else if (dlen >= sizeof dir) {
+            return; /* overlong dir: no candidates, no noise */
+        } else {
+            memcpy(dir, tok, dlen);
+            dir[dlen] = '\0';
+            base = slash + 1;
+        }
+        baselen = toklen - dlen - 1;
+    } else {
+        snprintf(dir, sizeof dir, ".");
+        base = tok;
+        baselen = toklen;
+    }
+    DIR *d = opendir(dir);
+    if (!d) return;
+    buf_t cand;
+    buf_init(&cand);
+    struct dirent *de;
+    while ((de = readdir(d))) {
+        const char *nm = de->d_name;
+        size_t nlen = strlen(nm);
+        if (!strncmp(nm, ".", 2) || !strncmp(nm, "..", 3)) continue;
+        if (nm[0] == '.' && !(base[0] == '.' && baselen)) continue;
+        if (nlen < baselen || strncmp(nm, base, baselen)) continue;
+        /* a directory: stat it for the trailing slash */
+        bool isdir = false;
+        {
+            struct stat st;
+            char full[1100];
+            int n = snprintf(full, sizeof full, "%s/%s", dir, nm);
+#ifdef _WIN32
+            if (n > 0 && n < (int)sizeof full && !stat(full, &st))
+#else
+            if (n > 0 && n < (int)sizeof full && !lstat(full, &st))
+#endif
+                isdir = S_ISDIR(st.st_mode);
+        }
+        buf_clear(&cand);
+        /* the line up to and including the @ sigil, then the token's
+           dir part, then the entry: both re-emit unchanged */
+        buf_append(&cand, line, (size_t)(tok - line));
+        if (slash) buf_append(&cand, tok, (size_t)(slash + 1 - tok));
+        buf_append_str(&cand, nm);
+        if (isdir) buf_append_byte(&cand, '/');
+        editor_add_candidate(c, cand.data ? cand.data : "");
+    }
+    buf_free(&cand);
+    closedir(d);
 }
 
 /* ================= non-tty line reader ================= */
