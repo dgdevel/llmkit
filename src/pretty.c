@@ -101,8 +101,13 @@ void dspy_error_line(dspy_t *s, const char *code, const char *msg) {
    response */
 typedef struct dspy_brief_q {
     char *tool;
+    char *id; /* the request's id: responses pair by it, never by order
+                 alone - a round can mix brief and full-render calls */
     double t; /* its request stamp (mono_now) */
     size_t bytes, lines;
+    buf_t line; /* the held request line: prints with the summary so a
+                   batch reads call-then-answer, not all calls stacked
+                   above all answers */
     struct dspy_brief_q *next;
 } dspy_brief_q_t;
 
@@ -190,45 +195,70 @@ void dspy_tool_request(dspy_t *s, const cJSON *rec) {
         else buf_append_tree(&line, args);
     }
     if (line.len) s->sep_pending = true; /* empty renders nothing */
-    dspy_styled(s, s->st->bold, line.data ? line.data : "");
-    dspy_ensure_nl(s);
-    buf_free(&line);
-    /* arm the brief reply: listed tool, full traffic otherwise - one
-       queue entry per unanswered request, so parallel tool calls each
-       carry their own summary state */
-    if (dspy_brief_match(s, tool)) {
+    /* the brief path holds the request line back: it prints with the
+       summary, so a batch reads call-then-answer, not every call
+       stacked above every answer */
+    if (dspy_brief_match(s, tool) && line.len) {
         dspy_brief_q_t *b = calloc(1, sizeof *b);
+        const char *id = rec_str(rec, "id"); /* NULL tolerates, as strdup */
         if (b) {
             b->tool = strdup(tool);
+            b->id = id ? strdup(id) : NULL;
             b->t = mono_now();
+            b->line = line; /* ownership moves into the queue entry */
             b->next = NULL;
             if (s->brief_tail) s->brief_tail->next = b;
             else s->brief_head = b;
             s->brief_tail = b;
             s->brief_n++;
+            s->sep_pending = false; /* the rule draws at the held line's
+                                       print, not now */
+            return;
         }
     }
+    dspy_styled(s, s->st->bold, line.data ? line.data : "");
+    dspy_ensure_nl(s);
+    buf_free(&line);
 }
 
 void dspy_tool_response(dspy_t *s, const cJSON *rec) {
-    /* the head entry is this response's call: the engine answers the
-       requests of one round in order (tools run sequentially) */
+    /* the paired entry is this response's call: responses carry the
+       request id, the pair holds by it (the engine answers the requests
+       of one round in order - tools run sequentially - but a round can
+       mix brief and full-render calls, order alone is not the pair) */
+    const char *id = rec_str(rec, "id");
     dspy_brief_q_t *b = s->brief_head;
-    if (b) { /* the brief summary: one line, no reply text */
+    while (b && id && b->id && strcmp(b->id, id)) b = b->next;
+    if (b) { /* the brief summary: held request line, then one line,
+                no reply text */
         char ts[32] = "", line[96];
         double secs = mono_now() - b->t;
         if (secs < 0) secs = 0;
         stamp_now(ts, sizeof ts);
+        dspy_sep_flush(s); /* the held line's separator, drawn now */
+        dspy_styled(s, s->st->bold, b->line.data ? b->line.data : "");
+        dspy_ensure_nl(s);
         int n = snprintf(line, sizeof line,
                          "%stool replied in %.2f s, %zu lines, %zu bytes\n",
                          ts, secs, b->lines, b->bytes);
         if (n > 0)
             dspy_write(s, line,
                        (size_t)n >= sizeof line ? sizeof line - 1 : (size_t)n);
-        s->brief_head = b->next;
-        if (!s->brief_head) s->brief_tail = NULL;
+        /* unlink from the middle of the list if need be */
+        dspy_brief_q_t **pp = &s->brief_head;
+        while (*pp && *pp != b) pp = &(*pp)->next;
+        if (*pp) *pp = b->next;
+        if (s->brief_tail == b) {
+            /* b was the last entry: tail steps back to its predecessor,
+               or to NULL on an emptied queue */
+            dspy_brief_q_t *t = s->brief_head;
+            while (t && t->next) t = t->next;
+            s->brief_tail = t;
+        }
         s->brief_n--;
         free(b->tool);
+        free(b->id);
+        buf_free(&b->line);
         free(b);
         return;
     }
@@ -242,15 +272,18 @@ void dspy_tool_response(dspy_t *s, const cJSON *rec) {
 /* counts the reply's lines and bytes into the open brief state; call it
    before dspy_tool_response for every response record of the call */
 void dspy_brief_count(dspy_t *s, const cJSON *rec) {
-    if (!s->brief_head) return;
+    const char *id = rec_str(rec, "id");
+    dspy_brief_q_t *b = s->brief_head;
+    while (b && id && b->id && strcmp(b->id, id)) b = b->next;
+    if (!b) return;
     const char *tx = rec_str(rec, "text");
     size_t n = tx ? strlen(tx) : 0;
-    s->brief_head->bytes += n;
+    b->bytes += n;
     if (!n) return;
     for (const char *p = tx; *p; p++)
-        if (*p == '\n') s->brief_head->lines++;
+        if (*p == '\n') b->lines++;
     if (tx[n - 1] != '\n')
-        s->brief_head->lines++; /* the last, unterminated line */
+        b->lines++; /* the last, unterminated line */
 }
 
 /* ---- brief tool rendering (llmkit agent's default for listed tools) ----
@@ -265,10 +298,32 @@ void dspy_brief_clear(dspy_t *s) {
         dspy_brief_q_t *b = s->brief_head;
         s->brief_head = b->next;
         free(b->tool);
+        free(b->id);
+        buf_free(&b->line);
         free(b);
     }
     s->brief_tail = NULL;
     s->brief_n = 0;
+}
+
+/* print the request lines still held by unanswered brief calls: the
+   store's last word (a session cut mid-batch must not lose them) */
+void dspy_brief_flush(dspy_t *s) {
+    dspy_brief_q_t *b = s->brief_head;
+    if (!b) return;
+    bool any = false;
+    while (b) {
+        if (b->line.len) any = true;
+        b = b->next;
+    }
+    if (!any) return;
+    dspy_sep_flush(s);
+    for (b = s->brief_head; b; b = b->next) {
+        if (!b->line.len) continue;
+        dspy_styled(s, s->st->bold, b->line.data);
+        dspy_ensure_nl(s);
+    }
+    dspy_brief_clear(s);
 }
 
 void dspy_brief_tools(dspy_t *s, const char *names) {
@@ -404,6 +459,10 @@ void pretty_live_free(pretty_live_t *l) {
     free(l);
 }
 
+/* a store replay's last record must not leave held brief request lines
+   undrawn (the file counterpart lives in pretty_run) */
+void pretty_live_flush(pretty_live_t *l) { dspy_brief_flush(&l->s); }
+
 /* ================= input ================= */
 
 typedef struct pretty_ctx {
@@ -468,6 +527,7 @@ int pretty_run(FILE *in, FILE *out) {
         rc = EXIT_INVALID_RECORD;
     }
     if (sink.io_fail) rc = EXIT_OUT_OF_CHANNEL;
+    dspy_brief_flush(&sink); /* held request lines, not lost */
     free(sink.brief_tools);
     free(sink.brief_strip);
     dspy_brief_clear(&sink);

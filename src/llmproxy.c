@@ -1757,6 +1757,7 @@ int cmd_llmproxy(int argc, char **argv) {
     }
     sock_close((sock_t)ls);
     int rc = pretty_live_io_failed(pr) ? EXIT_OUT_OF_CHANNEL : EXIT_OK;
+    pretty_live_flush(pr); /* held brief request lines, not lost */
     pretty_live_free(pr);
     llm_proxy_cfg_free(&c);
     return rc;

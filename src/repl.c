@@ -338,6 +338,7 @@ static int store_load(engine_t *e, FILE *out, const char *path) {
         }
     }
     if (pretty_live_io_failed(live)) rc = EXIT_OUT_OF_CHANNEL;
+    pretty_live_flush(live); /* held brief request lines, not lost */
     pretty_live_free(live);
     return rc;
 }
@@ -833,6 +834,7 @@ int repl_run_ex(const call_cfg_t *c, const repl_opts_t *o, int in_fd,
 done:
     buf_free(&line);
     /* the dspy sink's strdup'd brief state (agent display) */
+    dspy_brief_flush(&sink.d); /* held request lines, not lost */
     free(sink.d.brief_tools);
     dspy_brief_clear(&sink.d);
     free(sink.d.brief_strip);

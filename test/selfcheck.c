@@ -4103,6 +4103,63 @@ static void test_agent(void) {
                 char *norm = repl_norm(r.ob);
                 check(strstr(norm, "tool replied in") != NULL,
                       "agent: parallel brief summary drawn");
+                /* adjacency: each request line stands right above its
+                   own summary, the second request never sits between a
+                   first request and the first summary */
+                const char *req_a =
+                    strstr(norm, "files_search {\"path\":\"a\"}");
+                const char *req_b = strstr(norm, "file_read {\"path\":\"b\"}");
+                const char *sum_1 = strstr(norm, "tool replied in");
+                const char *sum_2 = sum_1 ? strstr(sum_1 + 1,
+                                                   "tool replied in") : NULL;
+                check(req_a && req_b && sum_1 && sum_2 &&
+                          req_a < sum_1 && sum_1 < req_b && req_b < sum_2,
+                      "agent: brief pairs each request with its summary");
+                free(norm);
+            }
+            repl_session_free(&r);
+            call_cfg_free(&c);
+        }
+
+        /* ---- mixed round: brief and full-render calls answer out of
+           the brief list's order - the pair holds by id, not position ----
+        */
+        {
+            fturn_t turns[] = {
+                { .recs = (const char *[]){
+                      "{\"type\":\"tool_request\",\"tool\":\"builtin."
+                      "files_search\",\"arguments\":{\"path\":\"a\"},"
+                      "\"id\":\"t1\"}",
+                      "{\"type\":\"tool_request\",\"tool\":\"fs.echo\","
+                      "\"arguments\":{},\"id\":\"t2\"}"},
+                  .nrecs = 2, .kind = TURN_TOOLS, .abort_after = -1 },
+                { .recs = (const char *[]){
+                      "{\"type\":\"response\",\"text\":\"done\","
+                      "\"partial\":false}"},
+                  .nrecs = 1, .kind = TURN_FINAL, .abort_after = -1 },
+            };
+            ftool_t ftools[] = {
+                { .tool = "builtin.files_search", .text = "aaa\n", .rc = 0 },
+                { .tool = "fs.echo", .text = "echo", .rc = 0 }
+            };
+            g_ftools = (ftool_script_t){ ftools, 2, 0 };
+            repl_opts_t brief3 = { .default_prompt =
+                                          prompt_system_prompts_agent,
+                                  .builtin_mcp = true,
+                                  .agents_md = true };
+            g_factory_wire = fwire_new(turns, 2);
+            repl_cfg(&c, PROTO_OPENAI);
+            repl_out_t r = repl_session_opt_ft(&c, &brief3, "q\n", 2);
+            check(r.rc == EXIT_OK, "agent: mixed session exits 0");
+            {
+                char *norm = repl_norm(r.ob);
+                /* the brief summary counts its own reply (1 line, 4
+                   bytes), the full tool's text never reached the brief
+                   state */
+                check(strstr(norm, "tool replied in") != NULL &&
+                          strstr(norm, "1 lines, 4 bytes") != NULL &&
+                          strstr(norm, "echo") != NULL,
+                      "agent: mixed round brief summary counts own reply");
                 free(norm);
             }
             repl_session_free(&r);

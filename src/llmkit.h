@@ -941,10 +941,13 @@ typedef struct dspy {
                          ten characters around [...] when longer than
                          twenty (agent display) */
     /* brief tool mode (llmkit agent): the collapsed tools' name list
-       (NULL = none), and the in-flight brief replies - a queue, one entry
-       per unanswered request: parallel tool calls answer in request order
-       (engine.c runs them sequentially), so the head entry is the call
-       whose response arrived */
+       (NULL = none), and the in-flight brief replies - a queue, one
+       entry per unanswered request: entries pair with responses by the
+       request id (engine.c runs the tools sequentially, but a round
+       can mix brief and full-render calls, order alone is not the
+       pair), and each entry holds its rendered request line back until
+       the answer - a batch reads call-then-answer, not every call
+       stacked above every answer */
     char *brief_tools;
     char *brief_strip; /* agent display: the `server.` prefix dropped,
                           NULL = names render whole */
@@ -979,6 +982,9 @@ void dspy_brief_strip(dspy_t *s, const char *prefix);
 void dspy_brief_count(dspy_t *s, const cJSON *rec);
 /* free the in-flight brief queue (session teardown) */
 void dspy_brief_clear(dspy_t *s);
+/* print the request lines still held by unanswered brief calls, then
+   empty the queue: the session/turn teardown must not lose them */
+void dspy_brief_flush(dspy_t *s);
 /* a record's content text blocks joined with \n */
 void dspy_content_text(const cJSON *rec, buf_t *out);
 
@@ -993,6 +999,8 @@ typedef struct pretty_live pretty_live_t;
 pretty_live_t *pretty_live_new(FILE *out);
 void pretty_live_record(pretty_live_t *l, cJSON *rec);
 bool pretty_live_io_failed(const pretty_live_t *l);
+/* print held brief request lines, then empty the queue */
+void pretty_live_flush(pretty_live_t *l);
 void pretty_live_free(pretty_live_t *l);
 
 /* ================= llmproxy.c ================= */
