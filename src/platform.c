@@ -22,6 +22,7 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <sys/prctl.h>
 #endif
 
 /* ---- signals ---- */
@@ -192,6 +193,7 @@ int thread_start_detached(thread_fn fn, void *arg) {
    handle-list attribute keeps other servers' pipes out of the child. */
 int spawn_shell(const char *command_line, spawn_t *out) {
     out->hproc = NULL;
+    out->hjob = NULL;
     out->pid = -1;
     out->to_fd = -1;
     out->from_fd = -1;
@@ -271,6 +273,24 @@ int spawn_shell(const char *command_line, spawn_t *out) {
         return -1;
     }
     CloseHandle(pi.hThread);
+    /* the kill-on-close job: when this llmkit process dies - normally,
+       by crash or by TerminateProcess - the kernel closes the job
+       handle and reaps the whole helper tree. This is the windows twin
+       of the posix pdeathsig: the helper must never outlive its caller,
+       whatever the caller's death mode is. */
+    HANDLE hjob = CreateJobObjectW(NULL, NULL);
+    if (hjob) {
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION ji;
+        memset(&ji, 0, sizeof ji);
+        ji.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        if (SetInformationJobObject(hjob, JobObjectExtendedLimitInformation,
+                                    &ji, sizeof ji) &&
+            AssignProcessToJobObject(hjob, pi.hProcess)) {
+            out->hjob = hjob;
+        } else {
+            CloseHandle(hjob); /* best effort: the child still works */
+        }
+    }
     CloseHandle(in_r); /* child ends: owned by the child now */
     CloseHandle(out_w);
 
@@ -295,6 +315,13 @@ void spawn_kill(spawn_t *s) {
         CloseHandle(s->hproc);
         s->hproc = NULL;
     }
+    /* the job handle last: closing it fires KILL_ON_JOB_CLOSE; nothing is
+       left under the job now, but the symmetric teardown keeps the
+       invariant one job per live spawn */
+    if (s->hjob) {
+        CloseHandle(s->hjob);
+        s->hjob = NULL;
+    }
     if (s->to_fd >= 0) close(s->to_fd);
     if (s->from_fd >= 0) close(s->from_fd);
     s->pid = -1;
@@ -307,6 +334,10 @@ void spawn_wait(spawn_t *s) {
         WaitForSingleObject(s->hproc, INFINITE);
         CloseHandle(s->hproc);
         s->hproc = NULL;
+    }
+    if (s->hjob) {
+        CloseHandle(s->hjob);
+        s->hjob = NULL;
     }
     s->pid = -1;
 }
@@ -351,6 +382,11 @@ static void close_inherited_fds(void) {
 }
 
 int spawn_shell(const char *command_line, spawn_t *out) {
+    /* the pre-exec child checks its parent against this value before it
+       arms PR_SET_PDEATHSIG: a shell may have forked this process after
+       our spawn was already reparented (to init), in which case arming
+       the signal would kill the freshly execed helper at once */
+    const pid_t spawn_ppid = getppid();
     int in_pipe[2], out_pipe[2];
     if (pipe(in_pipe)) return -1;
     if (pipe(out_pipe)) { close(in_pipe[0]); close(in_pipe[1]); return -1; }
@@ -372,6 +408,16 @@ int spawn_shell(const char *command_line, spawn_t *out) {
            the whole foreground group otherwise; children are managed via
            their pipes - SIGTERM through spawn_kill - never by tty input) */
         setpgid(0, 0);
+        /* die with the caller: every helper and mcp server is a child of
+           this process, and an orphaned one keeps its whole (possibly
+           expensive) turn running for nothing. The kernel delivers
+           SIGTERM at the instant the parent dies - even a SIGKILLed or
+           crashed caller cannot leave one behind - and the killed child
+           runs the same teardown for its own children (pdeathsig set in
+           its own pre-exec), so the death cascades. A pre-existing
+           parent is never trusted: a reparented (orphan-adopted) child
+           would see ppid 1 and die immediately. */
+        if (getppid() == (pid_t)spawn_ppid) prctl(PR_SET_PDEATHSIG, SIGTERM);
         /* nothing else is inherited: other servers' pipes and any open
            sockets belong to the parent, not to this server. close_range
            (linux 5.9+) closes it all in one call; else the open-fd

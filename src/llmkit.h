@@ -140,6 +140,10 @@ double mono_now(void);
 #ifdef _WIN32
 typedef struct spawn {
     void *hproc; /* HANDLE, owned; NULL when not running */
+    void *hjob;  /* HANDLE, owned; kill-on-close job over hproc: when the
+                    llmkit process dies, the kernel closes it and reaps
+                    the whole child tree (the helper must not outlive
+                    its caller); NULL when not running */
     long pid;    /* GetProcessId(), for messages only */
     int to_fd;   /* write to child stdin; -1 if none */
     int from_fd; /* read child stdout; -1 if none */
