@@ -613,6 +613,19 @@ No new wire, mcp or loop code.
   no search; linenoise's table (consecutive duplicates not repeated -
   the recall does not step through repeats). `ponytail:` grow it when
   someone complains.
+- **slash commands** - an input line starting with `/` is the session's
+  own control, consumed before any user record. `/help` prints the
+  command list, `/models` is the model selector (below), anything else
+  renders `unknown command` and the prompt returns. No turn runs for a
+  slash line.
+- **`@` path completion** - on a tty, the editor's tab hook completes
+  the trailing word when it starts with the `@` sigil: one listing of
+  the word's directory, whole-line candidates, directories carry a
+  trailing `/` so the next tab descends, hidden entries match only
+  when the prefix itself starts with a dot. At submit, word-initial
+  `@` sigils drop from the record (the model reads the bare path).
+  The history keeps the typed form. Word-initial means the `@` stands
+  at the line start or after a blank: one elsewhere is plain text.
 - **echo** - the editor's own rendering: the prompt carries the bold
   sequence (its escapes cost no columns - the editor counts prompt
   width past ANSI sequences), the typed bytes echo inside it, and the
@@ -652,6 +665,17 @@ No new wire, mcp or loop code.
   rounds reported none ends with the spans, the same rule an empty block
   follows. A turn ending any other way (interrupted, fatal, terminal
   tool) renders no timing line.
+- **`/models` selector** - the session's own flags are the one source:
+  the picker calls `models_fetch` (the `cmd_models` page loop's core,
+  src/models.c) over the session's protocol, `api_base`, key and
+  headers, then prints the ids aligned to the widest, `owner` and
+  `created` inline, under a bold `model> ` prompt. Tab completes over
+  the ids (the session's path hook swaps out for the duration). Empty
+  line keeps the current model, ctrl-c cancels, a name outside the
+  list re-prompts. The pick validates and applies to the engine's llm
+  record. With the helper tool on, the helper seed and its cfg rewrite
+  with the same model and the live `tools` record drops its old
+  `helper` entry, so the next spawn reconciles to the new one.
 - **sink** - `call`'s discipline, one `fwrite` + `fflush` per record, with
   the block framing: a separator opens each block - the first record of
   its kind since the last block closed, and only when its text is

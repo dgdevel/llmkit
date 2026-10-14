@@ -1010,6 +1010,55 @@ selector, the `<api_base>` positional, `--key`, `--model`, `--max-tokens`,
 `repl` it is an unknown flag - usage error, message on stderr, exit 1,
 nothing connects or runs. The prompt channel is the terminal itself.
 
+### session controls
+
+Two controls ride outside the record channel. *(proposed)*
+
+- **slash commands** - an input line that starts with `/` is the
+  session's own command, consumed before any user record: no `user`
+  record, no turn. `/help` prints the command list. `/models` runs the
+  model selector below. Any other `/name` renders one
+  `unknown command '<name>'` line and the prompt returns.
+- **`@` path mention** - a word that starts with `@` names a filesystem
+  path, an input aid, not a record part. On a tty, tab completes the
+  word against the directory it names: entries of that one directory as
+  whole-line candidates, directories with a trailing `/`, hidden
+  entries only when the prefix starts with a dot. At submit, every
+  word-initial `@` drops from the `user` record, so the model reads the
+  bare path. The history keeps the typed form. Word-initial means the
+  `@` stands at the line start or after a blank: one elsewhere is plain
+  text.
+
+### the /models selector
+
+`/models` fetches the endpoint's model list (the `/models` surface of
+[llmkit models](#17-llmkit-models), the same paginated GET, driven by
+the session's own protocol flag, `api_base`, `--key` and `--header`
+values) and applies one picked model to the live session:
+
+```
+id            owner    created        <- columns aligned to the data
+llama3.1      meta     2024-07-23
+...
+(current llama3.1 - empty keeps it, ctrl-c cancels)
+model> _
+```
+
+- the picker prompt is `model> `, bold like the session's own. Tab
+  completes over the ids while the picker reads.
+- empty input keeps the current model (when one is set). A name outside
+  the list re-prompts. Ctrl-C cancels and the session continues
+  unchanged. A session with no model yet must pick one.
+- the pick swaps the `model` field of the session's `llm` record and
+  applies at the next turn boundary (the
+  [change semantics](#5-duplicate-and-change-semantics)). The next turn
+  already uses the new model. A pick that fails validation leaves the
+  session unchanged.
+- with the `helper` tool attached ([llmkit agent](#16-llmkit-agent)),
+  the helper inherits the pick. Its seed and proxy config rewrite with
+  the new model, the live `tools` record drops the old helper entry,
+  and the next helper spawn reconciles to the new one.
+
 ### session model
 
 - The command line compiles to the same leading records `call` compiles -
@@ -1172,8 +1221,9 @@ file2.log.                                     <- plain
   record-level problems in flag values - `invalid_record`, exit 2 - are
   `call`'s rules, unchanged.
 
-Deliberately not offered: `--prompt` in any form, slash commands (`/quit`
-and friends: Ctrl-D and Ctrl-C are the controls), transcript persistence
+Deliberately not offered: `--prompt` in any form, more slash commands
+than `/help` and `/models` (`/quit` and friends: Ctrl-D and Ctrl-C are
+the controls), transcript persistence
 or dumping (the transcript lives in memory and dies with the process;
 records are `runner` territory), usage or token displays beyond the
 timing line's own totals, a banner, styling override flags, and

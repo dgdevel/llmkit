@@ -1,6 +1,6 @@
 # llmkit
 
-llmkit is one executable for llm interaction from the shell and from other programs. One binary, ten commands:
+llmkit is one executable for llm interaction from the shell and from other programs. One binary, eleven commands:
 
 | command | what it does |
 |---|---|
@@ -14,6 +14,7 @@ llmkit is one executable for llm interaction from the shell and from other progr
 | `llmkit mcp-repl <flags>` | the interactive tool console for one mcp server: tab-completed `name(args)` calls, one timing line each |
 | `llmkit prettyprint <conversation.jsonl>` | renders a recorded conversation jsonl with the repl's typography (stdin without a file) |
 | `llmkit proxy <flags>` | a plain-http llm endpoint that forwards to one upstream and prints the passing conversation prettyprint-style |
+| `llmkit models <flags>` | lists the models of one endpoint: aligned columns for reading, `--json` for scripts |
 
 llmkit is written in C11. It talks to any openai-compatible endpoint (chat completions and responses apis) and any anthropic-compatible endpoint. Tools are mcp (Model Context Protocol) servers. The transports are `stdio`, `http` (streamable http), and `sse` (legacy). All current protocol revisions up to `2026-07-28` are supported.
 
@@ -43,6 +44,10 @@ The user asks simple arithmetic.
 ```
 
 Every separator line is stamped with the wall clock. Each turn that finishes its answer prints its timing. The timing shows the time to first token (prompt processing), thinking generation, and response generation. It also shows the token totals of the turn (input, output, and their sum) when the endpoint reports usage.
+
+Two session controls ride along. `/help` lists the commands. `/models` fetches the model list from the session's endpoint and shows it as a table. You pick one and the session switches to it. Empty input keeps the current model. Ctrl-C cancels.
+
+In the input line, a word that starts with `@` names a file or directory path. Tab completes the path from the filesystem. Directory entries get a trailing `/`, so the next Tab descends into them. Hidden entries show only when the path starts with a dot. The `@` goes to the display and the history, not to the model. The model sees the bare path. You type `explain @src/main.c`, the model reads `explain src/main.c`.
 
 For work that needs tools, use `llmkit agent`. It is the same chat with the [built-in mcp tools](docs/builtin-mcp.md) attached. These tools are web search and fetch, file tools, process tools, and skills. The `AGENTS.md` file of the working directory is injected after the system prompt.
 
@@ -142,7 +147,7 @@ Runnable examples for every command live in [examples/](examples/). See [docs/re
 
 ## Command Line Reference
 
-`usage: llmkit <command> [args]`. The commands:
+`usage: llmkit <command> [args]` (run `llmkit help` for the full text). The commands:
 
 | command | arguments |
 |---|---|
@@ -155,6 +160,7 @@ Runnable examples for every command live in [examples/](examples/). See [docs/re
 | `llmkit mcp-repl <flags>` | one transport flag below |
 | `llmkit prettyprint [conversation.jsonl]` | the conversation file, or none: stdin then |
 | `llmkit proxy <flags>` | flags below, one protocol flag required |
+| `llmkit models <flags>` | flags below, one protocol flag required |
 | `llmkit help` | none: the usage text on stdout |
 | `llmkit version` | none: the version on stdout |
 
@@ -210,6 +216,30 @@ The `call` and `repl` commands share one hand-rolled flag parser, without getopt
   `127.0.0.1:8080`, no tls.
 - `--key <token>` - auth for the upstream when the client sent none.
   `x-api-key` under `--anthropic`, `Authorization: Bearer` otherwise.
+
+`models` shares the protocol flags of `call` and talks to no conversation:
+
+```
+llmkit models (--anthropic | --openai | --openai-responses) <api_base>
+              [--key <token>] [--header <name=value>]... [--json]
+```
+
+- `--anthropic` / `--openai` / `--openai-responses` - the protocol flag,
+  exactly one. It picks the auth headers, nothing else.
+- `<api_base>` - the same base url the other commands take, version
+  segment included (e.g. `http://localhost:9931/v1`).
+- `--key <token>` - `Authorization: Bearer` under the openai protocols,
+  `x-api-key` plus `anthropic-version` under `--anthropic`.
+- `--header <name=value>` - sent verbatim, repeatable. A later same-name
+  header replaces the earlier one. A custom `Authorization` or
+  `x-api-key` suppresses the built-in auth.
+- `--json` - switches the output from aligned columns to one normalized
+  json object, `{"object":"list","data":[...],"count":<n>}`. Each entry
+  keeps the provider's model object under `raw`.
+
+The command paginates on its own (`has_more` + `last_id`) and folds all
+pages into one output. Errors follow the `call` exit codes: connect
+failure 3, http error 4, unusable response body 5, usage error 1.
 
 ## Building
 

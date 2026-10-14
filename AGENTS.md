@@ -13,7 +13,7 @@ This document gives context and instructions for agents that work on the `llmkit
 
 ## Project Structure
 - `src/`: the source code.
-    - `main.c`: entry point and subcommand dispatch (runner, call, repl, agent, mcp-repl, prettyprint, proxy, mcp servers).
+    - `main.c`: entry point and subcommand dispatch (runner, call, repl, agent, mcp-repl, prettyprint, proxy, models, mcp servers).
     - `engine.c`: the conversation engine (turn loop, tool calls, steering).
     - `agent.c`: the agent-as-tool runner (`llmkit agent-as-tool`). The `llmkit agent` chat lives in `repl.c`.
     - `wire_openai.c`, `wire_anthropic.c`: the LLM provider wire clients (chat completions, responses, anthropic).
@@ -25,7 +25,7 @@ This document gives context and instructions for agents that work on the `llmkit
       per tool family (`files.c`, `analyze.c`, `process.c`, `web.c`,
       `skills.c`) plus shared helpers (`util.c`, `internal.h`).
     - `call.c`, `models.c`, `repl.c`, `mcprepl.c`, `pretty.c`: the command front-ends (one-off call, models listing, interactive repl, mcp console, transcript rendering).
-    - `editor.c` + `vendor/linenoise/`: interactive line editing behind the repl.
+    - `editor.c` + `vendor/linenoise/`: interactive line editing behind the repl (`@` path completion, tab hooks for the model picker).
     - `platform.c`, `sse.c`, `buf.c`, `jsonl.c`: platform tty and pipes, SSE parsing, buffers, JSON Lines.
     - `prompts/`: system and tool prompts. `tools/gen-prompts.sh` bundles them into the binary at build time.
     - `vendor/regex/`: vendored regex for Windows (MinGW) builds.
