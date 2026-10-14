@@ -358,6 +358,13 @@ void tool_file_create(const cJSON *args, buf_t *out, bool *is_error) {
    is irreversibly removed as before. directories move whole - no walk,
    no partial failures. */
 
+/* "name" of "/a/b/name", "" of "/name", whole of "name"; never the
+   leading slash, never past a trailing one */
+static const char *base_ptr(const char *path) {
+    const char *p = strrchr(path, '/');
+    return p ? p + 1 : path;
+}
+
 #ifndef _WIN32 /* xdg trash is a freedesktop thing; windows recycles via shell */
 /* is p a directory on the same filesystem as top */
 static bool same_fs_mount(const char *top, const char *p) {
@@ -365,13 +372,6 @@ static bool same_fs_mount(const char *top, const char *p) {
     if (BM_LSTAT(p, &b)) return false;         /* gone: let the move fail */
     if (BM_LSTAT(top, &a)) return false;
     return a.st_dev == b.st_dev;
-}
-
-/* "name" of "/a/b/name", "" of "/name", whole of "name"; never the
-   leading slash, never past a trailing one */
-static const char *base_ptr(const char *path) {
-    const char *p = strrchr(path, '/');
-    return p ? p + 1 : path;
 }
 
 /* does trash_dir/name already exist; unreadable trash counts as taken */
