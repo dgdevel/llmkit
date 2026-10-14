@@ -1052,6 +1052,11 @@ int cmd_mcp_repl(int argc, char **argv);
 int cmd_prettyprint(const char *path); /* NULL or "-": stdin */
 int cmd_llmproxy(int argc, char **argv);
 int cmd_models(int argc, char **argv); /* llmkit models: GET /models */
+/* the shared /models core: one paginated GET <api_base>/models in the
+   caller's llm dialect; the normalized model objects (id/created/
+   display_name/owned_by) as an array, NULL + err on a failure */
+cJSON *models_fetch(int protocol, const char *api_base, const char *key,
+                    const cJSON *headers, char *err, size_t errsz);
 int cmd_help(void);
 int cmd_version(void);
 

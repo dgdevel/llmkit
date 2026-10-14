@@ -209,6 +209,100 @@ static cJSON *model_normalize(const cJSON *m, char *err, size_t errsz) {
     return out;
 }
 
+/* ================= session fetch (the repl's /models) ================= */
+
+/* one GET /models page loop over the live session's llm record. Copies
+   every protocol, key and header flag - the endpoint already carries
+   the session - and returns the normalized model objects as an array
+   (never NULL, empty on none). NULL + err on a transport or parse
+   failure (the tier's message, prefixed by its code). */
+cJSON *models_fetch(int protocol, const char *api_base, const char *key,
+                    const cJSON *headers, char *err, size_t errsz) {
+    models_cfg_t c;
+    memset(&c, 0, sizeof c);
+    c.protocol = protocol;
+    c.api_base = strdup(api_base ? api_base : "");
+    if (!c.api_base) {
+        snprintf(err, errsz, "out of memory");
+        return NULL;
+    }
+    c.key = key ? strdup(key) : NULL;
+    bool oom = !key || c.key;
+    cJSON *h;
+    if (headers && cJSON_IsObject(headers))
+        cJSON_ArrayForEach(h, (cJSON *)headers) {
+            if (!h->string || !cJSON_IsString(h) || !h->valuestring) continue;
+            if (hdr_add(&c, h->string, h->valuestring)) oom = false;
+        }
+    if (!oom) {
+        snprintf(err, errsz, "out of memory");
+        models_cfg_free(&c);
+        return NULL;
+    }
+    cJSON *arr = cJSON_CreateArray();
+    if (!arr) {
+        snprintf(err, errsz, "out of memory");
+        models_cfg_free(&c);
+        return NULL;
+    }
+    /* the endpoint's own cursor, one page per round (cmd_models) */
+    char after[512] = "";
+    while (1) {
+        buf_t body;
+        buf_init(&body);
+        long status = 0;
+        err[0] = '\0';
+        bool ok = fetch_page(&c, after, &body, &status, err, sizeof err);
+        cJSON *page = ok ? cJSON_ParseWithLength(body.data ? body.data : "",
+                                                 body.len)
+                         : NULL;
+        buf_free(&body);
+        if (!ok) {
+            cJSON_Delete(arr);
+            models_cfg_free(&c);
+            return NULL;
+        }
+        if (!page) {
+            snprintf(err, errsz, "api_error: bad json from endpoint");
+            cJSON_Delete(arr);
+            models_cfg_free(&c);
+            return NULL;
+        }
+        const cJSON *data = cJSON_GetObjectItemCaseSensitive(page, "data");
+        if (!cJSON_IsArray(data)) {
+            snprintf(err, errsz, "api_error: no data array in response");
+            cJSON_Delete(page);
+            cJSON_Delete(arr);
+            models_cfg_free(&c);
+            return NULL;
+        }
+        const cJSON *m;
+        cJSON_ArrayForEach(m, data) {
+            err[0] = '\0';
+            cJSON *nm = model_normalize(m, err, sizeof err);
+            if (!nm) {
+                cJSON_Delete(nm);
+                cJSON_Delete(page);
+                cJSON_Delete(arr);
+                models_cfg_free(&c);
+                return NULL;
+            }
+            cJSON_AddItemToArray(arr, nm);
+        }
+        const cJSON *hm = cJSON_GetObjectItemCaseSensitive(page, "has_more");
+        const cJSON *lid =
+            cJSON_GetObjectItemCaseSensitive(page, "last_id");
+        after[0] = '\0';
+        if (cJSON_IsTrue(hm) && cJSON_IsString(lid) &&
+            lid->valuestring[0] && strlen(lid->valuestring) < sizeof after)
+            snprintf(after, sizeof after, "%s", lid->valuestring);
+        cJSON_Delete(page);
+        if (!after[0]) break;
+    }
+    models_cfg_free(&c);
+    return arr;
+}
+
 /* ================= output ================= */
 
 static void print_table(const cJSON *data) {

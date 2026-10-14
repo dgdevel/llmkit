@@ -18,6 +18,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #ifdef _WIN32
@@ -583,6 +584,322 @@ void repl_helper_cleanup(const char *seed_path, const char *cfg_path) {
 
 /* ================= session ================= */
 
+/* ================= slash commands ================= */
+
+/* the session's slash state: shared by the dispatch and the model
+   picker's line reads. No key-macro generalization - every command
+   owns its whole flow. */
+typedef struct slash_state {
+    editor_t *ed;             /* the session's tty editor, NULL = plain */
+    plain_reader_t *pr;       /* the session's plain reader, NULL = tty */
+    dspy_t *d;                /* the session's sink display */
+    const repl_opts_t *o;     /* the session's extras (helper tool) */
+    const char *exe_path;     /* the helper seed's command lines */
+    const char *main_prompt;  /* the session's own prompt, restored */
+    buf_t pick;               /* the picker's last submitted line */
+    const char *seed_path;    /* the helper's seed file (agent) */
+    const char *cfg_path;     /* the helper's proxy config (agent) */
+    call_cfg_t cfg;           /* the helper seed's source (its own copy) */
+} slash_state_t;
+
+/* `/help`: the session's command catalogue */
+static void slash_help(dspy_t *d) {
+    const char *lines[] = {
+        "commands:",
+        "  /help          this list",
+        "  /models        pick the model of the session",
+    };
+    dspy_ensure_nl(d);
+    for (size_t i = 0; i < sizeof lines / sizeof lines[0]; i++)
+        dspy_write_str(d, lines[i]), dspy_write_str(d, "\n");
+}
+
+/* tab completion over the model ids (mcprepl's shape, whole lines) */
+static void complete_model(void *ctx, const char *line,
+                           editor_candidates_t *c) {
+    const cJSON *models = ctx;
+    const cJSON *it;
+    cJSON_ArrayForEach(it, models) {
+        const cJSON *id = cJSON_GetObjectItemCaseSensitive(it, "id");
+        if (cJSON_IsString(id) && id->valuestring &&
+            strstr(id->valuestring, line) == id->valuestring)
+            editor_add_candidate(c, id->valuestring);
+    }
+}
+
+/* one plain (non-tty) line, the editor's results: ED_QUIT/ED_CLEAR
+   counts as a cancel, EOF as a failure */
+static int pick_read_line(plain_reader_t *pr, buf_t *out) {
+    int r = plain_line(pr, out);
+    if (r == ED_SUBMIT) return 0;
+    if (r == ED_QUIT || r == ED_CLEAR) return 1;
+    return 2; /* EOF (and the hygiene codes, never here) */
+}
+
+/* one picker line with the model ids as tab completions; 0 submit, 1
+   cancel (ctrl-c / empty-line clear), 2 failure */
+static int pick_read_model(slash_state_t *sl, const cJSON *models) {
+    if (sl->ed) {
+        sl->ed->on_tab = complete_model;
+        sl->ed->tab_ctx = (void *)models;
+        int r = editor_line(sl->ed);
+        sl->ed->on_tab = NULL;
+        if (r == ED_SUBMIT) {
+            buf_clear(&sl->pick);
+            buf_append(&sl->pick, sl->ed->line.data, sl->ed->line.len);
+            return 0;
+        }
+        if (r == ED_QUIT || r == ED_CLEAR) return 1;
+        return 2;
+    }
+    buf_clear(&sl->pick);
+    return pick_read_line(sl->pr, &sl->pick);
+}
+
+/* the /models picker: fetch the endpoint's list, let the user choose
+   one (tab completion on a tty), apply it to the session - engine,
+   seed, cfg - and inherit it to the helper. 0 picked and applied, 1
+   canceled, 2 failure (message already drawn) */
+static int slash_models(slash_state_t *sl, engine_t *e) {
+    dspy_t *d = sl->d;
+    const repl_opts_t *o = sl->o;
+    /* the list is the session's own flags' - one source of truth */
+    const cJSON *headers =
+        cJSON_GetObjectItemCaseSensitive(e->llm, "headers");
+    char err[256] = "";
+    cJSON *models = models_fetch(e->protocol, rec_str(e->llm, "api_base"),
+                                 rec_str(e->llm, "api_key"), headers, err,
+                                 sizeof err);
+    if (!models) {
+        dspy_error_line(d, NULL, err);
+        return 2;
+    }
+    if (d->io_fail) { /* the fetch drew, the write failed */
+        cJSON_Delete(models);
+        return 2;
+    }
+    size_t n = cJSON_GetArraySize(models);
+    if (!n) {
+        dspy_error_line(d, NULL, "no models reported");
+        cJSON_Delete(models);
+        return 2;
+    }
+    /* the list: ids aligned to the widest, owner and created inline */
+    size_t idw = 2, obw = 5;
+    const cJSON *it;
+    cJSON_ArrayForEach(it, models) {
+        const cJSON *v;
+        size_t w;
+        if ((v = cJSON_GetObjectItemCaseSensitive(it, "id")) &&
+            cJSON_IsString(v) && (w = strlen(v->valuestring)) > idw)
+            idw = w;
+        if ((v = cJSON_GetObjectItemCaseSensitive(it, "owned_by")) &&
+            cJSON_IsString(v) && (w = strlen(v->valuestring)) > obw)
+            obw = w;
+    }
+    char hdr[300];
+    int hn = snprintf(hdr, sizeof hdr, "%-*s  %-*s  %s", (int)idw, "id",
+                      (int)obw, "owner", "created");
+    dspy_ensure_nl(d);
+    dspy_write(d, hdr, (size_t)hn >= sizeof hdr ? sizeof hdr - 1
+                                                : (size_t)hn);
+    dspy_write_str(d, "\n");
+    cJSON_ArrayForEach(it, models) {
+        char created[32] = "-";
+        const cJSON *cr = cJSON_GetObjectItemCaseSensitive(it, "created");
+        if (cJSON_IsNumber(cr)) {
+            time_t t = (time_t)cr->valuedouble;
+            struct tm tm;
+            gmtime_r(&t, &tm);
+            strftime(created, sizeof created, "%Y-%m-%d", &tm);
+        }
+        const cJSON *id = cJSON_GetObjectItemCaseSensitive(it, "id");
+        const cJSON *ob = cJSON_GetObjectItemCaseSensitive(it, "owned_by");
+        char ln[512];
+        int wn = snprintf(ln, sizeof ln, "%-*s  %-*s  %s", (int)idw,
+                          cJSON_IsString(id) ? id->valuestring : "",
+                          (int)obw,
+                          cJSON_IsString(ob) ? ob->valuestring : "",
+                          created);
+        dspy_write(d, ln, (size_t)wn >= sizeof ln ? sizeof ln - 1
+                                                  : (size_t)wn);
+        dspy_write_str(d, "\n");
+    }
+    char cur[128] = "";
+    const cJSON *cm = cJSON_GetObjectItemCaseSensitive(e->llm, "model");
+    if (cJSON_IsString(cm)) {
+        snprintf(cur, sizeof cur, "%s", cm->valuestring);
+        char msg[300];
+        int mn = snprintf(msg, sizeof msg,
+                          "(current %s - empty keeps it, ctrl-c cancels)",
+                          cur);
+        dspy_write(d, msg, (size_t)mn >= sizeof msg ? sizeof msg - 1
+                                                    : (size_t)mn);
+        dspy_write_str(d, "\n");
+    }
+    for (;;) {
+        int r = pick_read_model(sl, models);
+        if (r) { /* canceled or failed: the session's own prompt again */
+            if (r == 2) d->io_fail = true;
+            cJSON_Delete(models);
+            return r;
+        }
+        if (!sl->pick.len) {
+            if (*cur) break; /* empty line: keep the current model */
+            dspy_write_str(d, "(no model yet - pick one)\n");
+            continue;
+        }
+        bool found = false;
+        cJSON_ArrayForEach(it, models) {
+            const cJSON *id = cJSON_GetObjectItemCaseSensitive(it, "id");
+            if (cJSON_IsString(id) && id->valuestring &&
+                !strcmp(id->valuestring, sl->pick.data))
+                found = true;
+        }
+        if (found) break;
+        char msg[400];
+        int mn = snprintf(msg, sizeof msg,
+                          "no '%s' in the list - pick again", sl->pick.data);
+        dspy_write(d, msg,
+                   (size_t)mn >= sizeof msg ? sizeof msg - 1 : (size_t)mn);
+        dspy_write_str(d, "\n");
+    }
+    char *model = NULL;
+    if (sl->pick.len) {
+        model = sl->pick.data;
+    } else if (*cur) {
+        model = cur;
+    }
+    if (!model) { /* no current model and none picked: stay unset */
+        cJSON_Delete(models);
+        return 1;
+    }
+    if (*cur && !strcmp(model, cur)) {
+        /* the current model unchanged: nothing to swap */
+        cJSON_Delete(models);
+        return 0;
+    }
+    /* the swap: engine first (the llm record is the source the wire
+       reads per turn), then the helper's seed rewrite - spawn and
+       cfg files keep their paths, the files carry the new model */
+    cJSON *llm = cJSON_Duplicate(e->llm, 1);
+    cJSON_DeleteItemFromObject(llm, "model");
+    cJSON_AddStringToObject(llm, "model", model);
+    char *verr = validate_llm(llm);
+    if (verr) {
+        dspy_error_line(d, NULL, verr);
+        free(verr);
+        cJSON_Delete(llm);
+        cJSON_Delete(models);
+        return 2;
+    }
+    engine_apply_config_record(e, llm);
+    cJSON_Delete(llm);
+    if (o->helper_tool) { /* the subagent inherits the session's model */
+        /* the seed rebuild reads the cfg copy: its model field moves to
+           the picked one (the session's llm record already did) */
+        free(sl->cfg.model);
+        sl->cfg.model = strdup(model);
+        if (!sl->cfg.model) {
+            cJSON_Delete(models);
+            return 2; /* engine already applied - nothing more */
+        }
+        /* the rebuild drops the old helper entry from the live tools
+           record: the spawn keeps its config path, the rewritten seed
+           file carries the new model, reconcile swaps the child */
+        if (e->tools_cfg) {
+            cJSON *list =
+                cJSON_GetObjectItemCaseSensitive(e->tools_cfg, "tools");
+            if (cJSON_IsArray(list)) {
+                cJSON *kept = cJSON_CreateArray();
+                if (!kept) {
+                    cJSON_Delete(models);
+                    return 2; /* engine already applied - nothing more */
+                }
+                const cJSON *s;
+                cJSON_ArrayForEach(s, list) {
+                    if (strcmp(rec_str(s, "name"), "helper"))
+                        cJSON_AddItemToArray(kept,
+                                             cJSON_Duplicate((cJSON *)s, 1));
+                }
+                cJSON_DeleteItemFromObject(e->tools_cfg, "tools");
+                cJSON_AddItemToObject(e->tools_cfg, "tools", kept);
+            }
+        }
+        /* rewrite: the old seed and cfg files (their children hold no
+           descriptors - each read its file fully at startup) go first,
+           the rebuild fills the slots with its own fresh temps */
+        remove(sl->seed_path);
+        remove(sl->cfg_path);
+        cJSON *helper_srv = NULL;
+        int rc = repl_helper_build(&sl->cfg, prompt_system_prompts_helper,
+                                   e->tools_cfg, sl->exe_path, e,
+                                   (char *)sl->seed_path,
+                                   strlen(sl->seed_path) + 1,
+                                   (char *)sl->cfg_path,
+                                   strlen(sl->cfg_path) + 1, &helper_srv);
+        if (rc == EXIT_OK) {
+            cJSON *tools = e->tools_cfg
+                               ? cJSON_Duplicate(e->tools_cfg, 1)
+                               : cJSON_Parse("{\"type\":\"tools\",\"tools\":[]}");
+            cJSON_AddItemToArray(
+                cJSON_GetObjectItemCaseSensitive(tools, "tools"), helper_srv);
+            char *m2 = validate_tools(tools);
+            if (m2) {
+                dspy_error_line(d, NULL, m2);
+                free(m2);
+                cJSON_Delete(tools);
+                rc = EXIT_IO_ERROR;
+            } else {
+                engine_apply_config_record(e, tools);
+                cJSON_Delete(tools);
+            }
+        } else if (helper_srv) {
+            cJSON_Delete(helper_srv);
+        }
+    }
+    {
+        char msg[300];
+        int mn = snprintf(msg, sizeof msg, "model: %s", model);
+        dspy_write(d, msg,
+                   (size_t)mn >= sizeof msg ? sizeof msg - 1 : (size_t)mn);
+        dspy_write_str(d, "\n");
+    }
+    cJSON_Delete(models);
+    return 0;
+}
+
+/* one input line: a slash command consumed (its own result), any other
+   input falls through to the prompt (1). The model picker gets the
+   `model> ` prompt; the session's own is restored around it. */
+static int slash_dispatch(slash_state_t *sl, const char *s, engine_t *e) {
+    if (!strcmp(s, "/help")) {
+        slash_help(sl->d);
+        return 0;
+    }
+    if (!strcmp(s, "/models")) {
+        if (sl->ed) {
+            /* the bold `model> ` prompt, styled like the session's own */
+            static _Thread_local char pp[80];
+            snprintf(pp, sizeof pp, "%smodel> ", sl->d->st->bold);
+            sl->ed->prompt = pp;
+        }
+        int r = slash_models(sl, e);
+        if (sl->ed) sl->ed->prompt = sl->main_prompt;
+        (void)r; /* both cancel and failure leave the session intact */
+        return 0;
+    }
+    {
+        char msg[300];
+        int mn = snprintf(msg, sizeof msg,
+                          "unknown command '%s' - /help lists them", s);
+        dspy_write(sl->d, msg,
+                   (size_t)mn >= sizeof msg ? sizeof msg - 1 : (size_t)mn);
+        dspy_write_str(sl->d, "\n");
+    }
+    return 0;
+}
+
 cJSON *repl_build_options(void) {
     cJSON *t = cJSON_CreateObject();
     cJSON_AddStringToObject(t, "type", "options");
@@ -658,6 +975,11 @@ int repl_run_ex(const call_cfg_t *c, const repl_opts_t *o, int in_fd,
     bool need_rule = true;     /* rule vs no-rule prompt redraws */
     buf_t line;
     buf_init(&line);
+    /* the session's slash command state: bound fully after the cfg's
+       own copy exists (the /models picker owns its inputs) */
+    slash_state_t sl;
+    memset(&sl, 0, sizeof sl);
+    buf_init(&sl.pick);
 
     /* the bundled default system prompt: an explicit --system-prompt
        replaces it, and (per the call contract) a different empty text vs
@@ -667,6 +989,19 @@ int repl_run_ex(const call_cfg_t *c, const repl_opts_t *o, int in_fd,
     call_cfg_t cfg = *c;
     if (!cfg.system && o->default_prompt)
         cfg.system = (char *)o->default_prompt;
+
+    /* the slash state binds the session's own inputs: the editor or
+       plain reader, the display, the helper's file slots and the cfg
+       copy the seed rebuild reads */
+    sl.ed = tty ? &ed : NULL;
+    sl.pr = tty ? NULL : &pr;
+    sl.d = &sink.d;
+    sl.o = o;
+    sl.exe_path = exe_path;
+    sl.main_prompt = prompt;
+    sl.seed_path = helper_seed;
+    sl.cfg_path = helper_cfg;
+    sl.cfg = cfg;
 
     int rc = call_compile(&cfg, e, exe_path);
     if (rc) goto done;
@@ -797,6 +1132,17 @@ int repl_run_ex(const call_cfg_t *c, const repl_opts_t *o, int in_fd,
         need_rule = true;
         if (tty) editor_hist_push(&ed, line.data);
 
+        /* slash commands: consumed before any user record - the line is
+           the session's own control, not the conversation's */
+        if (line.data[0] == '/') {
+            slash_dispatch(&sl, line.data, e);
+            if (sink.d.io_fail) { /* the command drew, the write failed */
+                rc = EXIT_OUT_OF_CHANNEL;
+                goto done;
+            }
+            continue;
+        }
+
         if (!tty) render_user_block(&sink, line.data);
 
         {
@@ -833,6 +1179,7 @@ int repl_run_ex(const call_cfg_t *c, const repl_opts_t *o, int in_fd,
 
 done:
     buf_free(&line);
+    buf_free(&sl.pick);
     /* the dspy sink's strdup'd brief state (agent display) */
     dspy_brief_flush(&sink.d); /* held request lines, not lost */
     free(sink.d.brief_tools);
