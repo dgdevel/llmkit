@@ -5,7 +5,7 @@ DO NOT invent, ask user when in doubt.
 DO NOT disrupt user OS without asking user consent.
 DO edit freely in current working directory and its subdirectories.
 DO NOT edit outside without asking user consent.
-DO NOT forget to update the user on todo list status between work.
+DO update the user on todo list status between work items
 
 # Tools
 Work smart, not hard. use tools in order listed below.
