@@ -27,6 +27,7 @@ details in sec.5 and sec.6. Where this document picks a ceiling, it is marked
 17. [prettyprint](#17-prettyprint)
 18. [llm-proxy](#18-llm-proxy)
 19. [agent](#19-agent)
+20. [models](#20-models)
 
 ## 1. technology choices
 
@@ -1005,3 +1006,44 @@ defaults (the selfcheck drives both).
 `ponytail:` the store is one append-only jsonl file, no schema version,
 no lock file, no compaction - `prettyprint` reads it and a resumed
 session replays it, which is the whole feature.
+
+## 20. models
+
+`llmkit models` lists the models of one endpoint (the `/models`
+endpoint the providers hang off their api_base): one GET per page, no
+engine, no wire, no record channel. One new `src/models.c`, a dispatch
+line in `src/main.c` (requirements sec.14).
+
+- **flags** - the call parser's shape minus the conversation flags:
+  one protocol flag (`--anthropic`, `--openai`, `--openai-responses`;
+  required, it picks the auth headers), positional `<api_base>`
+  (required, exactly one), `--key`, repeatable `--header <name>=<value>`
+  (later replaces earlier on the same name), `--json`. No `--model`,
+  no prompt: this command talks to no turn endpoint. Errors are usage
+  errors, the call command's stderr line + usage + exit 1 tier.
+- **request** - GET `api_base + "/models"`, the raw-record `is_get`
+  http path. Headers: `Accept: application/json`; the key as
+  `Authorization: Bearer` (openai) or `x-api-key` +
+  `anthropic-version: 2023-06-01` (anthropic), same split as the
+  llm-proxy's upstream side; custom `--header` values verbatim, an
+  Authorization/x-api-key among them suppresses the built-in auth.
+- **pagination** - both providers page the list the same way: a
+  `has_more` boolean and a `last_id` cursor, the next page is
+  `GET .../models?after=<last_id>`. The command loops until
+  `has_more` is false or the cursor is missing, then prints once.
+- **output** - without `--json`, one aligned-columns line per model:
+  `id`, `display` (anthropic's `display_name`), `owner` (openai's
+  `owned_by`), `created` as `YYYY-MM-DD` (`-` when the endpoint gives
+  none); widths follow the data, absent columns empty. With `--json`,
+  a normalized `{"object":"list","data":[...],"count":n}` object, one
+  entry per model: `id` always, `created` as unix seconds when the
+  endpoint gave a unix count (openai) or an RFC3339 stamp (anthropic,
+  hand-rolled parse - no strptime: glibc gates it behind _GNU_SOURCE,
+  mingw has none), `display_name`/`owned_by` when the provider has
+  them, and `raw`, the provider's model object verbatim - nothing the
+  endpoint said is dropped, the normalization is a projection, not a
+  replacement.
+- **errors** - no error records: transport failures print
+  `llmkit models: connect_failed: ...`, exit 3; non-2xx and unusable
+  bodies print `llmkit models: http_error|api_error: ...`, exit 4/5 -
+  the call command's exit code table (sec.13), not the record channel.

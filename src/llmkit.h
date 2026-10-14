@@ -1051,6 +1051,7 @@ int cmd_agent_repl(int argc, char **argv); /* llmkit agent */
 int cmd_mcp_repl(int argc, char **argv);
 int cmd_prettyprint(const char *path); /* NULL or "-": stdin */
 int cmd_llmproxy(int argc, char **argv);
+int cmd_models(int argc, char **argv); /* llmkit models: GET /models */
 int cmd_help(void);
 int cmd_version(void);
 

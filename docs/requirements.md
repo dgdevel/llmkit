@@ -34,6 +34,7 @@ applies. Rules marked *(proposed)* are working desiderata, not yet frozen.
 14. [llmkit prettyprint](#14-llmkit-prettyprint)
 15. [llmkit proxy](#15-llmkit-proxy)
 16. [llmkit agent](#16-llmkit-agent)
+17. [llmkit models](#17-llmkit-models)
 
 ## 1. cli conventions
 
@@ -1546,3 +1547,75 @@ lives in memory and dies with the process. With it:
 Deliberately not offered: store compaction or rotation, more than one
 store per session, flags overriding the `AGENTS.md` path or the
 built-in server's name, and everything on repl's own not-offered list.
+
+
+## 17. llmkit models
+
+Seventeenth command: the endpoint introspection surface. The `/models`
+endpoint every provider hangs off its api_base (openai, anthropic, and
+the openai-compatible field: ollama, vllm, lm studio, openrouter, ...)
+lists the models an endpoint serves. `llmkit models` fetches it and
+prints the list - aligned columns for the human, a normalized json
+object for the script. It talks to no turn endpoint: no engine, no
+wire, no conversation. *(proposed)*
+
+```
+llmkit models (--anthropic | --openai | --openai-responses) <api_base>
+              [--key <token>] [--header <name=value>]...
+              [--json]
+```
+
+### cli surface
+
+- one protocol flag, required - it picks the auth headers, nothing
+  else: the `/models` endpoint is shared by chat completions and
+  responses. A second protocol flag is a usage error.
+- `<api_base>` - required, exactly one; the same base url the other
+  commands take (it carries the version segment, e.g. `.../v1`).
+- `--key <token>` - optional, given at most once; `Authorization:
+  Bearer` for the openai protocols, `x-api-key` +
+  `anthropic-version` for anthropic - the llm-proxy's split.
+- `--header <name=value>` - optional, repeatable; sent verbatim, later
+  replaces earlier on the same name; an `Authorization`/`x-api-key`
+  among them suppresses the built-in auth.
+- `--json` - optional, given at most once; switches the output format.
+- any other flag (`--model`, `--prompt`, ...) is unknown: usage error
+  (stderr line + usage, exit 1), the two-tier rule - CLI shape here,
+  no record validation at all.
+
+### request and pagination
+
+One `GET <api_base>/models` per page, `Accept: application/json`, no
+body. Both providers page the list identically: `has_more` boolean +
+`last_id` cursor, next page `GET .../models?after=<last_id>`; the
+command loops until `has_more` is false or the cursor is missing, all
+pages folded into one output.
+
+### output
+
+- **text** (default) - one header line + one line per model, aligned
+  columns, widths from the data: `id`, `display` (anthropic's
+  `display_name`; empty for openai), `owner` (openai's `owned_by`;
+  empty for anthropic), `created` as `YYYY-MM-DD` (`-` when absent).
+- **`--json`** - one `{"object":"list","data":[...],"count":<n>}`
+  object, pretty-minified on one line. Each entry: `id` (always),
+  `created` (unix seconds, from the openai count or parsed from the
+  anthropic RFC3339 stamp; omitted when neither), `display_name` /
+  `owned_by` (when the provider has them), `raw` (the provider's model
+  object verbatim - the projection drops nothing).
+- **stdout only** - diagnostics go to stderr, the list never mixes
+  with them.
+
+### errors
+
+No error records, the exit code table applies directly: connect
+failures `llmkit models: connect_failed: ...`, exit 3; non-2xx
+responses `llmkit models: http_error: HTTP <n>: ...`, exit 4; bodies
+that do not parse or lack the `data` array `llmkit models: api_error:
+...`, exit 5; usage errors exit 1. SIGINT interrupts the transfer, exit
+8.
+
+Deliberately not offered: model retrieval or deletion
+(`/models/{id}`), server-side filtering, a `--raw` passthrough of the
+upstream body (the `raw` field in `--json` mode covers it), and any
+caching of the list.

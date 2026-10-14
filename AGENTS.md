@@ -24,7 +24,7 @@ This document gives context and instructions for agents that work on the `llmkit
       holds the tool table and the json-rpc dispatch. `builtin/` has one file
       per tool family (`files.c`, `analyze.c`, `process.c`, `web.c`,
       `skills.c`) plus shared helpers (`util.c`, `internal.h`).
-    - `call.c`, `repl.c`, `mcprepl.c`, `pretty.c`: the command front-ends (one-off call, interactive repl, mcp console, transcript rendering).
+    - `call.c`, `models.c`, `repl.c`, `mcprepl.c`, `pretty.c`: the command front-ends (one-off call, models listing, interactive repl, mcp console, transcript rendering).
     - `editor.c` + `vendor/linenoise/`: interactive line editing behind the repl.
     - `platform.c`, `sse.c`, `buf.c`, `jsonl.c`: platform tty and pipes, SSE parsing, buffers, JSON Lines.
     - `prompts/`: system and tool prompts. `tools/gen-prompts.sh` bundles them into the binary at build time.
