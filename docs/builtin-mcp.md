@@ -1,6 +1,6 @@
 # builtin-mcp
 
-`llmkit builtin-mcp` is an mcp server on stdio. It exposes a set of generic-use tools: web search, web fetch, seven file operations, four process operations, and two agent-skill operations. It takes no arguments and has no configuration file:
+`llmkit builtin-mcp` is an mcp server on stdio. It exposes a set of generic-use tools: web search, web fetch, seven file operations, four process operations, two agent-skill operations, and the current date and time. It takes no arguments and has no configuration file:
 
 ```sh
 $ llmkit builtin-mcp < jsonrpc-on-stdin   # serves until eof
@@ -45,6 +45,7 @@ A platform-dependent description ships in both variants. The extra `<argument>.w
 | `process_send_signal` | `pid: int, signal: string` | delivery confirmation, or the exit status of a spawned pid |
 | `skills_search` | `keywords: string` | matching skills as records |
 | `skills_read` | `name: string` | the skill's SKILL.md text |
+| `now` | none | current date and time, iso 8601 + utc offset + timezone name |
 
 ### web_search(keywords)
 
@@ -222,6 +223,16 @@ A missing frontmatter name falls back to the skill's directory name. No match an
 ### skills_read(name)
 
 Searches the same roots in the same order. It answers the full text of the first `<skill>/SKILL.md` whose directory name or frontmatter name equals `name`. The local root shadows the global one. An unknown name is an error.
+
+### now()
+
+No arguments. It answers the machine's current wall-clock date and time: iso 8601 to the second, the utc offset of that instant, and the timezone name:
+
+```
+2025-06-01T12:00:00+02:00 at Europe/Rome timezone
+```
+
+On posix the timezone name comes from the `TZ` variable when it names a zone, else from the `/etc/localtime` symlink; a posix name is always served. On windows with no zoneinfo data the fallbacks are `UTC`-relative names such as `UTC` or the `TZ` abbreviation (`CET`); the offset always reflects the actual clock.
 
 ## Regex flavor
 

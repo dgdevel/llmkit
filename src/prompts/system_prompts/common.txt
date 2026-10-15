@@ -17,6 +17,7 @@ Tools are for:
 - search the internet: `web_search` and `web_fetch`
 - process management: `process_exec`, `process_wait`, `process_status`, `process_send_signal`
 - reading skills: `skills_search` and `skills_read`
+- date/time/timezone: `now`
 
 ## Tools Rules
 DO Prefer relative paths if no system-wide access is needed.

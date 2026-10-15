@@ -122,6 +122,9 @@ static const arg_def_t ARGS_skills_search[] = {
 static const arg_def_t ARGS_skills_read[] = {
     {"name", "string", prompt_mcp_skills_read_arguments_name, true},
 };
+static const arg_def_t ARGS_now[] = {
+    {NULL, NULL, NULL, false},
+};
 
 static const tool_def_t TOOLS[] = {
     {"web_search", prompt_mcp_web_search_description, ARGS_web_search, 1},
@@ -148,6 +151,7 @@ static const tool_def_t TOOLS[] = {
     {"skills_search", prompt_mcp_skills_search_description, ARGS_skills_search,
      1},
     {"skills_read", prompt_mcp_skills_read_description, ARGS_skills_read, 1},
+    {"now", prompt_mcp_now_description, ARGS_now, 0},
 };
 enum { TOOLS_N = sizeof TOOLS / sizeof TOOLS[0] };
 
@@ -177,6 +181,8 @@ void tool_process_send_signal(const cJSON *args, buf_t *out, bool *is_error);
 /* src/builtin/skills.c */
 void tool_skills_search(const cJSON *args, buf_t *out, bool *is_error);
 void tool_skills_read(const cJSON *args, buf_t *out, bool *is_error);
+/* src/builtin/now.c */
+void tool_now(const cJSON *args, buf_t *out, bool *is_error);
 
 static const tool_fn TOOL_FNS[TOOLS_N] = {
     tool_web_search, tool_web_fetch,  tool_files_list, tool_files_search,
@@ -186,6 +192,7 @@ static const tool_fn TOOL_FNS[TOOLS_N] = {
     tool_process_exec, tool_process_status, tool_process_wait,
     tool_process_send_signal,
     tool_skills_search, tool_skills_read,
+    tool_now,
 };
 
 /* ================= json-rpc handler ================= */

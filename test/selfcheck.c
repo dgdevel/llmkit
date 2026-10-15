@@ -11,6 +11,7 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <regex.h>
 
 /* ================= harness ================= */
 
@@ -1639,18 +1640,18 @@ static void test_builtin(void) {
             ? cJSON_GetObjectItemCaseSensitive(
                   cJSON_GetObjectItemCaseSensitive(r, "result"), "tools")
             : NULL;
-        check(cJSON_IsArray(tools) && cJSON_GetArraySize(tools) == 17,
-              "builtin: seventeen tools listed");
-        const char *want[17] = {
+        check(cJSON_IsArray(tools) && cJSON_GetArraySize(tools) == 18,
+              "builtin: eighteen tools listed");
+        const char *want[18] = {
             "web_search",     "web_fetch",      "files_list",
             "files_search",   "file_read",      "file_create",
             "file_edit",      "file_delete",    "file_copy",
             "file_move",      "file_analyze",
             "process_exec",   "process_status", "process_wait",
-            "process_send_signal", "skills_search", "skills_read" };
+            "process_send_signal", "skills_search", "skills_read", "now" };
         bool names_ok = true, descs_set = true, args_set = true;
         if (cJSON_IsArray(tools))
-            for (int i = 0; i < 17; i++) {
+            for (int i = 0; i < 18; i++) {
                 const cJSON *t = cJSON_GetArrayItem(tools, i);
                 const cJSON *nm = cJSON_GetObjectItemCaseSensitive(t, "name");
                 if (!cJSON_IsString(nm) || strcmp(nm->valuestring, want[i]))
@@ -2582,6 +2583,45 @@ static void test_builtin(void) {
             unsetenv("HOME");
         chdir(oldcwd);
         system("rm -rf /tmp/llmkit-test-skills");
+    }
+
+    /* now: one line, iso 8601 to the second, the utc offset, and the
+       timezone name; TZ pinned so the name is deterministic (the
+       offset is checked against the libc's own tm) */
+    {
+        const char *oldtz = getenv("TZ");
+        setenv("TZ", "Europe/Rome", 1);
+        tzset();
+        bool ie = false;
+        char *t = bc_call("now", "{}", &ie);
+        bool ok = !ie && t;
+        regex_t rx;
+        if (ok && regcomp(&rx,
+                          "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:"
+                          "[0-9]{2}[+-][0-9]{2}:[0-9]{2} at "
+                          "Europe/Rome timezone$",
+                          REG_EXTENDED | REG_NOSUB) == 0) {
+            ok = regexec(&rx, t, 0, NULL, 0) == 0;
+            regfree(&rx);
+        } else {
+            ok = false;
+        }
+        check(ok, "builtin: now shape, offset and tz name");
+        free(t);
+
+        /* tz name resolution: a TZ without a zone name falls through
+           to /etc/localtime or UTC, never a mangled string */
+        t = bc_call("now", "{}", &ie);
+        check(!ie && t && !strstr(t, "(null") && !strstr(t, "at  timezone"),
+              "builtin: now always names a timezone");
+        free(t);
+
+        /* restore the environment */
+        if (oldtz)
+            setenv("TZ", oldtz, 1);
+        else
+            unsetenv("TZ");
+        tzset();
     }
 
     /* duckduckgo parser on a canned results page */
