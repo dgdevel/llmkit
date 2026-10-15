@@ -121,32 +121,33 @@ static void usage_accum(repl_sink_t *s, const cJSON *rec) {
     s->have_usage = true;
 }
 
-/* the turn's stats line, drawn when the response block completed: wall
-   clock of the completion, the three spans - first token since the
-   request (prompt processing), thinking generation and response
-   generation, tool rounds excluded, accumulated over every block - the
-   turn's token reading when the endpoint reported any, and the turn's
-   own wall time as the engine stamped the final record */
-static void render_stats(repl_sink_t *s) {
+/* the turn's stats line, drawn at every request's end whatever the
+   termination: response completed, interrupted, fatal, max rounds. The
+   spans shown are whatever accumulated - partial or zero on an end that
+   never completed a response block. The turn's wall time falls back to
+   the sink's own clock when the engine never stamped a final record.
+   The exit code shows when the end was not EXIT_OK */
+static void render_stats_exit(repl_sink_t *s, int rc) {
     char ts[32] = "", tok[96] = "", line[320];
     stamp_now(ts, sizeof ts);
     if (s->have_usage)
         snprintf(tok, sizeof tok,
                  " | input %.0f tok | output %.0f tok | total %.0f tok",
                  s->tok_in, s->tok_out, s->tok_in + s->tok_out);
+    double turn = s->turn_s > 0 ? s->turn_s : mono_now() - s->t_turn;
     int n;
-    if (s->turn_s > 0)
+    if (rc == EXIT_OK)
         n = snprintf(line, sizeof line,
                      "%sfirst token %.2fs | thinking %.2fs | response %.2fs"
                      "%s | turn %.2fs\n",
                      ts, s->t_first ? s->t_first - s->t_turn : 0.0,
-                     s->think_s, s->resp_s, tok, s->turn_s);
+                     s->think_s, s->resp_s, tok, turn);
     else
         n = snprintf(line, sizeof line,
                      "%sfirst token %.2fs | thinking %.2fs | response %.2fs"
-                     "%s\n",
+                     "%s | turn %.2fs | ended %d\n",
                      ts, s->t_first ? s->t_first - s->t_turn : 0.0,
-                     s->think_s, s->resp_s, tok);
+                     s->think_s, s->resp_s, tok, turn, rc);
     if (n <= 0) return;
     dspy_ensure_nl(&s->d);
     dspy_write(&s->d, line,
@@ -1195,7 +1196,7 @@ int repl_run_ex(const call_cfg_t *c, const repl_opts_t *o, int in_fd,
         timing_reset(&sink);
         rc = engine_start(e);
         if (rc == 0) rc = engine_run(e);
-        if (sink.resp_done) render_stats(&sink); /* response completed */
+        render_stats_exit(&sink, rc); /* every end of the request */
         last_ending = rc;
         if (rc == EXIT_INTERRUPTED) {
             g_stop_flag = 0; /* consumed: the session continues */

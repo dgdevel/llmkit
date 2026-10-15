@@ -3826,11 +3826,12 @@ static void test_repl(void) {
         buf_append_str(&want, "par\n");
         buf_append_str(&want,
                        "! interrupted: conversation stopped externally\n");
+        golden_timing(&want); /* the interrupted turn's stats line */
         golden_rule(&want, '=');
         buf_append_str(&want, "again\n");
         golden_rule(&want, '-');
         buf_append_str(&want, "ok\n");
-        golden_timing(&want); /* no timing on the interrupted turn */
+        golden_timing(&want); /* the continuation turn's stats line */
         check(r.rc == EXIT_OK,
               "repl: interrupt then continue: EOF exits with the last "
               "ending");
