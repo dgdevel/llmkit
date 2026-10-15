@@ -235,13 +235,16 @@ int builtin_handle(void *ctx, const char *method, cJSON *params, cJSON *id,
             for (size_t i = 0; i < TOOLS_N; i++)
                 if (!strcmp(TOOLS[i].name, name)) ti = i;
         if (ti == TOOLS_N) {
-            *errmsg_out = strdup(name ? "unknown tool" : "missing tool name");
+            *errmsg_out = strdup(
+                name ? prompt_mcp_builtin_mcp_errors_unknown_tool
+                     : prompt_mcp_builtin_mcp_errors_missing_tool_name);
             return 1;
         }
         const cJSON *args =
             cJSON_GetObjectItemCaseSensitive(params, "arguments");
         if (args && !cJSON_IsObject(args)) {
-            *errmsg_out = strdup("arguments must be an object");
+            *errmsg_out =
+                strdup(prompt_mcp_builtin_mcp_errors_arguments_must_be_object);
             return 1;
         }
         cJSON *empty = NULL;
@@ -266,7 +269,7 @@ int builtin_handle(void *ctx, const char *method, cJSON *params, cJSON *id,
         *result_out = res;
         return 0;
     }
-    *errmsg_out = strdup("method not found");
+    *errmsg_out = strdup(prompt_mcp_builtin_mcp_errors_method_not_found);
     return 1;
 }
 

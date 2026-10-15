@@ -1,5 +1,6 @@
 /* agent.c - llmkit agent-as-tool (design sec.9). */
 #include "llmkit.h"
+#include "prompts.gen.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -394,8 +395,7 @@ static int agent_handle(void *ctx, const char *method, cJSON *params,
             cJSON_AddStringToObject(rst, "name", "context_reset");
             cJSON_AddStringToObject(
                 rst, "description",
-                "reset the helper's memory to the bare seed: later invokes "
-                "start fresh; results already returned stay with the caller");
+                prompt_mcp_agent_as_tool_description);
             cJSON_AddItemToArray(tools, rst);
         }
         cJSON_AddItemToObject(res, "tools", tools);
@@ -405,13 +405,13 @@ static int agent_handle(void *ctx, const char *method, cJSON *params,
     if (!strcmp(method, "tools/call")) {
         const char *name = rec_str(params, "name");
         if (!name) {
-            *errmsg_out = strdup("unknown tool");
+            *errmsg_out = strdup(prompt_mcp_agent_as_tool_errors_unknown_tool);
             return 1;
         }
         if (!strcmp(name, "context_reset")) {
             if (!a->retain) {
                 *errmsg_out = strdup(
-                    "context_reset requires retain_context in the seed");
+                    prompt_mcp_agent_as_tool_errors_context_reset_requires_retain);
                 return 1;
             }
             tlist_clear(&a->eng->tr);
@@ -429,13 +429,15 @@ static int agent_handle(void *ctx, const char *method, cJSON *params,
             return 0;
         }
         if (strcmp(name, "invoke")) {
-            *errmsg_out = strdup("unknown tool");
+            *errmsg_out =
+                strdup(prompt_mcp_agent_as_tool_errors_unknown_tool);
             return 1;
         }
         const cJSON *args = cJSON_GetObjectItemCaseSensitive(params, "arguments");
         const char *input = rec_str(args, "input");
         if (!input) {
-            *errmsg_out = strdup("invoke requires a string argument 'input'");
+            *errmsg_out =
+                strdup(prompt_mcp_agent_as_tool_errors_invoke_requires_input);
             return 1;
         }
         invoke_reset_transcript(a);
@@ -474,7 +476,7 @@ static int agent_handle(void *ctx, const char *method, cJSON *params,
         free(out.err_msg);
         return 0;
     }
-    *errmsg_out = strdup("method not found");
+    *errmsg_out = strdup(prompt_mcp_agent_as_tool_errors_method_not_found);
     return 1;
 }
 
