@@ -650,8 +650,8 @@ No new wire, mcp or loop code.
   Every rule line opens with the local wall-clock stamp of the moment it
   was drawn, `[HH:MM:SS] `, the glyphs filling the width that remains.
   Error lines: `! <code>: <message>`, unstyled.
-- **timing line** - one unstyled line after a turn whose response block
-  completed, stamped like a rule:
+- **timing line** - one unstyled line at every request's end, whatever
+  the termination, stamped like a rule:
   `[HH:MM:SS] first token <s> | thinking <s> | response <s>`. The spans
   come from the mono clock taken at sink depth, reset by the session
   loop before each `engine_run`: first token is the first streamed
@@ -660,11 +660,16 @@ No new wire, mcp or loop code.
   opens at a block's first token and closes at the block-close record,
   accumulated across every round of the turn, tool execution excluded.
   The turn's tokens follow the spans when its rounds reported `usage`:
-  ` | input <n> tok | output <n> tok | total <n> tok`, the rounds' totals
-  summed by the sink (usage rides each round's last record). A turn whose
-  rounds reported none ends with the spans, the same rule an empty block
-  follows. A turn ending any other way (interrupted, fatal, terminal
-  tool) renders no timing line.
+  ` | input <n> tok | output <n> tok | total <n> tok`, the last round's
+  reading kept by the sink (each round re-sends the whole conversation,
+  so summing would inflate far past the endpoint's own numbers). A turn
+  whose rounds reported none ends with the spans, the same rule an
+  empty block follows. The turn's wall time closes the line:
+  ` | turn <s>` - the engine's own stamp on a final record when the
+  turn carried one, the sink's request clock otherwise (an end with no
+  final record: interrupted, fatal, max rounds). An end that is not
+  `EXIT_OK` appends ` | ended <exit code>`, so an interrupted turn
+  shows ` | ended 8`, an exceeded round limit ` | ended 6`.
 - **`/models` selector** - the session's own flags are the one source:
   the picker calls `models_fetch` (the `cmd_models` page loop's core,
   src/models.c) over the session's protocol, `api_base`, key and

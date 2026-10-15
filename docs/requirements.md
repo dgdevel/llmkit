@@ -1130,16 +1130,20 @@ redrawn.
   pure ascii is required (the repo's ascii-only rule), box drawing
   unicode is out. Each separator line carries the local wall-clock
   timestamp of the moment it was drawn.
-- Timing line: a turn whose response block completed ends with one
-  unstyled line of the turn's measured spans - time to first token
-  since the request (prompt processing), accumulated thinking
-  generation time, accumulated response generation time; time spent
-  executing tools is excluded. When the turn's rounds reported
-  `usage`, the endpoint's token counts close the line - input, output
-  and their total, summed over every round of the turn (each round's
-  `usage` rides its last record); a turn whose rounds reported none
-  renders the spans alone. A turn that ends any other way
-  (interrupted, fatal, terminal tool) renders no timing line.
+- Timing line: every turn ends with one unstyled line of the turn's
+  measured spans - time to first token since the request (prompt
+  processing), accumulated thinking generation time, accumulated
+  response generation time; time spent executing tools is excluded.
+  When the turn's rounds reported `usage`, the endpoint's token counts
+  close the line - input, output and their total (the last round's
+  reading: each round re-sends the whole conversation, so the reading
+  that matches the endpoint's own log is the last one's); a turn whose
+  rounds reported none renders the spans alone. The turn's wall time
+  follows - the engine's stamp on a final record when the turn carried
+  one, the session clock otherwise - and an end that is not a clean
+  `EXIT_OK` appends the exit code, so every termination - response
+  completed, interrupted, fatal, round limit - is visible on the line.
+  The line draws for the repl and the agent surfaces alike.
 - Typography: bold and italic apply per the table above, only when the
   output terminal reports support for the attribute; each attribute
   degrades to unstyled on its own - a pipe, or a terminal without
@@ -1178,7 +1182,7 @@ file2.log                                     <- bold
 [10:31:07] --------------------------------------------------
 The /tmp directory holds two files: file1.txt and
 file2.log.                                     <- plain
-[10:31:08] first token 0.84s | thinking 1.92s | response 0.71s | input 843 tok | output 96 tok | total 939 tok
+[10:31:08] first token 0.84s | thinking 1.92s | response 0.71s | input 843 tok | output 96 tok | total 939 tok | turn 3.48s
 ```
 
 ### interrupts and exit codes
