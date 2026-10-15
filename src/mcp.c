@@ -514,10 +514,13 @@ static void listing_rebuild(mcp_mgr_t *m) {
             tool_entry_t *te = &m->listing.v[m->listing.n++];
             te->srv = s;
             te->tool = cJSON_Duplicate((cJSON *)t, 1);
-            /* the helper subagent flattens to a bare `helper`: one tool
-               on a one-tool server, the server prefix adds no signal
-               and the spec promises one `helper(prompt)` tool */
-            bool flat = !strcmp(s->name, "helper") && !strcmp(nm, "helper");
+            /* the bundled server and the helper subagent flatten: one
+               server per conversation, the prefix adds no signal - the
+               model calls `files_search`, `helper`, not
+               `builtin.files_search`. Old dotted transcripts stay
+               replayable: mcp_call accepts both forms */
+            bool flat =
+                !strcmp(s->name, "builtin") || !strcmp(s->name, "helper");
             size_t exl = flat ? strlen(nm) + 1
                               : strlen(s->name) + strlen(nm) + 2;
             char *ex = malloc(exl);
@@ -714,33 +717,17 @@ int mcp_request_raw(mcp_server_t *srv, const char *method,
 
 int mcp_call(mcp_mgr_t *m, const char *tool, cJSON *args, buf_t *text_out,
              bool *is_error, char *err, size_t errsz, double timeout) {
-    /* the flattened helper: bare `helper`, no server prefix; resolve it
-       through the listing so the upstream tool name comes from the
-       server's own listing (the proxy renames `invoke` to `helper`) */
-    bool flat = !strcmp(tool, "helper");
-    const char *dot = flat ? NULL : strchr(tool, '.');
-    if (!dot && !flat) {
-        snprintf(err, errsz, "tool '%s' has no server prefix", tool);
-        return 1;
-    }
+    /* a dotted name splits server + tool; a bare name is the flattened
+       form (the bundled `builtin` and `helper` servers list their tools
+       unprefixed): resolve it through the listing so the upstream tool
+       name comes from the server's own listing (the proxy renames
+       `invoke` to `helper`). A bare name that is not listed falls to
+       the no-server-prefix error below */
+    const char *dot = strchr(tool, '.');
     char srvname[256];
-    mcp_server_t *s = NULL; /* the flat path sets it from the listing */
-    const char *upstream;
-    if (flat) {
-        upstream = "helper";
-        const tool_listing_t *tl = &m->listing;
-        for (size_t i = 0; i < tl->n; i++)
-            if (!strcmp(tl->v[i].exposed_name, "helper")) {
-                s = tl->v[i].srv;
-                upstream = rec_str(tl->v[i].tool, "name");
-                break;
-            }
-        if (!s) {
-            snprintf(err, errsz, "unknown tool 'helper'");
-            return 1;
-        }
-        snprintf(srvname, sizeof srvname, "%s", s->name);
-    } else {
+    mcp_server_t *s = NULL;
+    const char *upstream = NULL;
+    if (dot) {
         size_t sl = (size_t)(dot - tool);
         if (sl >= sizeof srvname) {
             snprintf(err, errsz, "tool server name too long in '%.64s...'",
@@ -753,6 +740,19 @@ int mcp_call(mcp_mgr_t *m, const char *tool, cJSON *args, buf_t *text_out,
         s = mcp_find(m, srvname);
         if (!s) {
             snprintf(err, errsz, "unknown tool server '%s'", srvname);
+            return 1;
+        }
+    } else {
+        const tool_listing_t *tl = &m->listing;
+        for (size_t i = 0; i < tl->n; i++)
+            if (!strcmp(tl->v[i].exposed_name, tool)) {
+                s = tl->v[i].srv;
+                upstream = rec_str(tl->v[i].tool, "name");
+                snprintf(srvname, sizeof srvname, "%s", s->name);
+                break;
+            }
+        if (!s) {
+            snprintf(err, errsz, "tool '%s' has no server prefix", tool);
             return 1;
         }
     }

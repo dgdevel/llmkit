@@ -937,15 +937,17 @@ int repl_run_ex(const call_cfg_t *c, const repl_opts_t *o, int in_fd,
     sink.d.st = &st;
     sink.d.cur = -1;
     /* agent's brief tool traffic: the listed tools collapse to one
-       summary line each unless --verbose kept the full replies, and the
-       bundled server's prefix never shows - its name adds no signal */
+       summary line each unless --verbose kept the full replies; the
+       bundled server's prefix never shows - its tools flatten to bare
+       names, old stored transcripts with dotted names still strip */
     dspy_brief_tools(&sink.d, o->full_tools
                                   ? NULL
                                   : (o->helper_tool
                                          ? DSPY_BRIEF_TOOLS " helper"
                                          : DSPY_BRIEF_TOOLS));
-    /* the prefixes whose names add no signal: the bundled server and
-       the helper subagent's proxy wrapper */
+    /* the prefixes whose names add no signal: the flattened bundled
+       server and helper subagent (bare names on the wire now; the
+       strip covers the dotted form of replayed records) */
     {
         char strip[64] = "";
         if (o->builtin_mcp) snprintf(strip, sizeof strip, "builtin");

@@ -311,6 +311,13 @@ fractional `llm_connect_timeout`/`llm_read_timeout` values are floored;
   tool order exposed to the model is the `tools` record's server order, then
   each server's own listing order. It changes only when a `tools` record
   changes it (sec.7).
+- Exposed names: `server.tool` by default. Servers named `builtin` or
+  `helper` (the agent's bundled tools server and helper subagent) flatten -
+  their tools list under bare names, the prefix adds no signal at one per
+  conversation. `tools/call` dispatch accepts both forms of a flattened
+  tool (a bare name resolves through the listing; the dotted form still
+  splits server + tool, so stored transcripts replay); a bare name nothing
+  lists is the `no server prefix` error.
 - `terminal_tools` (requirements sec.8, sec.2.7): per server entry, two
   validation tiers - shape (list of strings) at record validation, name
   resolution at reconcile against that server's own listing: a name a
@@ -323,7 +330,8 @@ fractional `llm_connect_timeout`/`llm_read_timeout` values are floored;
   a terminal tool is the sec.4 stop condition. The attribute is configuration,
   it never enters the serialized tool list - no request byte changes.
 - `tools/call` `{name, arguments}`; the `name` sent to the server is the part
-  after the server prefix. Result: text content blocks concatenate with `\n`
+  after the server prefix (the resolved bare name for a flattened server).
+  Result: text content blocks concatenate with `\n`
   into `tool_response.text`; `isError: true` -> `is_error: true` plus
   non-fatal `tool_failed`; non-text content blocks -> `tool_failed` per the
   requirements; structured-only results (v2) with no text -> `tool_failed`.
@@ -988,7 +996,10 @@ defaults (the selfcheck drives both).
 - **the built-in server** - `call_build_agent_tools` (call.c, beside
   the other argv->record builders) is `call_build_tools` plus one
   stdio entry, name `builtin`, command line `'<self_exe>' builtin-mcp`
-  through `call_shell_quote`. `repl_run_ex` applies it after
+  through `call_shell_quote`. The server flattens (mcp.c): its tools
+  list under bare names, `files_search` not `builtin.files_search` -
+  one bundled server per conversation, the prefix adds no signal (same
+  rule the helper subagent already had). `repl_run_ex` applies it after
   `call_compile` - engine configuration snapshots replace, so the one record
   owns proxies and built-in alike, `validate_tools`'s duplicate-name
   rule included.
@@ -1026,7 +1037,8 @@ defaults (the selfcheck drives both).
   `helper(prompt)` tool, the subagent sees everything but itself. The
   `helper` server flattens (mcp.c): its one tool lists and dispatches
   under the bare name `helper`, not `helper.helper` - the server prefix
-  adds no signal and the tool spec's argument is `prompt`. Not
+  adds no signal and the tool spec's argument is `prompt` (the `builtin`
+  server flattens the same way). Not
   `required`: a failed spawn degrades to a missing tool, rendered,
   session continues. Both files unlink at session end; `--no-helper`
   (pulled by `repl_nohelper_extract`) leaves the whole thing out. The

@@ -623,7 +623,10 @@ int mcp_request_raw(mcp_server_t *srv, const char *method,
                     const cJSON *params, cJSON **result_out, char *err,
                     size_t errsz, double timeout);
 /* call: 0 ok (text_out,is_error), 1 failed (err), 2 timeout */
-int mcp_call(mcp_mgr_t *m, const char *tool /* server.tool */, cJSON *args,
+int mcp_call(mcp_mgr_t *m,
+             const char *tool /* server.tool; a bare name matches a
+                                 flattened server's listing entry */,
+             cJSON *args,
              buf_t *text_out, bool *is_error, char *err, size_t errsz,
              double timeout /*<0 none*/);
 /* join a tools/call result's text blocks with \n; text-block count, or

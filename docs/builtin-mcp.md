@@ -18,7 +18,7 @@ Tools are mcp servers. The builtin server therefore attaches with an ordinary to
 {"type":"tools","tools":[{"type":"stdio","name":"builtin","command_line":"llmkit builtin-mcp"}]}
 ```
 
-The tool names are then `builtin.web_search`, `builtin.file_edit`, and so on. Inside `llmkit call` / `llmkit repl`, the binary spawns itself the same way it spawns `mcp-proxy` children.
+The tool names are then `builtin.web_search`, `builtin.file_edit`, and so on. Inside `llmkit agent` the bundled server flattens: the same tools list under their bare names (`web_search`, `file_edit`) - the agent attaches the server itself, one per conversation, and the prefix adds no signal. Inside `llmkit call` / `llmkit repl`, the binary spawns itself the same way it spawns `mcp-proxy` children.
 
 ## The tools
 

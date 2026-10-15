@@ -458,7 +458,7 @@ Common fields:
 | field | required | description |
 |---|---|---|
 | `type` | yes | `stdio`, `http` or `sse` |
-| `name` | yes | unique name of the mcp server, uniqueness enforced (`invalid_record`, fatal); used as prefix for the tool names exposed to the model (`name.tool_name`) |
+| `name` | yes | unique name of the mcp server, uniqueness enforced (`invalid_record`, fatal); used as prefix for the tool names exposed to the model (`name.tool_name`), except servers named `builtin` or `helper` whose tools list under bare names (the agent's bundled servers, records.md) |
 | `protocol` | no | mcp protocol revision, `2025-11-25` (v1) by default; any published v1 revision from `2024-11-05` to `2025-11-25` is accepted, and `2026-07-28` (v2) is supported; a server answering with a revision the runner does not support is a `connect_failed`; v2 is stateless, no `initialize` handshake - the per revision flow is pinned in the design |
 | `required` | no | boolean, signals if a failure to connect and offer the tool to the model is a deal breaker and must stop processing the conversation instead |
 | `terminal_tools` | no | list of the server's tool names - as the server lists them, the part after the server prefix of the exposed `name.tool_name` - whose selection and use ends the conversation, see [terminal tools](#27-terminal-tools); order is irrelevant and a repeated name is not an error; a non-string entry, or a name a connected server does not list, is `invalid_record`, fatal - catches typos; a server that failed to connect is not validated, its tools are not offered to the model anyway; a `tools` record change revalidates at the boundary it applies, like the connection rules *(proposed)* |
@@ -1544,7 +1544,11 @@ The command line compiles to repl's leading records, plus one `tools`
 record change: the built-in generic-use server (docs/builtin-mcp.md -
 `llmkit builtin-mcp` on stdio, name `builtin`) is appended to the
 `--mcp-proxy` servers' record, one record owning the whole server set.
-The built-in server is not `required`: a failed connect is the
+The bundled server flattens: its tools list under their bare names
+(`web_search`, `file_edit`), no server prefix - the prefix adds no
+signal at one bundled server per conversation (the helper subagent
+follows the same rule). The built-in server is not `required`: a failed
+connect is the
 non-fatal `connect_failed`, rendered, and the session continues without
 its tools. The server name participates in the duplicate-name rule: an
 `--mcp-proxy` config whose derived name is `builtin` collides and is

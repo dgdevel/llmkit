@@ -80,7 +80,7 @@ complete (every field, anthropic flavor):
 
 ## tools
 
-The mcp servers whose tools are offered to the model. A new `tools` record replaces the entire list. Servers no longer listed are disconnected. Tool names exposed to the model carry the prefix `server.tool`.
+The mcp servers whose tools are offered to the model. A new `tools` record replaces the entire list. Servers no longer listed are disconnected. Tool names exposed to the model carry the prefix `server.tool`, except on servers named `builtin` or `helper` (the agent's bundled servers, see below), whose tools list under their own bare names.
 
 minimal (one stdio server):
 
@@ -103,7 +103,7 @@ Server entry fields:
 | field | type | required | description |
 |---|---|---|---|
 | `type` | string | yes | `stdio`, `http` (streamable http) or `sse` (legacy) |
-| `name` | string | yes | server name, unique within the record (a duplicate is a fatal `invalid_record`). It is the prefix of the tool names the model sees (`name.tool_name`) |
+| `name` | string | yes | server name, unique within the record (a duplicate is a fatal `invalid_record`). It is the prefix of the tool names the model sees (`name.tool_name`), except for the flattened names below |
 | `command_line` | string | stdio only | full shell command including arguments. The caller owns quoting |
 | `url` | string | http/sse only | server url, used verbatim |
 | `headers` | object | no | header name to string value, sent with every request to this server (http/sse). CR or LF in a name or value is a fatal `invalid_record` |
@@ -116,6 +116,8 @@ Server entry fields:
 - The ending triggers on execution. The call runs and is answered like any other. Then the runner terminates. It is a requested ending, not an error: no `error` record, a dedicated exit code (9). Every not yet started `tool_request` of the same turn is suspended and answered with `is_error` true. This keeps transcripts replayable.
 - Order is irrelevant and a repeated name is not an error. A non-string entry, or a name a connected server does not list, is a fatal `invalid_record`. This catches typos. A server that failed to connect is not validated. Its tools are not offered anyway.
 - `llmkit mcp-proxy` accepts and ignores the attribute: the proxy has no conversation to end. `llmkit call --terminal-tool` and `llmkit agent-as-tool` seeds honor it.
+
+Flattened servers: a server named `builtin` or `helper` lists its tools under their own bare names, no server prefix - the model calls `files_search` or `helper`, not `builtin.files_search`. These are the names `llmkit agent` owns: its bundled tools server and its helper subagent, one of each per conversation, so the prefix adds no signal. A `tools/call` with the old dotted form of a flattened tool still dispatches (stored transcripts replay); a bare tool name that no flattened server lists is the `no server prefix` error, like any other unprefixed name. Any other server name keeps the `name.tool` form.
 
 ## options
 

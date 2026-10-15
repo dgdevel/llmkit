@@ -1193,21 +1193,28 @@ static void slurp_file(const char *path, char *got, size_t cap) {
 static void test_mcp_stdio(void) {
     write_file("/tmp/llmkit-test-fake-mcp.py", FAKE_MCP_PY);
     write_file("/tmp/llmkit-test-fake-helper-mcp.py", FAKE_HELPER_MCP_PY);
+    write_file("/tmp/llmkit-test-fake-builtin-mcp.py", FAKE_MCP_PY);
     cap_t cap = { 0 };
     engine_t *e = engine_new(cap_fn, &cap);
-    char tools[512];
+    char tools[768];
     snprintf(tools, sizeof tools,
              "{\"type\":\"tools\",\"tools\":[{\"type\":\"stdio\",\"name\":\"srv\","
              "\"command_line\":\"python3 /tmp/llmkit-test-fake-mcp.py\"},"
+             "{\"type\":\"stdio\",\"name\":\"builtin\","
+             "\"command_line\":\"python3 /tmp/llmkit-test-fake-builtin-mcp.py\"},"
              "{\"type\":\"stdio\",\"name\":\"helper\","
              "\"command_line\":\"python3 /tmp/llmkit-test-fake-helper-mcp.py\"}]}");
     cJSON *trec = cJSON_Parse(tools);
     check(mcp_reconcile((mcp_mgr_t *)e->mcp, e, trec) == 0, "mcp connect ok");
     const tool_listing_t *tl = mcp_listing((mcp_mgr_t *)e->mcp);
-    check(tl->n == 3, "mcp listing has three tools");
+    check(tl->n == 5, "mcp listing has five tools");
     check_str(tl->v[0].exposed_name, "srv.echo", "exposed name is prefixed");
-    /* the helper server flattens: bare `helper`, no server prefix */
-    check_str(tl->v[2].exposed_name, "helper",
+    /* the bundled server and the helper flatten: bare names, no prefix */
+    check_str(tl->v[2].exposed_name, "echo",
+              "the builtin server flattens to bare names");
+    check_str(tl->v[3].exposed_name, "boom",
+              "the builtin server flattens every tool");
+    check_str(tl->v[4].exposed_name, "helper",
               "the helper tool flattens to a bare name");
     char *snap = cJSON_PrintUnformatted(tl->v[0].tool);
     check(snap && strstr(snap, "echo text") != NULL,
@@ -1233,6 +1240,33 @@ static void test_mcp_stdio(void) {
     check_str(out.data ? out.data : "", "helper: hi",
               "the flattened helper routes to the helper server");
     buf_clear(&out);
+    cJSON_Delete(args);
+
+    /* the flattened builtin tool: bare name, and the legacy dotted form
+       of the same tool still routes (old transcripts replay) */
+    args = cJSON_Parse("{\"text\":\"hi\"}");
+    rc = mcp_call((mcp_mgr_t *)e->mcp, "echo", args, &out, &is_error, err,
+                  sizeof err, 5);
+    check(rc == 0 && !is_error, "the flattened builtin call routes");
+    check_str(out.data ? out.data : "", "echo: hi",
+              "the bare name routes to the builtin server");
+    buf_clear(&out);
+    cJSON_Delete(args);
+    args = cJSON_Parse("{\"text\":\"hi\"}");
+    rc = mcp_call((mcp_mgr_t *)e->mcp, "builtin.echo", args, &out, &is_error,
+                  err, sizeof err, 5);
+    check(rc == 0 && !is_error, "the legacy dotted builtin call routes");
+    check_str(out.data ? out.data : "", "echo: hi",
+              "the dotted form still routes to the builtin server");
+    buf_clear(&out);
+    cJSON_Delete(args);
+
+    /* a bare name nothing lists is an error, not a fallthrough */
+    args = cJSON_Parse("{}");
+    rc = mcp_call((mcp_mgr_t *)e->mcp, "nope", args, &out, &is_error, err,
+                  sizeof err, 5);
+    check(rc == 1 && strstr(err, "no server prefix") != NULL,
+          "unknown bare name reports no server prefix");
     cJSON_Delete(args);
 
     args = cJSON_Parse("{}");
@@ -4016,8 +4050,9 @@ static void test_agent(void) {
     {
         fturn_t turns[] = {
             { .recs = (const char *[]){
-                  /* the exposed form the real wires carry: <server.tool> */
-                  "{\"type\":\"tool_request\",\"tool\":\"builtin.files_search\","
+                  /* the exposed form the real wires carry: bare names
+                     for the flattened bundled server */
+                  "{\"type\":\"tool_request\",\"tool\":\"files_search\","
                   "\"arguments\":{\"path\":\"x\"},\"id\":\"t1\"}"},
               .nrecs = 1, .kind = TURN_TOOLS, .abort_after = -1 },
             { .recs = (const char *[]){
@@ -4025,7 +4060,7 @@ static void test_agent(void) {
                   "\"partial\":false}"},
               .nrecs = 1, .kind = TURN_FINAL, .abort_after = -1 },
         };
-        ftool_t ftools[] = { { .tool = "builtin.files_search",
+        ftool_t ftools[] = { { .tool = "files_search",
                                .text = "aaa\nbbb\nccc\n", .rc = 0 } };
         g_ftools = (ftool_script_t){ ftools, 1, 0 };
 
@@ -4037,10 +4072,9 @@ static void test_agent(void) {
         repl_out_t r = repl_session_opt_ft(&c, &brief, "q\n", 2);
         check(r.rc == EXIT_OK, "agent: brief session exits 0");
         /* the request line drew, the reply collapsed to one summary */
-        /* strip renders the bundled server's name bare, record stays whole */
-        check(strstr(r.ob, "files_search {\"path\":\"x\"}") != NULL &&
-                  strstr(r.ob, "builtin.files_search") == NULL,
-              "agent: brief request line renders, prefix stripped");
+        /* the bundled server flattens: bare name on the wire and screen */
+        check(strstr(r.ob, "files_search {\"path\":\"x\"}") != NULL,
+              "agent: brief request line renders, bare name");
         check(strstr(r.ob, "aaa") == NULL && strstr(r.ob, "bbb") == NULL,
               "agent: brief swallows the reply text");
         {
@@ -4092,10 +4126,10 @@ static void test_agent(void) {
                 { .recs = (const char *[]){
                       /* two requests in one turn: what the wire emits
                          when the model makes parallel calls */
-                      "{\"type\":\"tool_request\",\"tool\":\"builtin."
+                      "{\"type\":\"tool_request\",\"tool\":\""
                       "files_search\",\"arguments\":{\"path\":\"a\"},"
                       "\"id\":\"t1\"}",
-                      "{\"type\":\"tool_request\",\"tool\":\"builtin."
+                      "{\"type\":\"tool_request\",\"tool\":\""
                       "file_read\",\"arguments\":{\"path\":\"b\"},"
                       "\"id\":\"t2\"}"},
                   .nrecs = 2, .kind = TURN_TOOLS, .abort_after = -1 },
@@ -4105,9 +4139,9 @@ static void test_agent(void) {
                   .nrecs = 1, .kind = TURN_FINAL, .abort_after = -1 },
             };
             ftool_t ftools[] = {
-                { .tool = "builtin.files_search", .text = "aaa\nbbb\n",
+                { .tool = "files_search", .text = "aaa\nbbb\n",
                   .rc = 0 },
-                { .tool = "builtin.file_read", .text = "ccc\nddd\n",
+                { .tool = "file_read", .text = "ccc\nddd\n",
                   .rc = 0 }
             };
             g_ftools = (ftool_script_t){ ftools, 2, 0 };
@@ -4152,7 +4186,7 @@ static void test_agent(void) {
         {
             fturn_t turns[] = {
                 { .recs = (const char *[]){
-                      "{\"type\":\"tool_request\",\"tool\":\"builtin."
+                      "{\"type\":\"tool_request\",\"tool\":\""
                       "files_search\",\"arguments\":{\"path\":\"a\"},"
                       "\"id\":\"t1\"}",
                       "{\"type\":\"tool_request\",\"tool\":\"fs.echo\","
@@ -4164,7 +4198,7 @@ static void test_agent(void) {
                   .nrecs = 1, .kind = TURN_FINAL, .abort_after = -1 },
             };
             ftool_t ftools[] = {
-                { .tool = "builtin.files_search", .text = "aaa\n", .rc = 0 },
+                { .tool = "files_search", .text = "aaa\n", .rc = 0 },
                 { .tool = "fs.echo", .text = "echo", .rc = 0 }
             };
             g_ftools = (ftool_script_t){ ftools, 2, 0 };
@@ -4200,13 +4234,13 @@ static void test_agent(void) {
            unlisted tool keeps its long argument whole */
         fturn_t turns[] = {
             { .recs = (const char *[]){
-                  "{\"type\":\"tool_request\",\"tool\":\"builtin."
+                  "{\"type\":\"tool_request\",\"tool\":\""
                   "file_create\",\"arguments\":{\"path\":\"x.txt\","
                   "\"content\":\"0123456789abcdefghij...wxyz9876543210\","
                   "\"overwrite\":false},\"id\":\"t1\"}"},
               .nrecs = 1, .kind = TURN_TOOLS, .abort_after = -1 },
             { .recs = (const char *[]){
-                  "{\"type\":\"tool_request\",\"tool\":\"builtin."
+                  "{\"type\":\"tool_request\",\"tool\":\""
                   "web_search\",\"arguments\":{\"keywords\":"
                   "\"0123456789abcdefghij...wxyz9876543210\"},"
                   "\"id\":\"t2\"}",
@@ -4224,9 +4258,9 @@ static void test_agent(void) {
                   "\"partial\":false}"},
               .nrecs = 3, .kind = TURN_FINAL, .abort_after = -1 },
         };
-        ftool_t ftools[] = { { .tool = "builtin.file_create",
+        ftool_t ftools[] = { { .tool = "file_create",
                                .text = "ok", .rc = 0 },
-                             { .tool = "builtin.web_search",
+                             { .tool = "web_search",
                                .text = "ok", .rc = 0 },
                              { .tool = "helper",
                                .text = "ok", .rc = 0 } };
