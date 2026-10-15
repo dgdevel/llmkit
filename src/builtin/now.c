@@ -5,12 +5,10 @@
    name ("2025-01-01T12:00:00+01:00 at Europe/Rome timezone"). no
    arguments: it is always about right now.
 
-   the offset: tm_gmtoff of localtime_r/localtime_s - posix always
-   fills it, msvc since 2005. zoneinfo windows do not honor TZ, so a
-   TZ like "Europe/Rome" shifts the clock but tm_gmtoff stays at zero:
-   a hand-rolled days_from_civil/ll_timegm normalization recovers the
-   offset in that case (the same trick platform.c uses to keep
-   timegm iso).
+   the offset: tm_gmtoff of localtime_r on posix. windows struct tm
+   has no tm_gmtoff, and zoneinfo windows do not honor TZ, so a
+   hand-rolled days_from_civil/ll_timegm normalization recovers the
+   offset there (the same trick platform.c uses to keep timegm iso).
 
    the name: the TZ variable's leading segment when it names a zone
    (":Europe/Rome" or "Europe/Rome"), else what it says for a fixed
@@ -65,14 +63,11 @@ static struct tm *now_localtime(time_t t, struct tm *out, long *gmtoff) {
     if (!r) return NULL;
     long off = 0;
 #ifdef _WIN32
-    /* tm_gmtoff: msvc 2005+ and mingw-w64 fill it, zoneinfo windows
-       (no /usr/share/zoneinfo) ignore TZ instead - the fallback below
-       measures the real offset in that case */
-    off = out->tm_gmtoff;
-    if (off == 0) {
-        time_t utc = now_timegm(out);
-        if (utc != (time_t)-1) off = (long)(t - utc);
-    }
+    /* windows struct tm has no tm_gmtoff (glibc/bsd extension), so
+       recover the offset from the same civil time read once as utc:
+       zoneinfo windows that ignore TZ still get measured correctly */
+    time_t utc = now_timegm(out);
+    if (utc != (time_t)-1) off = (long)(t - utc);
 #else
     off = out->tm_gmtoff;
 #endif
