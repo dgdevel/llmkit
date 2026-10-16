@@ -426,6 +426,12 @@ static void test_prefix_invariant(void) {
     check(strstr(w->last_body.data,
                  "\"include\":[\"reasoning.encrypted_content\"]") != NULL,
           "responses: include constant");
+    add_tool(e, "fs.list", "list files");
+    w->build(w, e);
+    check(strstr(w->last_body.data,
+                 "\"tools\":[{\"type\":\"function\",\"name\":\"fs.list\"") !=
+              NULL,
+          "responses: flat tool carries the function discriminator");
 
     tr_add(e, "{\"type\":\"thinking\",\"text\":\"hmm\",\"partial\":false,"
         "\"signature\":\"{\\\"type\\\":\\\"reasoning\\\",\\\"x\\\":1}\"}");

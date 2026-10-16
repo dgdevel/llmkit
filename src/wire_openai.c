@@ -259,7 +259,7 @@ static void append_tools(buf_t *b, engine_t *e, bool nested) {
     buf_append_str(b, ",\"tools\":[");
     for (size_t i = 0; i < tl->n; i++) {
         if (i) buf_append_byte(b, ',');
-        append_tool_json(b, &tl->v[i], "parameters", nested, NULL);
+        append_tool_json(b, &tl->v[i], "parameters", nested, !nested, NULL);
     }
     buf_append_byte(b, ']');
 }

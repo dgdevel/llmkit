@@ -514,9 +514,12 @@ char *wire_usage_json(const wire_t *w) {
 }
 
 void append_tool_json(buf_t *b, const tool_entry_t *t, const char *schema_field,
-                      bool nested, const char *tail) {
+                      bool nested, bool flat_type, const char *tail) {
     if (nested)
         buf_append_str(b, "{\"type\":\"function\",\"function\":{\"name\":");
+    else if (flat_type)
+        /* responses api: flat, but the union discriminator is required */
+        buf_append_str(b, "{\"type\":\"function\",\"name\":");
     else
         buf_append_str(b, "{\"name\":");
     buf_append_jstr(b, t->exposed_name);

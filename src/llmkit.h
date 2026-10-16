@@ -679,9 +679,10 @@ void group_text_join(const group_iter_t *g, buf_t *out);
 /* inference_options field, NULL when absent or null */
 const cJSON *wire_io_get(engine_t *e, const char *field);
 /* one tool listing entry: schema under schema_field, openai nested in a
-   function object, anthropic with the trailing cache mark */
+   function object (chat) or flat with the type discriminator
+   (responses), anthropic flat with the trailing cache mark */
 void append_tool_json(buf_t *b, const tool_entry_t *t, const char *schema_field,
-                      bool nested, const char *tail);
+                      bool nested, bool flat_type, const char *tail);
 /* the post-transfer verdict both wires share: transport error, http
    error or an in-stream failure; 0 = the body still needs mapping */
 int wire_http_verdict(int rc, http_req_t *req, blkemit_t *be, bool failed,

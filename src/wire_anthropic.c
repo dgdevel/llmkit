@@ -283,6 +283,7 @@ static bool ant_build_body(awire_t *w, engine_t *e, cJSON **err) {
         for (size_t i = 0; i < e->tools->n; i++) {
             if (i) buf_append_byte(b, ',');
             append_tool_json(b, &e->tools->v[i], "input_schema", false,
+                             false,
                              static_marker && i + 1 == e->tools->n
                                  ? CACHE_MARK
                                  : NULL);
