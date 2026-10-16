@@ -124,7 +124,7 @@ Tools: add a `tools` record before the `user` record.
 
 `llmkit call --mcp-proxy cfg.jsonl --terminal-tool fs.confirm` marks tools the same way from the command line. The answer is then the text of the tool. `llmkit agent-as-tool` seeds honor the attribute too. The `invoke` reply is the answer of the terminal tool.
 
-No external tool server at hand? `llmkit builtin-mcp` is one. It serves fifteen generic-use tools from the same binary: web search and fetch, file list/search/read/create/edit/delete/analyze, process exec/status/wait/send-signal, skills search and read.
+No external tool server at hand? `llmkit builtin-mcp` is one. It serves sixteen generic-use tools from the same binary: web search and fetch, download, file list/search/read/create/edit/delete/analyze, process exec/status/wait/send-signal, skills search and read.
 ```sh
 llmkit mcp-repl --stdio 'llmkit builtin-mcp'
 ```

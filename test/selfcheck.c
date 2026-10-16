@@ -1646,18 +1646,18 @@ static void test_builtin(void) {
             ? cJSON_GetObjectItemCaseSensitive(
                   cJSON_GetObjectItemCaseSensitive(r, "result"), "tools")
             : NULL;
-        check(cJSON_IsArray(tools) && cJSON_GetArraySize(tools) == 18,
-              "builtin: eighteen tools listed");
-        const char *want[18] = {
-            "web_search",     "web_fetch",      "files_list",
-            "files_search",   "file_read",      "file_create",
-            "file_edit",      "file_delete",    "file_copy",
-            "file_move",      "file_analyze",
+        check(cJSON_IsArray(tools) && cJSON_GetArraySize(tools) == 19,
+              "builtin: nineteen tools listed");
+        const char *want[19] = {
+            "web_search",     "web_fetch",      "download",
+            "files_list",     "files_search",   "file_read",
+            "file_create",    "file_edit",      "file_delete",
+            "file_copy",      "file_move",      "file_analyze",
             "process_exec",   "process_status", "process_wait",
             "process_send_signal", "skills_search", "skills_read", "now" };
         bool names_ok = true, descs_set = true, args_set = true;
         if (cJSON_IsArray(tools))
-            for (int i = 0; i < 18; i++) {
+            for (int i = 0; i < 19; i++) {
                 const cJSON *t = cJSON_GetArrayItem(tools, i);
                 const cJSON *nm = cJSON_GetObjectItemCaseSensitive(t, "name");
                 if (!cJSON_IsString(nm) || strcmp(nm->valuestring, want[i]))
@@ -1676,7 +1676,7 @@ static void test_builtin(void) {
         check(args_set, "builtin: tools declare input schemas");
         { /* the file walkers declare their optional hidden switch */
             bool hidden_ok = true;
-            for (int i = 2; i <= 3; i++) {
+            for (int i = 3; i <= 4; i++) {
                 const cJSON *t = cJSON_GetArrayItem(tools, i);
                 const cJSON *schema =
                     cJSON_GetObjectItemCaseSensitive(t, "inputSchema");

@@ -1,6 +1,6 @@
 # builtin-mcp
 
-`llmkit builtin-mcp` is an mcp server on stdio. It exposes a set of generic-use tools: web search, web fetch, seven file operations, four process operations, two agent-skill operations, and the current date and time. It takes no arguments and has no configuration file:
+`llmkit builtin-mcp` is an mcp server on stdio. It exposes a set of generic-use tools: web search, web fetch, file download, seven file operations, four process operations, two agent-skill operations, and the current date and time. It takes no arguments and has no configuration file:
 
 ```sh
 $ llmkit builtin-mcp < jsonrpc-on-stdin   # serves until eof
@@ -30,6 +30,7 @@ A platform-dependent description ships in both variants. The extra `<argument>.w
 |---|---|---|
 | `web_search` | `keywords: string` | search results block |
 | `web_fetch` | `url: string` | the page as markdown |
+| `download` | `url: string, outputfile: string` | confirmation |
 | `files_list` | `path: string, regex: string, recurse_subdirectories: bool = false, show_hidden_files: bool = false` | one line per entry |
 | `files_search` | `path: string, regex: string, show_hidden_files: bool = false` | entries plus matching line numbers |
 | `file_read` | `path: string, lines_offset: int, lines_length: int` | the requested lines |
@@ -61,6 +62,10 @@ Duckduckgo redirect links are unwrapped to the real target url. At most 25 resul
 ### web_fetch(url)
 
 The tool validates the url (http or https, nonempty host) and fetches it following redirects (20Mb cap). Then it runs a readability-style reduction: junk elements are dropped, the content subtree is picked by paragraph-driven scoring with class/id hints, and the result is converted to markdown (headings, links, images, lists, blockquotes, fenced code, tables). The tool response is the markdown of the page, title first as a `#` heading. Pages that are not html (by content type) or have no readable content are errors.
+
+### download(url, outputfile)
+
+The tool validates the url (http or https, nonempty host) and streams the response body to `outputfile` (10-minute budget, any content type, no size cap). The parent directory is created when missing. An `outputfile` that already exists is an error - the tool never overwrites. A failed transfer (transport error, non-2xx, disk write error) unlinks the partial file and is an error. The reply is `wrote ${bytes} bytes to ${outputfile}`.
 
 ### files_list(path, regex, recurse_subdirectories=false, show_hidden_files=false)
 

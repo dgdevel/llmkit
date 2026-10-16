@@ -47,6 +47,10 @@ static const arg_def_t ARGS_web_search[] = {
 static const arg_def_t ARGS_web_fetch[] = {
     {"url", "string", prompt_mcp_web_fetch_arguments_url, true},
 };
+static const arg_def_t ARGS_download[] = {
+    {"url", "string", prompt_mcp_download_arguments_url, true},
+    {"outputfile", "string", prompt_mcp_download_arguments_outputfile, true},
+};
 static const arg_def_t ARGS_files_list[] = {
     {"path", "string", prompt_mcp_files_list_arguments_path, true},
     {"regex", "string", prompt_mcp_files_list_arguments_regex, true},
@@ -129,6 +133,7 @@ static const arg_def_t ARGS_now[] = {
 static const tool_def_t TOOLS[] = {
     {"web_search", prompt_mcp_web_search_description, ARGS_web_search, 1},
     {"web_fetch", prompt_mcp_web_fetch_description, ARGS_web_fetch, 1},
+    {"download", prompt_mcp_download_description, ARGS_download, 2},
     {"files_list", prompt_mcp_files_list_description, ARGS_files_list, 4},
     {"files_search", prompt_mcp_files_search_description, ARGS_files_search,
      3},
@@ -162,6 +167,7 @@ enum { TOOLS_N = sizeof TOOLS / sizeof TOOLS[0] };
 /* src/builtin/web.c */
 void tool_web_search(const cJSON *args, buf_t *out, bool *is_error);
 void tool_web_fetch(const cJSON *args, buf_t *out, bool *is_error);
+void tool_download(const cJSON *args, buf_t *out, bool *is_error);
 /* src/builtin/files.c */
 void tool_files_list(const cJSON *a, buf_t *o, bool *e);
 void tool_files_search(const cJSON *a, buf_t *o, bool *e);
@@ -185,9 +191,9 @@ void tool_skills_read(const cJSON *args, buf_t *out, bool *is_error);
 void tool_now(const cJSON *args, buf_t *out, bool *is_error);
 
 static const tool_fn TOOL_FNS[TOOLS_N] = {
-    tool_web_search, tool_web_fetch,  tool_files_list, tool_files_search,
-    tool_file_read,  tool_file_create, tool_file_edit, tool_file_delete,
-    tool_file_copy, tool_file_move,
+    tool_web_search, tool_web_fetch, tool_download, tool_files_list,
+    tool_files_search, tool_file_read, tool_file_create, tool_file_edit,
+    tool_file_delete, tool_file_copy, tool_file_move,
     tool_file_analyze,
     tool_process_exec, tool_process_status, tool_process_wait,
     tool_process_send_signal,

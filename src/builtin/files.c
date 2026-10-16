@@ -144,7 +144,7 @@ static bool walk_start(walk_ctx_t *w, const char *root, char *err,
 }
 
 /* mkdir -p for the parent directory of a path */
-static bool ensure_parent_dirs(const char *path) {
+bool bm_ensure_parent_dirs(const char *path) {
     char tmp[BM_PATH_MAX];
     if (snprintf(tmp, sizeof tmp, "%s", path) >= (int)sizeof tmp) return false;
     char *slash = strrchr(tmp, '/');
@@ -323,7 +323,7 @@ void tool_file_create(const cJSON *args, buf_t *out, bool *is_error) {
             return;
         }
     }
-    if (!ensure_parent_dirs(path)) {
+    if (!bm_ensure_parent_dirs(path)) {
         buf_clear(out);
         buf_appendf(out, "cannot create parent directories of '%s'", path);
         *is_error = true;
@@ -827,7 +827,7 @@ static void tool_file_copy_move(const cJSON *args, buf_t *out,
         *is_error = true;
         return;
     }
-    if (!ensure_parent_dirs(target)) {
+    if (!bm_ensure_parent_dirs(target)) {
         buf_clear(out);
         buf_appendf(out, "cannot create the parent directories of '%s'",
                     target);

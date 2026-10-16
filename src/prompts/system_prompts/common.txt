@@ -14,7 +14,7 @@ Tools are for:
 - reading files: `file_analyze` and `file_read`
 - writing files: `file_create`, `file_edit`
 - file system operations: `file_copy`, `file_move`, `file_delete`
-- search the internet: `web_search` and `web_fetch`
+- internet use: `web_search`, `web_fetch`, `download`
 - process management: `process_exec`, `process_wait`, `process_status`, `process_send_signal`
 - reading skills: `skills_search` and `skills_read`
 - date/time/timezone: `now`

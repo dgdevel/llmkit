@@ -112,6 +112,9 @@ bool bm_need_str(const cJSON *args, const char *name, const char **out,
 bool bm_need_int(const cJSON *args, const char *name, long long *out,
                  buf_t *err);
 
+/* mkdir -p for the parent directory of a path (builtin/files.c) */
+bool bm_ensure_parent_dirs(const char *path);
+
 /* ---- skills helpers (builtin/skills.c) ---- */
 
 /* the existing skill roots, search order (0..2 of them) */

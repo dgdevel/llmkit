@@ -1039,3 +1039,101 @@ void tool_web_fetch(const cJSON *args, buf_t *out, bool *is_error) {
         *is_error = true;
     }
 }
+
+/* write side of tool_download: bytes from http_perform into the FILE*,
+   failures latched in ok (a short fwrite means disk full or similar) */
+typedef struct dl_sink {
+    FILE *f;
+    bool ok;
+    unsigned long long n;
+} dl_sink_t;
+
+static void dl_write(void *ctx, const char *bytes, size_t n) {
+    dl_sink_t *s = ctx;
+    if (!s->ok) return;
+    s->ok = fwrite(bytes, 1, n, s->f) == n;
+    if (s->ok) s->n += n;
+}
+
+void tool_download(const cJSON *args, buf_t *out, bool *is_error) {
+    const char *url = NULL, *outputfile = NULL;
+    if (!bm_need_str(args, "url", &url, out) ||
+        !bm_need_str(args, "outputfile", &outputfile, out)) {
+        *is_error = true;
+        return;
+    }
+    if (!strlen(outputfile)) {
+        buf_clear(out);
+        buf_append_str(out, "outputfile must not be empty");
+        *is_error = true;
+        return;
+    }
+    struct stat st;
+    if (!stat(outputfile, &st)) {
+        buf_clear(out);
+        buf_appendf(out, "'%s' already exists", outputfile);
+        *is_error = true;
+        return;
+    }
+    if (!valid_http_url(url)) {
+        buf_clear(out);
+        buf_appendf(out, "invalid url: %s", url);
+        *is_error = true;
+        return;
+    }
+    if (!bm_ensure_parent_dirs(outputfile)) {
+        buf_clear(out);
+        buf_appendf(out, "cannot create parent directories of '%s'",
+                    outputfile);
+        *is_error = true;
+        return;
+    }
+    FILE *f = fopen(outputfile, "wb");
+    if (!f) {
+        buf_clear(out);
+        buf_appendf(out, "cannot write '%s': %s", outputfile,
+                    strerror(errno));
+        *is_error = true;
+        return;
+    }
+    dl_sink_t sink = { f, true, 0 };
+    http_req_t r;
+    memset(&r, 0, sizeof r);
+    buf_init(&r.resp);
+    buf_init(&r.content_type);
+    r.url = url;
+    r.is_get = true;
+    r.ua = BROWSER_UA;
+    r.connect_to = 10;
+    r.read_to = 30;
+    r.total_to = 600; /* big downloads get 10 minutes */
+    r.on_data = dl_write;
+    r.cb_ctx = &sink;
+    int rc = http_perform(&r);
+    if (rc == 0 && sink.ok && r.resp.len) {
+        /* json content types stay in resp (platform.c): flush them out */
+        sink.ok = fwrite(r.resp.data, 1, r.resp.len, f) == r.resp.len;
+        if (sink.ok) sink.n += r.resp.len;
+    }
+    fclose(f);
+    if (rc != 0 || !sink.ok) {
+        remove(outputfile); /* unlink the partial file */
+        buf_clear(out);
+        if (rc == 1)
+            buf_appendf(out, "download failed: http status %ld", r.status);
+        else if (rc < 0)
+            buf_appendf(out, "download failed: transport error: %s",
+                        curl_easy_strerror(r.curl_res));
+        else
+            buf_appendf(out, "download failed: write error on '%s'",
+                        outputfile);
+        buf_free(&r.resp);
+        buf_free(&r.content_type);
+        *is_error = true;
+        return;
+    }
+    buf_free(&r.resp);
+    buf_free(&r.content_type);
+    buf_clear(out);
+    buf_appendf(out, "wrote %llu bytes to %s", sink.n, outputfile);
+}
