@@ -1,9 +1,11 @@
 # builtin-mcp
 
-`llmkit builtin-mcp` is an mcp server on stdio. It exposes a set of generic-use tools: web search, web fetch, file download, seven file operations, four process operations, two agent-skill operations, and the current date and time. It takes no arguments and has no configuration file:
+`llmkit builtin-mcp` is an mcp server on stdio. It exposes a set of generic-use tools: web search, web fetch, file download, seven file operations, four process operations, two agent-skill operations, and the current date and time. It takes no arguments and has no configuration file.
+
+Test it with the mcp-repl feature:
 
 ```sh
-$ llmkit builtin-mcp < jsonrpc-on-stdin   # serves until eof
+$ llmkit mcp-repl --stdio 'llmkit builtin-mcp'
 ```
 
 It speaks the same json-rpc surface as `agent-as-tool` and `mcp-proxy` (initialize / notifications/initialized / ping / tools/list / tools/call) in all current protocol revisions up to `2026-07-28`.
