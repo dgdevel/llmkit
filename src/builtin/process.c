@@ -80,6 +80,7 @@ static void proc_emit(proc_rec_t *p, const char *src, const char *s,
     if (p->out) {
         fwrite(ln.data, 1, ln.len, p->out);
         fputc('\n', p->out);
+        fflush(p->out); /* live readers must see each line */
     }
     pthread_mutex_lock(&p->m);
     if (p->nhead < BM_PROC_HEAD) p->head[p->nhead++] = strdup(ln.data);
@@ -316,8 +317,8 @@ static FILE *proc_mktemp(char *path, size_t sz) {
     for (int i = 0; i < 4096; i++) {
         snprintf(path, sz, "%sllmkit-proc-%lu-%u.tmp", dir,
                  (unsigned long)GetCurrentProcessId(), ++seq);
-        HANDLE h = CreateFileA(path, GENERIC_WRITE, 0, NULL, CREATE_NEW,
-                               FILE_ATTRIBUTE_NORMAL, NULL);
+        HANDLE h = CreateFileA(path, GENERIC_WRITE, FILE_SHARE_READ, NULL,
+                               CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
         if (h != INVALID_HANDLE_VALUE) {
             int fd = _open_osfhandle((intptr_t)h, _O_BINARY | _O_NOINHERIT);
             if (fd < 0) {
