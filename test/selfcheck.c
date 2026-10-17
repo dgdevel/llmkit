@@ -6335,6 +6335,95 @@ static void test_llm_proxy(void) {
     }
 }
 
+/* ================= html tools (web_fetch/web_search core) ================= */
+
+static void test_html(void) {
+    /* a well-formed page renders markdown: title, heading, emphasis,
+       list, fenced block, quote, link; nav chrome is dropped */
+    const char *page =
+        "<html><head><title>My Title</title></head><body>"
+        "<nav>ignore me</nav>"
+        "<main><h1>Heading</h1>"
+        "<p>Hello <b>bold</b> world.</p>"
+        "<ul><li>one</li><li>two</li></ul>"
+        "<pre>x = 1</pre>"
+        "<blockquote>quoted</blockquote>"
+        "<p><a href=\"/docs/x\">the link</a></p>"
+        "</main></body></html>";
+    char *md = builtin_html_to_markdown(page, strlen(page));
+    check(md != NULL, "html: page converts");
+    if (!md) return;
+    check(strstr(md, "# My Title") != NULL, "html: title renders");
+    check(strstr(md, "# Heading") != NULL, "html: heading renders");
+    check(strstr(md, "**bold**") != NULL, "html: strong renders");
+    check(strstr(md, "Hello **bold** world.") != NULL, "html: paragraph joins");
+    check(strstr(md, "- one") != NULL && strstr(md, "- two") != NULL,
+          "html: list items render");
+    check(strstr(md, "```\nx = 1\n```") != NULL, "html: pre is fenced");
+    check(strstr(md, "> quoted") != NULL, "html: blockquote is prefixed");
+    check(strstr(md, "[the link](/docs/x)") != NULL, "html: link renders");
+    check(strstr(md, "ignore me") == NULL, "html: nav chrome dropped");
+    free(md);
+
+    /* entity decoding rides the text pipeline */
+    const char *ents = "<html><body><main><p>a &amp; b &lt;c&gt;</p></main>"
+                       "</body></html>";
+    char *md2 = builtin_html_to_markdown(ents, strlen(ents));
+    check(md2 && strstr(md2, "a & b <c>") != NULL, "html: entities decode");
+    free(md2);
+
+    /* hostile inputs: no crash, a string comes back */
+    buf_t soup;
+    buf_init(&soup);
+    for (int i = 0; i < 20000; i++) buf_append_str(&soup, "<div class=x>");
+    buf_append_str(&soup, "tail text");
+    char *md3 = builtin_html_to_markdown(soup.data, soup.len);
+    check(md3 != NULL, "html: 20k unclosed tags survive");
+    free(md3);
+    buf_free(&soup);
+
+    buf_t deep;
+    buf_init(&deep);
+    for (int i = 0; i < 5000; i++) buf_append_str(&deep, "<div>");
+    buf_append_str(&deep, "<p>bottom</p>");
+    for (int i = 0; i < 5000; i++) buf_append_str(&deep, "</div>");
+    char *md4 = builtin_html_to_markdown(deep.data, deep.len);
+    check(md4 != NULL && strstr(md4, "bottom") != NULL,
+          "html: 5000-deep nest survives");
+    free(md4);
+    buf_free(&deep);
+
+    const char *script = "<html><body><script>var x = \"</p>\";</script>"
+                         "<main><p>after script</p></main></body></html>";
+    char *md5 = builtin_html_to_markdown(script, strlen(script));
+    check(md5 && strstr(md5, "after script") != NULL &&
+              strstr(md5, "var x") == NULL,
+          "html: script body skipped");
+    free(md5);
+
+    /* duckduckgo results: redirect unwrapped, snippet paired */
+    const char *ddg =
+        "<div class=\"result__body\">"
+        "<a class=\"result__a\" href=\"//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.org%2Fa&amp;rut=zz\">Title A</a>"
+        "<a class=\"result__snippet\">Snippet A</a>"
+        "</div>"
+        "<div class=\"result__body\">"
+        "<a class=\"result__a\" href=\"https://example.org/b\">Title B</a>"
+        "</div>";
+    char *res = builtin_ddg_results(ddg, strlen(ddg));
+    check(res != NULL, "ddg: results parse");
+    if (!res) return;
+    check(strstr(res, "URL: https://example.org/a") != NULL,
+          "ddg: redirect unwrapped");
+    check(strstr(res, "Description: Snippet A") != NULL,
+          "ddg: snippet paired");
+    check(strstr(res, "URL: https://example.org/b") != NULL,
+          "ddg: plain href kept");
+    check(strstr(res, "Description: Title B") != NULL,
+          "ddg: title doubles as description");
+    free(res);
+}
+
 int main(void) {
     signals_init();
     http_global_init();
@@ -6373,8 +6462,10 @@ int main(void) {
     test_mcp_repl();
     fprintf(stderr, "selfcheck: terminal tools\n");
     test_terminal_tools();
-    fprintf(stderr, "selfcheck: llmkit proxy\n");
+    fprintf(stderr, "selfcheck: llm proxy\n");
     test_llm_proxy();
+    fprintf(stderr, "selfcheck: html tools\n");
+    test_html();
     fprintf(stderr, "%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
 }

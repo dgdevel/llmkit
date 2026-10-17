@@ -43,6 +43,11 @@ size_t bm_trail_ws(const char *s, size_t n) {
     return n - i;
 }
 
+/* qsort comparator for a char *[] of names */
+int bm_cmp_names(const void *a, const void *b) {
+    return strcmp(*(char *const *)a, *(char *const *)b);
+}
+
 /* collapse whitespace runs to single spaces, in place over a buf */
 void bm_collapse_ws(buf_t *b) {
     if (!b->len) return;
@@ -316,10 +321,6 @@ bool builtin_regex_match(const char *pattern, const char *text, char *err,
 
 
 /* ================= filesystem helpers ================= */
-
-#define BM_PATH_MAX 4096
-#define BM_FILE_CAP (64ull * 1024 * 1024)        /* per-file read cap */
-#define BM_SEARCH_CAP (16ull * 1024 * 1024)      /* content-search cap */
 
 void bm_perms_of(const char *path, char out[4]) {
     out[0] = BM_ACCESS(path, R_OK) == 0 ? 'r' : '-';

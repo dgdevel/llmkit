@@ -74,6 +74,10 @@ static char *vmsg(const char *fmt, ...) {
     int n = vsnprintf(NULL, 0, fmt, ap);
     va_end(ap);
     char *m = malloc((size_t)n + 1);
+    if (!m) {
+        perror("llmkit: malloc");
+        exit(EXIT_OUT_OF_CHANNEL);
+    }
     vsnprintf(m, (size_t)n + 1, fmt, ap2);
     va_end(ap2);
     return m;
@@ -303,6 +307,10 @@ int jsonl_feed(jsonl_pusher_t *p, const char *bytes, size_t n) {
         if (p->hold.data[i] == '\n') {
             size_t ln = i - start;
             char *line = malloc(ln + 1);
+            if (!line) {
+                perror("llmkit: malloc");
+                exit(EXIT_OUT_OF_CHANNEL);
+            }
             memcpy(line, p->hold.data + start, ln);
             line[ln] = '\0';
             if (memchr(line, '\0', ln)) { /* embedded NUL: malformed */

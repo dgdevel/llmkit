@@ -11,6 +11,13 @@
 
 /* ================= html dom (readability input) ================= */
 
+/* hostile-input caps for the html dom: how deep the open-element stack
+   may grow (deeper open tags flatten: the parent becomes the element at
+   the cap) and how many nodes a page may own before the parse gives up
+   with d->oom (the tool reports a parse failure instead of dying) */
+#define HTML_DEPTH_MAX 200
+#define HTML_NODE_MAX 100000
+
 typedef struct hnode hnode_t;
 struct hnode {
     hnode_t *parent, *child, *tail, *next;
@@ -18,6 +25,7 @@ struct hnode {
     char *text;   /* text nodes (tag "") own decoded text */
     char *cls, *id, *href, *src, *alt;
     double score;
+    int depth; /* root = 0; the parse flattens below HTML_DEPTH_MAX */
 };
 
 typedef struct hdom {
@@ -28,9 +36,18 @@ typedef struct hdom {
 } hdom_t;
 
 static hnode_t *hnew(hdom_t *d, hnode_t *parent) {
+    if (d->n >= HTML_NODE_MAX) { /* hostile page: a cap, not a crash */
+        d->oom = true;
+        return NULL;
+    }
     if (d->n == d->cap) {
         d->cap = d->cap ? d->cap * 2 : 256;
-        d->all = realloc(d->all, d->cap * sizeof *d->all);
+        hnode_t **grown = realloc(d->all, d->cap * sizeof *d->all);
+        if (!grown) {
+            d->oom = true;
+            return NULL;
+        }
+        d->all = grown;
     }
     hnode_t *n = calloc(1, sizeof *n);
     if (!n) {
@@ -38,6 +55,7 @@ static hnode_t *hnew(hdom_t *d, hnode_t *parent) {
         return NULL;
     }
     n->parent = parent;
+    n->depth = parent ? parent->depth + 1 : 0;
     d->all[d->n++] = n;
     if (parent) {
         if (parent->tail) parent->tail->next = n;
@@ -139,6 +157,7 @@ static void dom_parse(hdom_t *d, const char *html, size_t n) {
     }
     strcpy(d->root->tag, "#r");
     hnode_t *cur = d->root;
+    int depth = 0; /* open elements below the root (closed tags pop it) */
     size_t i = 0;
     while (i < len && !d->oom) {
         if (s[i] != '<') {
@@ -250,17 +269,26 @@ static void dom_parse(hdom_t *d, const char *html, size_t n) {
         }
         while (cur != d->root && closes_on(cur->tag, name)) cur = cur->parent;
         bool voidt = tag_in(name, VOID_TAGS, VOID_N);
-        hnode_t *el = hnew(d, cur);
+        hnode_t *el = hnew(d, depth < HTML_DEPTH_MAX ? cur : cur->parent);
         if (!el) break;
+        if (depth < HTML_DEPTH_MAX && !selfclose && !voidt) depth++;
         strcpy(el->tag, name);
         el->cls = cls;
         el->id = id;
         el->href = href;
         el->src = src;
         el->alt = alt;
-        if (!selfclose && !voidt) cur = el;
+        if (!selfclose && !voidt && depth < HTML_DEPTH_MAX) {
+            cur = el; /* at the cap: children attach one level up */
+        }
     }
     free(s);
+}
+
+/* recursion guards for the renderers below: sibling walks loop, so only
+   parent descent can run away; depth <= node count always terminates */
+static bool depth_ok(const hnode_t *n) {
+    return n->depth <= HTML_NODE_MAX;
 }
 
 static void dom_free(hdom_t *d) {
@@ -277,8 +305,8 @@ static void dom_free(hdom_t *d) {
     memset(d, 0, sizeof *d);
 }
 
-/* unlink children whose tag is in the junk set, recursively */
 static void strip_tags(hnode_t *n, const char *const *set, size_t setn) {
+    if (!depth_ok(n)) return;
     hnode_t **link = &n->child;
     n->tail = NULL;
     hnode_t *last = NULL;
@@ -308,7 +336,7 @@ static hnode_t *find_tag(hdom_t *d, const char *tag) {
 
 /* concatenated text of a subtree (with a work budget); <br> counts as \n */
 static void node_text(const hnode_t *n, buf_t *out, long *budget) {
-    if (*budget <= 0) return;
+    if (*budget <= 0 || !depth_ok(n)) return;
     if (n->text) {
         buf_append(out, n->text, strlen(n->text));
         *budget -= (long)strlen(n->text);
@@ -427,7 +455,7 @@ static void md_inline_children(const hnode_t *n, buf_t *out) {
 }
 
 static void md_inline(const hnode_t *n, buf_t *out) {
-    if (!n) return;
+    if (!n || !depth_ok(n)) return;
     if (n->text) {
         /* collapse internal runs, keep edge spaces: the block assembly
            trims the finished run once */
@@ -545,7 +573,7 @@ static bool is_heading(const hnode_t *n) {
 
 /* one block element rendered into out (no leading/trailing newlines) */
 static void md_one(const hnode_t *n, buf_t *out) {
-    if (!n) return;
+    if (!n || !depth_ok(n)) return;
     if (n->text) {
         buf_t t;
         buf_init(&t);
@@ -713,6 +741,7 @@ static void md_one(const hnode_t *n, buf_t *out) {
 
 /* render an li: an inline run plus any nested blocks, joined into one buf */
 static void md_li(const hnode_t *li, buf_t *out) {
+    if (!depth_ok(li)) return;
     buf_t inline_acc;
     buf_init(&inline_acc);
     for (const hnode_t *c = li->child; c; c = c->next) {
@@ -1088,11 +1117,24 @@ void tool_download(const cJSON *args, buf_t *out, bool *is_error) {
         *is_error = true;
         return;
     }
-    FILE *f = fopen(outputfile, "wb");
-    if (!f) {
+    int dfd = BM_OPEN_NEW(outputfile); /* exclusive: the open is the
+                                          existence check */
+    if (dfd < 0) {
         buf_clear(out);
-        buf_appendf(out, "cannot write '%s': %s", outputfile,
-                    strerror(errno));
+        if (errno == EEXIST)
+            buf_appendf(out, "'%s' already exists", outputfile);
+        else
+            buf_appendf(out, "cannot write '%s': %s", outputfile,
+                        strerror(errno));
+        *is_error = true;
+        return;
+    }
+    FILE *f = BM_FDOPEN(dfd);
+    if (!f) {
+        int e = errno;
+        BM_CLOSE(dfd);
+        buf_clear(out);
+        buf_appendf(out, "cannot write '%s': %s", outputfile, strerror(e));
         *is_error = true;
         return;
     }

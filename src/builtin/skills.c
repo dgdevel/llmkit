@@ -54,10 +54,7 @@ void bm_dir_names_free(char **names, size_t n) {
     free(names);
 }
 
-/* strcmp for qsort of names */
-static int cmp_names(const void *a, const void *b) {
-    return strcmp(*(char *const *)a, *(char *const *)b);
-}
+/* strcmp for qsort of names lives in util.c as bm_cmp_names */
 
 /* sorted entry names of a directory (not "." / ".."); free with
    bm_dir_names_free */
@@ -89,7 +86,7 @@ char **bm_dir_names(const char *path, size_t *nout) {
         n++;
     }
     closedir(d);
-    qsort(names, n, sizeof *names, cmp_names);
+    qsort(names, n, sizeof *names, bm_cmp_names);
     *nout = n;
     return names;
 }

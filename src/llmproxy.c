@@ -1504,9 +1504,28 @@ static bool passthrough(creq_t *req, sock_t c, const llm_proxy_cfg_t *cfg) {
 
     /* client headers minus the hop-by-hop set */
     struct curl_slist *hdrs = NULL;
-    for (size_t i = 0; i < req->nh; i++)
-        if (!req_hdr_skip(req->h[i].name))
-            http_hdr_add(&hdrs, req->h[i].name, req->h[i].value);
+    bool have_auth = false;
+    for (size_t i = 0; i < req->nh; i++) {
+        if (req_hdr_skip(req->h[i].name)) continue;
+        if (!strcasecmp(req->h[i].name, "authorization") ||
+            !strcasecmp(req->h[i].name, "x-api-key"))
+            have_auth = true;
+        http_hdr_add(&hdrs, req->h[i].name, req->h[i].value);
+    }
+    /* the configured key rides along here too: a client without its
+       own auth still reaches an authenticated upstream (same rule as
+       the POST path) */
+    if (cfg->key && cfg->key[0] && !have_auth) {
+        if (cfg->protocol == PROTO_ANTHROPIC) {
+            http_hdr_add(&hdrs, "x-api-key", cfg->key);
+        } else {
+            buf_t auth;
+            buf_init(&auth);
+            buf_appendf(&auth, "Bearer %s", cfg->key);
+            http_hdr_add(&hdrs, "Authorization", auth.data ? auth.data : "");
+            buf_free(&auth);
+        }
+    }
 
     fx_t f;
     memset(&f, 0, sizeof f);
@@ -1690,15 +1709,18 @@ static int listen_tcp(const char *host, const char *port,
             char *pn = NULL;
             if (getnameinfo((struct sockaddr *)&ss, sl, NULL, 0,
                             pn, sizeof pport, 0) == 0) {
-                snprintf(bound, 64, "%s:%s", ip, pn ? pn : port);
+                /* bounded precision: a numeric host is at most 45 bytes
+                   and a port at most 15, so the 64 cannot truncate */
+                snprintf(bound, 64, "%.45s:%.15s", ip, pn ? pn : port);
             } else {
-                snprintf(bound, 64, "%s:%s", ip, port);
+                snprintf(bound, 64, "%.45s:%.15s", ip, port);
             }
         } else {
             snprintf(bound, 64, "unknown");
         }
     } else {
-        snprintf(bound, 64, "%s", host && *host ? host : "::");
+        /* host comes from --listen (capped at 128 at parse time) */
+        snprintf(bound, 64, "%.63s", host && *host ? host : "::");
     }
     return (int)s;
 }

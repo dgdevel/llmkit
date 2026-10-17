@@ -480,7 +480,7 @@ static void emit_connect_failed(engine_t *e, const char *name, const char *err,
                                 bool fatal) {
     if (!e || !e->emit) return;
     char msg[512];
-    snprintf(msg, sizeof msg, "mcp server '%s': %s", name, err);
+    snprintf(msg, sizeof msg, "mcp server '%.60s': %.436s", name, err);
     e->emit(e->emit_ctx, rec_error(EC_CONNECT_FAILED, msg, fatal));
 }
 

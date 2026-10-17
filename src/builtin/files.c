@@ -10,7 +10,7 @@
 #include <time.h>
 
 static int cmp_names(const void *a, const void *b) {
-    return strcmp(*(char *const *)a, *(char *const *)b);
+    return bm_cmp_names(a, b);
 }
 
 /* ---- listing walk ---- */
@@ -342,24 +342,56 @@ void tool_file_create(const cJSON *args, buf_t *out, bool *is_error) {
         return;
     }
     struct stat st;
-    if (!stat(path, &st)) {
-        if (!overwrite) {
-            buf_clear(out);
-            buf_appendf(out, "'%s' already exists (pass overwrite=true)", path);
-            *is_error = true;
-            return;
-        }
-        if (S_ISDIR(st.st_mode)) {
-            buf_clear(out);
-            buf_appendf(out, "'%s' is a directory", path);
-            *is_error = true;
-            return;
-        }
+    if (!stat(path, &st) && S_ISDIR(st.st_mode)) {
+        buf_clear(out);
+        buf_appendf(out, "'%s' is a directory", path);
+        *is_error = true;
+        return;
     }
     if (!bm_ensure_parent_dirs(path)) {
         buf_clear(out);
         buf_appendf(out, "cannot create parent directories of '%s'", path);
         *is_error = true;
+        return;
+    }
+    /* write through an exclusive create when the caller said no
+       overwrite: the open itself is the existence check, so two
+       concurrent writers cannot both claim the path */
+    if (!overwrite) {
+        int fd = BM_OPEN_NEW(path);
+        if (fd < 0) {
+            buf_clear(out);
+            if (errno == EEXIST)
+                buf_appendf(out,
+                            "'%s' already exists (pass overwrite=true)",
+                            path);
+            else
+                buf_appendf(out, "cannot write '%s': %s", path,
+                            strerror(errno));
+            *is_error = true;
+            return;
+        }
+        FILE *f = BM_FDOPEN(fd);
+        if (!f) {
+            int e = errno;
+            BM_CLOSE(fd);
+            buf_clear(out);
+            buf_appendf(out, "cannot write '%s': %s", path, strerror(e));
+            *is_error = true;
+            return;
+        }
+        size_t n = strlen(content);
+        bool ok = fwrite(content, 1, n, f) == n;
+        ok = fclose(f) == 0 && ok;
+        if (!ok) {
+            remove(path); /* a failed create leaves nothing behind */
+            buf_clear(out);
+            buf_appendf(out, "write error on '%s'", path);
+            *is_error = true;
+            return;
+        }
+        buf_clear(out);
+        buf_appendf(out, "wrote %lu bytes to %s", (unsigned long)n, path);
         return;
     }
     FILE *f = fopen(path, "wb");
@@ -373,6 +405,7 @@ void tool_file_create(const cJSON *args, buf_t *out, bool *is_error) {
     bool ok = fwrite(content, 1, n, f) == n;
     ok = fclose(f) == 0 && ok;
     if (!ok) {
+        remove(path);
         buf_clear(out);
         buf_appendf(out, "write error on '%s'", path);
         *is_error = true;
@@ -703,15 +736,34 @@ void tool_file_delete(const cJSON *args, buf_t *out, bool *is_error) {
 /* ---- file_copy / file_move ---- */
 
 /* one byte-true copy of a regular file: 0 on success, an errno value on
-   failure (a failed stream call without errno becomes EIO) */
-static int copy_reg(const char *src, const char *dst) {
+   failure (a failed stream call without errno becomes EIO).
+   excl=true creates the destination exclusively: the open is the
+   existence check, so two concurrent copies cannot both claim it */
+static int copy_reg(const char *src, const char *dst, bool excl) {
     FILE *in = fopen(src, "rb");
     if (!in) return errno ? errno : EIO;
-    FILE *out = fopen(dst, "wb");
-    if (!out) {
-        int e = errno ? errno : EIO;
-        fclose(in);
-        return e;
+    FILE *out;
+    if (excl) {
+        int fd = BM_OPEN_NEW(dst);
+        if (fd < 0) {
+            int e = errno ? errno : EIO;
+            fclose(in);
+            return e;
+        }
+        out = BM_FDOPEN(fd);
+        if (!out) {
+            int e = errno ? errno : EIO;
+            BM_CLOSE(fd);
+            fclose(in);
+            return e;
+        }
+    } else {
+        out = fopen(dst, "wb");
+        if (!out) {
+            int e = errno ? errno : EIO;
+            fclose(in);
+            return e;
+        }
     }
     char chunk[64 * 1024];
     size_t n;
@@ -726,9 +778,10 @@ static int copy_reg(const char *src, const char *dst) {
 
 /* recursive copy: directories are recreated and descended, everything
    else is copied as a file. the first failure lands in err and stops
-   the walk, leaving what was already written in place. 0 on success */
+   the walk, leaving what was already written in place. 0 on success.
+   excl: file destinations are created exclusively */
 static int copy_tree(const char *src, const char *dst, buf_t *err,
-                     int depth) {
+                     int depth, bool excl) {
     if (depth > 64) {
         buf_appendf(err, "recursion limit at '%s'", src);
         return -1;
@@ -743,7 +796,7 @@ static int copy_tree(const char *src, const char *dst, buf_t *err,
         return -1;
     }
     if (!S_ISDIR(st.st_mode)) {
-        int e = copy_reg(src, dst);
+        int e = copy_reg(src, dst, excl);
         if (e) buf_appendf(err, "'%s': %s", dst, strerror(e));
         return e ? -1 : 0;
     }
@@ -769,7 +822,7 @@ static int copy_tree(const char *src, const char *dst, buf_t *err,
             rc = -1;
             break;
         }
-        rc = copy_tree(csrc, cdst, err, depth + 1);
+        rc = copy_tree(csrc, cdst, err, depth + 1, excl);
     }
     closedir(d);
     return rc;
@@ -869,7 +922,7 @@ static void tool_file_copy_move(const cJSON *args, buf_t *out,
     }
     buf_t err;
     buf_init(&err);
-    if (copy_tree(src, target, &err, 0)) {
+    if (copy_tree(src, target, &err, 0, !overwrite)) {
         buf_clear(out);
         buf_appendf(out, "copy '%s' to '%s' failed: %s", src, target,
                     err.data ? err.data : "unknown error");
@@ -1209,8 +1262,36 @@ void tool_file_edit(const cJSON *args, buf_t *out, bool *is_error) {
         buf_append(&nb, fl[i].end, fl[i].endlen);
     }
 
-    FILE *f = fopen(path, "wb");
-    if (!f || fwrite(nb.data, 1, nb.len, f) != nb.len || fclose(f) != 0) {
+    /* write to a sibling temp file, then rename over the target: a
+       crash, a full disk or a second ctrl-c between truncate and write
+       must never leave a torn or empty file behind */
+    char tmp[BM_PATH_MAX];
+    if (snprintf(tmp, sizeof tmp, "%s.tmp", path) >= (int)sizeof tmp) {
+        free(fl);
+        free(ol);
+        free(nl);
+        buf_free(&b);
+        buf_free(&nb);
+        buf_free(&basews);
+        buf_clear(out);
+        buf_appendf(out, "cannot write '%s': path too long", path);
+        *is_error = true;
+        return;
+    }
+    FILE *f = fopen(tmp, "wb");
+    if (f) {
+        size_t w = fwrite(nb.data, 1, nb.len, f);
+        if (fclose(f) != 0 || w != nb.len) {
+            remove(tmp);
+            f = NULL;
+        } else if (BM_CHMOD(tmp, st.st_mode & 07777) != 0) {
+            /* the mode rides along: an edited script stays executable */
+            remove(tmp);
+            f = NULL;
+        }
+    }
+    if (!f || rename(tmp, path) != 0) {
+        if (f) remove(tmp);
         free(fl);
         free(ol);
         free(nl);

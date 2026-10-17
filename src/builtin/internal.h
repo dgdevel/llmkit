@@ -61,6 +61,22 @@
 #define BM_FILE_CAP (64ull * 1024 * 1024)        /* per-file read cap */
 #define BM_SEARCH_CAP (16ull * 1024 * 1024)      /* content-search cap */
 
+/* exclusive file creation: the open is the existence check, so two
+   concurrent writers cannot both claim the path */
+#ifdef _WIN32
+#include <sys/stat.h>
+#define BM_OPEN_NEW(p)                                                         \
+    _open((p), _O_CREAT | _O_EXCL | _O_WRONLY | _O_BINARY, _S_IREAD | _S_IWRITE)
+#define BM_FDOPEN(fd) _fdopen((fd), "wb")
+#define BM_CLOSE(fd) _close(fd)
+#define BM_CHMOD(p, m) _chmod((p), (m))
+#else
+#define BM_OPEN_NEW(p) open((p), O_CREAT | O_EXCL | O_WRONLY, 0666)
+#define BM_FDOPEN(fd) fdopen((fd), "wb")
+#define BM_CLOSE(fd) close(fd)
+#define BM_CHMOD(p, m) chmod((p), (m))
+#endif
+
 /* ---- tool plumbing (implemented in src/builtin.c) ---- */
 
 typedef void (*tool_fn)(const cJSON *args, buf_t *out, bool *is_error);
@@ -77,6 +93,8 @@ typedef struct {
 
 /* case-insensitive substring test */
 bool bm_ci_contains(const char *hay, const char *needle);
+/* qsort comparator for a char *[] of names (util.c) */
+int bm_cmp_names(const void *a, const void *b);
 bool bm_is_ws(char c);
 size_t bm_lead_ws(const char *s, size_t n);
 size_t bm_trail_ws(const char *s, size_t n);
