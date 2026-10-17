@@ -188,7 +188,7 @@ size_t utf8_seq_len(const char *p) {
 }
 
 /* strict UTF-8: reject overlongs, surrogates, > U+10FFFF */
-bool utf8_valid(const uint8_t *p, size_t n) {
+static bool utf8_scan(const uint8_t *p, size_t n, bool allow_truncated) {
     size_t i = 0;
     while (i < n) {
         uint8_t c = p[i];
@@ -199,7 +199,7 @@ bool utf8_valid(const uint8_t *p, size_t n) {
         else if ((c & 0xF0) == 0xE0) { len = 3; cp = c & 0x0F; }
         else if ((c & 0xF8) == 0xF0) { len = 4; cp = c & 0x07; }
         else return false;
-        if (i + (size_t)len > n) return false;
+        if (i + (size_t)len > n) return allow_truncated;
         for (int k = 1; k < len; k++) {
             uint8_t cc = p[i + (size_t)k];
             if ((cc & 0xC0) != 0x80) return false;
@@ -213,4 +213,12 @@ bool utf8_valid(const uint8_t *p, size_t n) {
         i += (size_t)len;
     }
     return true;
+}
+
+bool utf8_valid(const uint8_t *p, size_t n) { return utf8_scan(p, n, false); }
+
+/* the same, but the final sequence may be cut short by the buffer end
+   (a stream split mid-character is a prefix, not yet an error) */
+bool utf8_valid_prefix(const uint8_t *p, size_t n) {
+    return utf8_scan(p, n, true);
 }

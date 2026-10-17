@@ -704,6 +704,48 @@ static void test_validation(void) {
         jsonl_pusher_free(&pp);
     }
 
+    /* a multi-byte character split across two feeds is not malformed
+       (the bug: strict validation of an incomplete tail sequence) */
+    {
+        line_acc_t bx = { 0 };
+        jsonl_pusher_t pp;
+        jsonl_pusher_init(&pp, line_acc_on_line, &bx);
+        check(jsonl_feed(&pp, "{\"a\":\"\xe6\x97", 8) == 0,
+              "split 3-byte char, first half accepted");
+        check(jsonl_feed(&pp, "\xa5\"}\n", 4) == 0,
+              "split 3-byte char, second half accepted");
+        check(bx.n == 1 && !strcmp(bx.lines[0], "{\"a\":\"\xe6\x97\xa5\"}"),
+              "split char reassembled intact");
+        jsonl_pusher_free(&pp);
+        for (int i = 0; i < bx.n; i++) free(bx.lines[i]);
+    }
+    {
+        line_acc_t bx = { 0 };
+        jsonl_pusher_t pp;
+        jsonl_pusher_init(&pp, line_acc_on_line, &bx);
+        check(jsonl_feed(&pp, "\xf0\x9f", 2) == 0 &&
+              jsonl_feed(&pp, "\x98", 1) == 0 &&
+              jsonl_feed(&pp, "\x80\n", 2) == 0 && bx.n == 1,
+              "4-byte char split across three feeds");
+        jsonl_pusher_free(&pp);
+        for (int i = 0; i < bx.n; i++) free(bx.lines[i]);
+    }
+    /* a lone continuation byte at a feed boundary is still malformed */
+    {
+        jsonl_pusher_t pp;
+        jsonl_pusher_init(&pp, (void (*)(void *, char *))0, NULL);
+        check(jsonl_feed(&pp, "\x80", 1) == -1, "lone continuation rejected");
+        jsonl_pusher_free(&pp);
+    }
+    /* a genuinely truncated final char still fails at eof */
+    {
+        jsonl_pusher_t pp;
+        jsonl_pusher_init(&pp, (void (*)(void *, char *))0, NULL);
+        check(jsonl_feed(&pp, "ok \xe6\x97", 4) == 0, "truncated tail feeds ok");
+        check(jsonl_eof(&pp) == -1, "truncated char rejected at eof");
+        jsonl_pusher_free(&pp);
+    }
+
     /* missing llm at start; missing user; duplicate server name; unknown
        type; bare flush; bad options; bad inference */
     e = engine_new(cap_fn, &cap);

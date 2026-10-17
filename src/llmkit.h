@@ -113,6 +113,9 @@ void buf_append_tree_trim(buf_t *b, const cJSON *t);
 void buf_append_jnum(buf_t *b, double d);
 
 bool utf8_valid(const uint8_t *p, size_t n);
+/* the same, but a final sequence cut short by the buffer end is a
+   prefix, not an error (stream feed re-checks the split character) */
+bool utf8_valid_prefix(const uint8_t *p, size_t n);
 /* one UTF-8 sequence's byte length from its lead byte; malformed leads
    count one - the callers land inside valid UTF-8 only */
 size_t utf8_seq_len(const char *p);

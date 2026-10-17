@@ -274,13 +274,25 @@ cJSON *jsonl_parse_line(const char *line) {
 
 int jsonl_feed(jsonl_pusher_t *p, const char *bytes, size_t n) {
     /* byte rule 1: drop every 0x0d byte (covers \r\n and raw CR) */
-    size_t old_len = p->hold.len;
     for (size_t i = 0; i < n; i++)
         if (bytes[i] != '\x0d') buf_append_byte(&p->hold, bytes[i]);
 
-    /* strict utf-8: validate new bytes and potential split char at boundary */
-    size_t check_start = (old_len > 3) ? old_len - 3 : 0;
-    if (!utf8_valid((const uint8_t *)p->hold.data + check_start, p->hold.len - check_start)) {
+    /* strict utf-8. a sequence cut off by the feed boundary is
+       incomplete, not malformed - its tail arrives with the next feed,
+       so only the prefix up to that sequence's lead byte must be exact
+       and the tail is checked in prefix mode. utf8_eof later
+       re-validates the whole buffer strictly. */
+    size_t tail = p->hold.len;
+    while (tail > 0 && p->hold.len - tail < 4 &&
+           ((uint8_t)p->hold.data[tail - 1] & 0xC0) == 0x80)
+        tail--;
+    /* the split lead byte itself belongs to the tail (prefix region) */
+    if (tail > 0 && p->hold.len - tail < 4 &&
+        ((uint8_t)p->hold.data[tail - 1] & 0xC0) == 0xC0)
+        tail--;
+    if (!utf8_valid((const uint8_t *)p->hold.data, tail) ||
+        !utf8_valid_prefix((const uint8_t *)p->hold.data + tail,
+                           p->hold.len - tail)) {
         buf_free(&p->hold);
         p->hold.len = 0;
         return -1;
