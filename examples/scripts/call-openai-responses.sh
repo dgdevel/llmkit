@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # The responses api flavor: --openai-responses talks to <api_base>/responses
 # instead of /chat/completions - the flag form of endpoint_protocol
-# openai_responses (docs/requirements.md, the llm record). --key is the
+# openai_responses (docs/records.md, the llm record). --key is the
 # token channel for openai-compatible endpoints: sent as
 # Authorization: Bearer, which openai takes and anthropic does not
 # (call-anthropic.sh shows the --header recipe there). The model name is

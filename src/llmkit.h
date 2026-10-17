@@ -1,4 +1,4 @@
-/* llmkit.h - shared declarations. See docs/design.md. */
+/* llmkit.h - shared declarations. Design doc: git show docs-archive:docs/design.md */
 #ifndef LLMKIT_H
 #define LLMKIT_H
 

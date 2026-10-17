@@ -29,7 +29,7 @@ This document gives context and instructions for agents that work on the `llmkit
     - `platform.c`, `sse.c`, `buf.c`, `jsonl.c`: platform tty and pipes, SSE parsing, buffers, JSON Lines.
     - `prompts/`: system and tool prompts. `tools/gen-prompts.sh` bundles them into the binary at build time.
     - `vendor/regex/`: vendored regex for Windows (MinGW) builds.
-- `docs/`: design, requirements, and release documentation.
+- `docs/`: record, builtin tool, ceiling, and release documentation. The design and requirements specs live at the `docs-archive` git tag.
 - `examples/`: sample usage and scripts.
 - `test/`: self-check tests.
 - `tools/`: build, release, and packaging utilities.

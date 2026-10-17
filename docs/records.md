@@ -411,4 +411,4 @@ Removes one upstream tool from what `llmkit mcp-proxy` exposes. Valid only in a 
 
 Mixing `expose` and `hide` in one config is fatal: expose records form a whitelist, hide records a blacklist, and no selection at all exposes everything. Each upstream tool may be named by at most one `expose`/`hide` record (fatal otherwise). Whitelist mode follows the `expose` record order. Default and blacklist mode follow the `tools` record server order, then each server's own listing order.
 
-The conversation rules around these records (the loop, steering, replay constraints, the per-protocol wire mapping) are specified in [requirements.md](requirements.md). Runnable files that use every record type live in [examples/](../examples/).
+The conversation rules around these records (the loop, steering, replay constraints, the per-protocol wire mapping) are specified in the archived requirements document (`git show docs-archive:docs/requirements.md`). Runnable files that use every record type live in [examples/](../examples/).
