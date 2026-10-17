@@ -1,1 +1,0 @@
-true to also list dot-prefixed (hidden) entries, default false. Hidden directories so listed carry "(files inside)" - recursion does not open them; name one as path to list its content.

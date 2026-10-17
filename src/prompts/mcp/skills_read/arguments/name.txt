@@ -1,1 +1,0 @@
-The skill name, as reported by skills_search

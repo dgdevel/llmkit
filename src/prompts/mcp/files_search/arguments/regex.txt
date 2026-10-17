@@ -1,1 +1,1 @@
-POSIX extended regular expression matched against each line
+POSIX extended regex

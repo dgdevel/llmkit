@@ -1,1 +1,0 @@
-http or https only

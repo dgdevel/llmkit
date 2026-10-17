@@ -1,1 +1,1 @@
-Signal a process. 'kill' force-terminates it (no cleanup handlers run). 'int' and 'term'. We are on windows platform.
+Signal a process. 'kill', 'int' and 'term'. We are on windows platform.

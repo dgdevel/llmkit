@@ -1,1 +1,1 @@
-POSIX extended regular expression
+POSIX extended regex
