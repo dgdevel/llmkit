@@ -94,7 +94,7 @@ rm -f llmkit llmkit.exe test/selfcheck test/selfcheck.exe  # no make clean: must
 # bcrypt, advapi32, iphlpapi (if_nametoindex). the vendored openbsd regex
 # (mingw ships no <regex.h>) is detected from CC and pulled in by the
 # Makefile itself: its own translation units, glue force-included
-make "VERSION=$VER" CC="$cc" "EXTRA_CFLAGS=-static -D__USE_MINGW_ANSI_STDIO=1 -DCURL_STATICLIB -I/tmp/curlwin/include -I/tmp/cj/include" "LDLIBS=/tmp/curlwin/lib/libcurl.a /tmp/cj/libcjson.a -lws2_32 -lcrypt32 -lsecur32 -lbcrypt -ladvapi32 -liphlpapi -lwinpthread -lshell32"
+make "VERSION=$VER" CC="$cc" "EXTRA_CFLAGS=-static -D__USE_MINGW_ANSI_STDIO=1 -DCURL_STATICLIB -I/tmp/curlwin/include -I/tmp/cj/include" "LDLIBS=/tmp/curlwin/lib/libcurl.a /tmp/cj/libcjson.a -lws2_32 -lcrypt32 -lsecur32 -lbcrypt -ladvapi32 -liphlpapi -lwinpthread -lshell32 -lurlmon -lole32"
 exe=llmkit.exe
 [ -f "$exe" ] || exe=llmkit
 # a PE binary does not run on the linux host - the stamp check survives

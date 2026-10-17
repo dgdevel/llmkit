@@ -9,6 +9,12 @@
 #include <sys/types.h>
 #include <time.h>
 
+/* mime_of (below) - windows content type sniffing */
+#ifdef _WIN32
+#include <objbase.h>
+#include <urlmon.h>
+#endif
+
 /* ================= file_analyze ================= */
 
 /* per-language outline analyzers: file_analyze picks one by extension
@@ -1238,6 +1244,73 @@ static const analyzer_t *analyzer_for_ext(const char *path) {
     return NULL;
 }
 
+/* single-quote a path for /bin/sh: '...' with each embedded ' closed,
+   escaped, reopened ('\'' - nothing inside single quotes is special
+   to the shell) */
+static void esc_sq(buf_t *out, const char *path) {
+    buf_append_byte(out, '\'');
+    for (const char *p = path; *p; p++) {
+        if (*p == '\'') buf_append_str(out, "'\\''");
+        else buf_append_byte(out, *p);
+    }
+    buf_append_byte(out, '\'');
+}
+
+/* malloc'd content type of path, NULL when the os cannot name one.
+   posix asks the file(1) utility; windows sniffs the head bytes with
+   FindMimeFromData (which needs no com init) */
+static char *mime_of(const char *path) {
+#ifdef _WIN32
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    unsigned char head[256];
+    size_t n = fread(head, 1, sizeof head, f);
+    fclose(f);
+    if (n == 0) return NULL;
+    LPWSTR wmime = NULL;
+    if (FAILED(FindMimeFromData(NULL, NULL, head, (DWORD)n, NULL,
+                                FMFD_DEFAULT, &wmime, 0)))
+        return NULL;
+    if (!wmime) return NULL;
+    int wl = WideCharToMultiByte(CP_UTF8, 0, wmime, -1, NULL, 0,
+                                 NULL, NULL);
+    if (wl <= 0) {
+        CoTaskMemFree(wmime);
+        return NULL;
+    }
+    char *mime = malloc((size_t)wl);
+    if (!mime) {
+        CoTaskMemFree(wmime);
+        return NULL;
+    }
+    WideCharToMultiByte(CP_UTF8, 0, wmime, -1, mime, wl, NULL, NULL);
+    CoTaskMemFree(wmime);
+    return mime;
+#else
+    buf_t cmd;
+    buf_init(&cmd);
+    buf_append_str(&cmd, "file -b --mime-type -- ");
+    esc_sq(&cmd, path);
+    FILE *p = popen(cmd.data, "r");
+    buf_free(&cmd);
+    if (!p) return NULL;
+    char line[128];
+    if (!fgets(line, sizeof line, p)) {
+        pclose(p);
+        return NULL;
+    }
+    int rc = pclose(p);
+    if (rc != 0) return NULL;
+    for (char *e = line + strlen(line);
+         e > line && (e[-1] == '\n' || e[-1] == '\r' ||
+                      e[-1] == ' ' || e[-1] == '\t');)
+        *--e = '\0';
+    if (!line[0]) return NULL;
+    char *mime = strdup(line);
+    return mime;
+#endif
+}
+
 void tool_file_analyze(const cJSON *args, buf_t *out,
                               bool *is_error) {
     char *path;
@@ -1273,17 +1346,35 @@ void tool_file_analyze(const cJSON *args, buf_t *out,
     }
     const analyzer_t *an = analyzer_for_ext(path);
     if (!an) {
+        char *mime = mime_of(path);
+        char hs[32];
+        bm_human_size((unsigned long long)st.st_size, hs, sizeof hs);
         buf_clear(out);
-        buf_appendf(out, "'%s': unknown file type; known:", path);
-        for (size_t i = 0; i < ANALYZERS_N; i++) {
-            buf_appendf(out, "%s %s (", i ? "," : "", ANALYZERS[i].name);
-            for (size_t k = 0; ANALYZERS[i].exts[k]; k++)
-                buf_appendf(out, "%s%s", k ? " " : "",
-                            ANALYZERS[i].exts[k]);
-            buf_append_str(out, ")");
+        buf_appendf(out, "'%s': unknown file type (known:", path);
+        for (size_t i = 0; i < ANALYZERS_N; i++)
+            buf_appendf(out, "%s %s", i ? "," : "", ANALYZERS[i].name);
+        buf_append_str(out, ")\n");
+        buf_appendf(out, "size %s", hs);
+        if (mime) buf_appendf(out, ", type %s", mime);
+        buf_t b;
+        buf_init(&b);
+        int rc = bm_read_whole(path, &b, BM_FILE_CAP);
+        bool textual = rc == 0 && !memchr(b.data ? b.data : "", 0, b.len) &&
+                       utf8_valid((const uint8_t *)(b.data ? b.data : ""),
+                                  b.len);
+        if (rc == 0 && textual) {
+            unsigned long long nlines = 0;
+            for (size_t i = 0; i < b.len; i++)
+                if (b.data[i] == '\n') nlines++;
+            if (b.len && b.data[b.len - 1] != '\n') nlines++;
+            buf_appendf(out, ", %llu lines", nlines);
+        } else if (rc == -2) {
+            buf_append_str(out, ", over 64Mb read cap");
         }
-        *is_error = true;
-        goto done;
+        buf_append_byte(out, '\n');
+        buf_free(&b);
+        free(mime);
+        goto done; /* *is_error stays false: the reply is a report */
     }
     buf_t b;
     buf_init(&b);

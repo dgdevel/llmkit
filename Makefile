@@ -38,6 +38,8 @@ ifneq (,$(findstring mingw,$(host)))
 SRC += src/vendor/regex/regcomp.c src/vendor/regex/regexec.c \
        src/vendor/regex/regerror.c src/vendor/regex/regfree.c
 CFLAGS += -Isrc/vendor/regex -include src/win_regex_glue.h
+# FindMimeFromData (builtin/analyze.c content-type sniff)
+LDLIBS += -lurlmon -lole32
 endif
 
 all: llmkit

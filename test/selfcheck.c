@@ -2362,11 +2362,13 @@ static void test_builtin(void) {
           "builtin: file_analyze empty structure");
     free(t);
 
+    /* notes.txt has been rewritten by the file_edit tests above: now
+       "alpha\nb:\n  x\n" - 13 bytes, still 3 lines */
     t = bc_call("file_analyze",
                 "{\"path\":\"/tmp/llmkit-test-builtin/notes.txt\"}", &ie);
-    check(ie && t && strstr(t, "unknown file type") &&
-              strstr(t, "markdown") && strstr(t, "python"),
-          "builtin: file_analyze refuses an unknown type");
+    check(!ie && t && strstr(t, "unknown file type") &&
+              strstr(t, "13b") && strstr(t, "3 lines"),
+          "builtin: file_analyze fallback report for unknown type");
     free(t);
 
     t = bc_call("file_analyze", "{\"path\":\"/tmp/llmkit-test-builtin\"}",

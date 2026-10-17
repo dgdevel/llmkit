@@ -147,7 +147,12 @@ src/builtin.c  [c]  4052 lines
   798  static bool next_line(const char *s, size_t len, size_t *i, const char **ls, size_t *ll)
 ```
 
-Comments and string literals are ignored, so nothing inside them can look like structure. A file with no elements answers `(nothing found)`. At most 1000 elements are returned, marked `... [truncated]` past that. Directories, non textual files, files over the 64Mb read cap, and unknown types are errors. An unknown type lists the known ones.
+Comments and string literals are ignored, so nothing inside them can look like structure. A file with no elements answers `(nothing found)`. At most 1000 elements are returned, marked `... [truncated]` past that. Directories, non regular files, non textual files of a known type and files over the 64Mb read cap are errors. An unknown type is not an error: the reply reports its human readable size, the content type when the OS can name one (the `file` utility on posix, FindMimeFromData on windows), the line count when the file is textual, and the list of analyzable types:
+
+```
+notes.txt: unknown file type (known: markdown, c, python, shell, batch, powershell, php)
+size 17b, type text/plain, 3 lines
+```
 
 ### process_exec(cmdline)
 
