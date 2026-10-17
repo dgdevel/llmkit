@@ -1,6 +1,7 @@
 # llmkit
 
-llmkit is one executable for llm interaction from the shell and from other programs. One binary, eleven commands:
+llmkit is one executable for llm and mcp interaction from the shell and from other programs.
+One binary, eleven commands:
 
 | command | what it does |
 |---|---|
@@ -18,20 +19,18 @@ llmkit is one executable for llm interaction from the shell and from other progr
 
 llmkit is written in C11. It talks to any openai-compatible endpoint (chat completions and responses apis) and any anthropic-compatible endpoint. Tools are mcp (Model Context Protocol) servers. The transports are `stdio`, `http` (streamable http), and `sse` (legacy). All current protocol revisions up to `2026-07-28` are supported.
 
-The `repl` command is the easiest to use. The `agent` command gives the builtin tools to the `repl`. The `call` command serves scripting. The `runner` command is the full interface for applications. The other commands serve interaction with mcps and debugging.
+The `repl` command is the easiest to use. The `agent` command gives the builtin tools to the `repl`. The `call` command serves scripting. The `runner` command is for external applications integration. The other commands serve interaction with mcps and debugging.
 
 ## Examples
 
 For talking to a model, use `llmkit repl`. You type the turns. Every line is one turn of one growing conversation.
-
-The exchange renders as it happens. Thinking is italic. Tool calls and their results are bold. Ascii rules frame each block. Terminals that support the typography show the styling. Plain terminals show the text only.
 
 Ctrl-C stops the running turn without leaving. The session continues where the transcript left off. At a filled input line, Ctrl-C clears the line. A second Ctrl-C at a clear prompt exits with code 8. Ctrl-D exits cleanly.
 
 If you pipe stdin, the session becomes scripted. The rendering stays the same. One line is one turn.
 
 ```sh
-$ llmkit repl --openai http://localhost:9931/v1 --model llama3.1
+$ llmkit repl --openai http://localhost:9931/v1
 [10:31:04] =====================================================================
 > hello, what is 2+2?
 [10:31:04] ---------------------------------------------------------------------
@@ -45,15 +44,11 @@ The user asks simple arithmetic.
 
 Every separator line is stamped with the wall clock. Each turn that finishes its answer prints its timing. The timing shows the time to first token (prompt processing), thinking generation, and response generation. It also shows the token totals of the turn (input, output, and their sum) when the endpoint reports usage.
 
-Two session controls ride along. `/help` lists the commands. `/models` fetches the model list from the session's endpoint and shows it as a table. You pick one and the session switches to it. Empty input keeps the current model. Ctrl-C cancels.
+Two session controls ride along. `/help` lists the commands. `/models` fetches the model list from the session's endpoint and shows it as a table. You pick one and the session switches to it.
 
-In the input line, a word that starts with `@` names a file or directory path. Tab completes the path from the filesystem. Directory entries get a trailing `/`, so the next Tab descends into them. Hidden entries show only when the path starts with a dot. The `@` goes to the display and the history, not to the model. The model sees the bare path. You type `explain @src/main.c`, the model reads `explain src/main.c`.
+In the input line, a word that starts with `@` names a file or directory path. Tab completes the path from the filesystem.
 
-For work that needs tools, use `llmkit agent`. It is the same chat with the [built-in mcp tools](docs/builtin-mcp.md) attached. These tools are web search and fetch, file tools, process tools, and skills. The `AGENTS.md` file of the working directory is injected after the system prompt.
-
-A `helper` tool rides along. It is a copy of the same agent: same system prompt, same tools minus itself. You call it as `helper(prompt)`. This gives delegation without the recursion. `--no-helper` leaves it out.
-
-`--conversation-store <file>` persists the conversation as jsonl (one json object per line) and resumes it. An existing store replays in full before the first prompt. Then the session continues where it left off.
+For work that needs tools, use `llmkit agent`. It is the same chat with the [built-in mcp tools](docs/builtin-mcp.md) attached. These tools are web search and fetch, file tools, process tools, helper subagent and skills. The `AGENTS.md` file of the working directory is injected after the system prompt.
 
 ```sh
 $ llmkit agent --openai http://localhost:9931/v1 --model llama3.1 \
@@ -61,14 +56,16 @@ $ llmkit agent --openai http://localhost:9931/v1 --model llama3.1 \
 [10:31:04] =====================================================================
 list the failing tests and fix them
 [10:31:05] ---------------------------------------------------------------------
-builtin.files_search {"path":".","regex":"FAIL"}
+files_search {"path":".","regex":"FAIL"}
 [10:31:06] ---------------------------------------------------------------------
 ...
 ```
 
-The `agent` command aims at frugality. It has no configuration file and no automatic conversation memory. It targets local llm users with very low token usage.
+`--conversation-store <file>` persists the conversation as jsonl (one json object per line) and resumes it. An existing store replays in full before the first prompt. Then the session continues where it left off.
 
-On the tool side, there is `llmkit mcp-repl`. It is a repl dedicated to one mcp server, the tool-debugging front-end. No model is in the loop. The command line names one server (`--stdio`, `--http`, `--sse`). The `tools/list` reply of the connection becomes the vocabulary. Every line is one direct call:
+The `agent` command aims at minimality. It has no configuration file and no conversation memory. It targets local llm users with very low token usage and can be easily integrated in scripted harnesses.
+
+On the tool side, there is `llmkit mcp-repl`. It is a repl dedicated to one mcp server, the tool-debugging front-end. The command line names one server (`--stdio`, `--http`, `--sse`). The `tools/list` reply of the connection becomes the vocabulary. Every line is one direct call:
 
 ```sh
 $ llmkit mcp-repl --stdio './calculator-mcp'
@@ -86,11 +83,11 @@ divide(float a, float b): divide a by b
 [10:31:09] 0.003s
 ```
 
-Arguments are json literals. They bind positionally onto the schema of the tool. `add(1, 1)` sends `{"a":1,"b":2}`. An integer literal is a json number, valid for a float parameter.
+Arguments are json literals.
 
-Tab completes tool names from the listing. `tools` re-lists. `help` explains. `quit` or Ctrl-D ends the session with exit code 0. Ctrl-C at a clear prompt exits with code 8. Tool errors, unknown tools, and syntax mistakes render as `!`-lines. The session lives on.
+Tab completes tool names from the listing. `tools` re-lists. `help` explains. `quit` or Ctrl-D ends the session with exit code 0.
 
-For one-shot use from the shell, there is `llmkit call`. Flags go in. The answer comes out as plain text on stdout. Thinking is omitted. There are no records to write.
+For one-shot use from scripts, there is `llmkit call`. Flags go in. The answer comes out as plain text on stdout. Thinking is omitted. There are no records to write.
 
 ```sh
 $ llmkit call --openai http://localhost:9931/v1 --model llama3.1 \
@@ -101,6 +98,7 @@ I'm fine, thank you!
 
 `--prompt -` reads the prompt from stdin. This makes pipes and captures possible:
 `ANSWER=$(llmkit call --openai "$API_BASE" --prompt - < input.txt)`.
+
 Anything past one prompt needs `runner`.
 
 ```sh
