@@ -1,1 +1,1 @@
-List a filesystem tree: the entries of a directory. Only entries whose path matches the regex anywhere are kept. Directories carry a trailing slash.
+List a filesystem tree: the entries of a directory. Only entries whose path matches the regex anywhere are kept. Directories carry a trailing slash. Hidden directories are listed (with a "(files inside)" note) but never descended into by recursion - name one as path to walk inside it.

@@ -726,6 +726,10 @@ int proxy_handle(void *ctx, const char *method, cJSON *params, cJSON *id,
    or no match. */
 bool builtin_regex_match(const char *pattern, const char *text,
                          char *err, size_t errsz);
+/* the agent's head-start listing: files_list(".", ".*", false, true) -
+   the working directory's entries, hidden included; malloc'd text,
+   NULL when the directory cannot be read */
+char *builtin_headstart_listing(void);
 /* readability-style reduction of an html page plus conversion to markdown;
    returns a malloc'd string ("" on parse failure, never NULL) */
 char *builtin_html_to_markdown(const char *html, size_t n);
@@ -890,6 +894,9 @@ typedef struct repl_opts {
     bool builtin_mcp;           /* attach the built-in mcp server */
     bool agents_md;             /* inject ./AGENTS.md as a second system
                                    content block, after the prompt */
+    bool headstart;             /* agent: the working directory's listing
+                                   (files_list(".", ".*", false, true)) as
+                                   an extra system block, before AGENTS.md */
     const char *store;          /* conversation store path; NULL = none */
     bool llm_retry;             /* retry failed llm calls, fibonacci delays */
     bool full_tools;            /* tool replies render whole; default off =

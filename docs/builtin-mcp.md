@@ -71,7 +71,7 @@ The tool validates the url (http or https, nonempty host) and streams the respon
 
 ### files_list(path, regex, recurse_subdirectories=false, show_hidden_files=false)
 
-Lists the tree under `path` (alphabetical, pre-order: directories are listed before their contents), keeping only entries whose path matches the regex anywhere. A `path` that is a directory lists its own entries only. If `recurse_subdirectories` is true, the tool descends into the subdirectories too. Dot-prefixed (hidden) files and directories are left out unless `show_hidden_files` is true. A hidden directory is neither listed nor descended into. Paths are answered relative when the given path is relative, absolute when it is absolute:
+Lists the tree under `path` (alphabetical, pre-order: directories are listed before their contents), keeping only entries whose path matches the regex anywhere. A `path` that is a directory lists its own entries only. If `recurse_subdirectories` is true, the tool descends into the subdirectories too. Dot-prefixed (hidden) files and directories are left out unless `show_hidden_files` is true. A hidden directory is listed (with a ` (files inside)` note) but never descended into by recursion - naming one as `path` is the only way inside. Paths are answered relative when the given path is relative, absolute when it is absolute:
 
 ```
 ${permissions} ${size} ${path}${, lines}
@@ -94,7 +94,7 @@ A file counts as textual when it holds no NUL bytes and is strict utf-8. Everyth
 
 ### files_search(path, regex, show_hidden_files=false)
 
-Same walk as `files_list` with `recurse_subdirectories` set, but the regex matches line *content*. Every textual file under `path` (16Mb cap per file) whose lines match is listed with the matching line numbers, comma separated. Dot-prefixed (hidden) files and directories are skipped unless `show_hidden_files` is true:
+Same walk as `files_list` with `recurse_subdirectories` set, but the regex matches line *content*. Every textual file under `path` (16Mb cap per file) whose lines match is listed with the matching line numbers, comma separated. Dot-prefixed (hidden) files are read when `show_hidden_files` is true; hidden directories are never descended into - naming one as `path` searches inside it:
 
 ```
 ${permissions} ${size} ${path}${, lines}

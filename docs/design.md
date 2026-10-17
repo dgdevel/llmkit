@@ -1009,6 +1009,15 @@ defaults (the selfcheck drives both).
   file second. Applied through the ordinary
   `engine_apply_config_record` replace - no engine or wire change; the
   multi-block system record was already the catalogue's shape.
+- **the head start** - the agent session opens with the working
+  directory's listing already in the system prompt: the exact tool call
+  the model would start with, `files_list(".", ".*", false, true)`,
+  answered before the first prompt. `builtin_headstart_listing`
+  (builtin/files.c) runs the same walk the tool serves; the text rides
+  as one more system block, ahead of AGENTS.md. Hidden directories
+  show with the `(files inside)` note - the agent knows they exist and
+  names them as `path` to look inside. An unreadable working directory
+  injects nothing; the model lists on its own.
 - **the store** - the write side is ten lines in the display sink
   (`store_persist`): every transcript record the engine emits, one
   `cJSON_PrintUnformatted` line per record, flushed per line, partials

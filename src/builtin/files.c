@@ -31,6 +31,13 @@ static void entry_line(buf_t *out, const char *path, const struct stat *st,
     buf_appendf(out, "%s %s %s%s", perm, hs, path,
                 S_ISDIR(st->st_mode) ? "/" : "");
     if (has_lines) buf_appendf(out, ", %llu lines", lines);
+    else if (S_ISDIR(st->st_mode)) {
+        /* a hidden directory the walk will not descend into unless the
+           caller names it: its line says so */
+        const char *base = strrchr(path, '/');
+        if (base && base[1] == '.')
+            buf_append_str(out, " (files inside)");
+    }
     buf_append_byte(out, '\n');
 }
 
@@ -122,7 +129,9 @@ static void walk_dir(walk_ctx_t *w, const char *dirpath, int depth) {
         struct stat st;
         if (!BM_LSTAT(child, &st)) {
             emit_entry(w, child, &st);
-            if (w->recurse && S_ISDIR(st.st_mode))
+            /* recursion never opens a hidden directory: an explicit
+               root naming one is the only way inside */
+            if (w->recurse && S_ISDIR(st.st_mode) && names[i][0] != '.')
                 walk_dir(w, child, depth + 1);
         }
         free(names[i]);
@@ -141,6 +150,30 @@ static bool walk_start(walk_ctx_t *w, const char *root, char *err,
     if (S_ISDIR(st.st_mode)) walk_dir(w, root, 0);
     else emit_entry(w, root, &st);
     return true;
+}
+
+/* the agent's head start: the first listing the model would otherwise
+   call for - files_list(".", ".*", false, true), the working
+   directory's entries, hidden ones included (their marker says which
+   hold more). malloc'd text, NULL when the directory cannot be read */
+char *builtin_headstart_listing(void) {
+    buf_t out;
+    buf_init(&out);
+    regex_t rx;
+    char rxerr[128] = ""; /* ".*" cannot fail, the slot is a safety net */
+    if (!bm_rx_compile(&rx, ".*", rxerr, sizeof rxerr)) {
+        buf_free(&out);
+        return NULL;
+    }
+    walk_ctx_t w = { &out, rx, false, false, true };
+    char err[256] = "";
+    bool ok = walk_start(&w, ".", err, sizeof err);
+    regfree(&rx);
+    if (!ok || !out.len) {
+        buf_free(&out);
+        return ok ? strdup("(empty directory)") : NULL;
+    }
+    return out.data; /* the buf's heap block, NUL-terminated */
 }
 
 /* mkdir -p for the parent directory of a path */

@@ -1569,6 +1569,19 @@ join blocks with `\n`). A leading BOM is an editor artifact, not
 content; an `AGENTS.md` that is not valid UTF-8 is the `invalid_record`
 tier, exit 2. No `AGENTS.md`, no injection.
 
+### the head start
+
+Before the first prompt the session runs the listing the agent would
+open with - the tool call `files_list(".", ".*", false, true)`, the
+working directory's entries, hidden ones included - and injects it as
+an extra `system` content block after the prompt's own block, ahead of
+the AGENTS.md block. The listing is the live tool output, so the
+`(files inside)` note marks the hidden directories recursion never
+opens: the agent names one as `path` to see inside. An empty working
+directory injects `(empty directory)`; an unreadable one injects
+nothing (the model lists on its own). Not offered: a flag to disable
+it, or a different path than the working directory.
+
 ### the conversation store
 
 Without `--conversation-store` the session is repl's: the transcript

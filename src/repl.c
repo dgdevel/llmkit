@@ -347,6 +347,45 @@ static int store_load(engine_t *e, FILE *out, const char *path) {
 
 /* ---- the second system entry: ./AGENTS.md ---- */
 
+/* one more text block appended to the session's system record: the
+   record's current blocks are kept (empty prompt text and no record
+   yet leave the block standing alone), the new one rides last.
+   validate_content vets the assembled record */
+static int system_append_block(engine_t *e, const char *prompt_text,
+                               const char *block) {
+    cJSON *sys = cJSON_CreateObject();
+    cJSON_AddStringToObject(sys, "type", "system");
+    cJSON *content = cJSON_AddArrayToObject(sys, "content");
+    const cJSON *cur =
+        e->system
+            ? cJSON_GetObjectItemCaseSensitive(e->system, "content") : NULL;
+    if (cJSON_IsArray(cur))
+        for (const cJSON *b = cur->child; b; b = b->next)
+            cJSON_AddItemToArray(content, cJSON_Duplicate((cJSON *)b, 1));
+    if (prompt_text && *prompt_text &&
+        !(cJSON_IsArray(cur) && cur->child)) { /* nothing carried yet */
+        cJSON *blk = cJSON_CreateObject();
+        cJSON_AddStringToObject(blk, "type", "text");
+        cJSON_AddStringToObject(blk, "text", prompt_text);
+        cJSON_AddItemToArray(content, blk);
+    }
+    cJSON *blk = cJSON_CreateObject();
+    cJSON_AddStringToObject(blk, "type", "text");
+    cJSON_AddStringToObject(blk, "text", block);
+    cJSON_AddItemToArray(content, blk);
+    int rc = 0;
+    char *m = validate_content(content);
+    if (m) {
+        engine_emit_record(e, rec_error(EC_INVALID_RECORD, m, true));
+        free(m);
+        rc = EXIT_INVALID_RECORD;
+    } else {
+        engine_apply_config_record(e, sys);
+    }
+    cJSON_Delete(sys);
+    return rc;
+}
+
 /* the prompt's own content block stays first; the file's content rides
    in its own block after it, prefixed with the content line */
 static int inject_agents_md(engine_t *e, const char *prompt_text) {
@@ -381,27 +420,8 @@ static int inject_agents_md(engine_t *e, const char *prompt_text) {
             buf_init(&tx);
             buf_append_str(&tx, AGENTS_MD_PREFIX);
             buf_append(&tx, b.data ? b.data : "", b.len);
-            cJSON *sys = cJSON_CreateObject();
-            cJSON_AddStringToObject(sys, "type", "system");
-            cJSON *content = cJSON_AddArrayToObject(sys, "content");
-            cJSON *blk = cJSON_CreateObject();
-            cJSON_AddStringToObject(blk, "type", "text");
-            cJSON_AddStringToObject(blk, "text",
-                                    prompt_text ? prompt_text : "");
-            cJSON_AddItemToArray(content, blk);
-            blk = cJSON_CreateObject();
-            cJSON_AddStringToObject(blk, "type", "text");
-            cJSON_AddStringToObject(blk, "text", tx.data ? tx.data : "");
-            cJSON_AddItemToArray(content, blk);
-            char *m = validate_content(content);
-            if (m) {
-                engine_emit_record(e, rec_error(EC_INVALID_RECORD, m, true));
-                free(m);
-                rc = EXIT_INVALID_RECORD;
-            } else {
-                engine_apply_config_record(e, sys);
-            }
-            cJSON_Delete(sys);
+            rc = system_append_block(e, prompt_text,
+                                     tx.data ? tx.data : "");
             buf_free(&tx);
         }
     }
@@ -1022,6 +1042,20 @@ int repl_run_ex(const call_cfg_t *c, const repl_opts_t *o, int in_fd,
         engine_apply_config_record(e, opts);
         cJSON_Delete(opts);
     }
+    if (o->headstart) {
+        /* the agent's head start: the working directory's listing as
+           the session's first extra system block, ahead of AGENTS.md -
+           the tool call the model would open with, answered before the
+           first prompt. an unreadable directory leaves the prompt as
+           is, the model lists on its own */
+        char *ls = builtin_headstart_listing();
+        if (ls) {
+            rc = system_append_block(e, cfg.system, ls);
+            free(ls);
+            if (rc) goto done;
+            cfg.system = NULL; /* already carried: AGENTS.md appends */
+        }
+    }
     if (o->agents_md) {
         rc = inject_agents_md(e, cfg.system);
         if (rc) goto done;
@@ -1372,6 +1406,7 @@ int cmd_agent_repl(int argc, char **argv) {
                                           prompt_system_prompts_agent,
                                       .builtin_mcp = true,
                                       .agents_md = true,
+                                      .headstart = true,
                                       .store = store,
                                       .llm_retry = true,
                                       .full_tools = v == 1,

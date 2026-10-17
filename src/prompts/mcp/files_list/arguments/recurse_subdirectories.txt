@@ -1,1 +1,1 @@
-true to descend into subdirectories, default false
+true to descend into subdirectories, default false. Hidden (dot-prefixed) directories are never descended into: pass one as path to list its content.

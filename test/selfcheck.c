@@ -2087,9 +2087,33 @@ static void test_builtin(void) {
                 "{\"path\":\"/tmp/llmkit-test-builtin\","
                 "\"regex\":\"hidden\",\"show_hidden_files\":true,"
                 "\"recurse_subdirectories\":true}", &ie);
-    check(!ie && t && strstr(t, ".hidden.txt") && strstr(t, "/.hiddendir/\n") &&
-              strstr(t, ".hiddendir/deep.txt"),
-          "builtin: files_list lists dot entries when asked");
+    check(!ie && t && strstr(t, ".hidden.txt") &&
+              strstr(t, "/.hiddendir/ (files inside)\n") &&
+              !strstr(t, ".hiddendir/deep.txt"),
+          "builtin: files_list lists dot entries when asked; a hidden "
+          "directory is listed but not descended into");
+    free(t);
+    /* naming the hidden directory as the root walks inside it */
+    t = bc_call("files_list",
+                "{\"path\":\"/tmp/llmkit-test-builtin/.hiddendir\","
+                "\"regex\":\"deep\",\"recurse_subdirectories\":true}", &ie);
+    check(!ie && t && strstr(t, "deep.txt"),
+          "builtin: files_list descends an explicit dot root");
+    free(t);
+    /* recursion into a hidden directory still holds one level down: a
+       dot dir under the dot root carries the marker, not its content */
+    t = bc_call("file_create",
+                "{\"path\":\"/tmp/llmkit-test-builtin/.hiddendir/"
+                ".deeper/leaf.txt\",\"content\":\"secret\\n\"}", &ie);
+    check(!ie && t, "builtin: file_create nests a second dot dir");
+    free(t);
+    t = bc_call("files_list",
+                "{\"path\":\"/tmp/llmkit-test-builtin/.hiddendir\","
+                "\"regex\":\".\",\"show_hidden_files\":true,"
+                "\"recurse_subdirectories\":true}", &ie);
+    check(!ie && t && strstr(t, ".deeper/ (files inside)\n") &&
+              !strstr(t, "deeper/leaf.txt"),
+          "builtin: recursion never opens a hidden directory");
     free(t);
     /* the root the caller names is never filtered, only what it holds */
     t = bc_call("files_list", "{\"path\":\"/tmp/llmkit-test-builtin/.hiddendir\","
@@ -2106,8 +2130,8 @@ static void test_builtin(void) {
                 "{\"path\":\"/tmp/llmkit-test-builtin\","
                 "\"regex\":\"^secret$\",\"show_hidden_files\":true}", &ie);
     check(!ie && t && strstr(t, ".hidden.txt") &&
-              strstr(t, ".hiddendir/deep.txt"),
-          "builtin: files_search reads dot files when asked");
+              !strstr(t, ".hiddendir/deep.txt"),
+          "builtin: files_search reads dot files, never dot directories");
     free(t);
 
     t = bc_call("files_list", "{\"path\":\"/tmp/llmkit-test-builtin\","
@@ -4500,7 +4524,38 @@ static void test_agent(void) {
         repl_session_free(&r);
         call_cfg_free(&c);
 
-        /* an explicit --system-prompt stays the first block */
+        /* the head start: the working directory's listing as the first
+           extra block, ahead of AGENTS.md; hidden dirs carry the note */
+        write_file("/tmp/llmkit-test-agent/empty/plain.txt", "x\n");
+        check(system("mkdir -p /tmp/llmkit-test-agent/empty/.dotdir") == 0,
+              "agent: headstart dot dir made");
+        write_file("/tmp/llmkit-test-agent/empty/.dotdir/inner.txt", "y\n");
+        repl_opts_t hs = o;
+        hs.headstart = true;
+        g_factory_wire = fwire_new(turns, 1);
+        repl_cfg(&c, PROTO_OPENAI);
+        r = repl_session_opt(&c, &hs, "hi\n", 3);
+        check(r.rc == EXIT_OK, "agent: headstart session exits 0");
+        {
+            /* the headstart is the block after the prompt's own (which
+               is multi-line), found as the run of lines that holds the
+               listing and ends before the AGENTS.md prefix */
+            const char *ls = strstr(g_seen_system, "plain.txt");
+            const char *dot = strstr(g_seen_system, ".dotdir/");
+            const char *ag =
+                strstr(g_seen_system, "##### Content of AGENTS.md #####");
+            check(ls && dot && ag && ls < ag && dot < ag &&
+                      !strstr(g_seen_system, "inner.txt") &&
+                      strstr(g_seen_system, ".dotdir/ (files inside)\n"),
+                  "agent: headstart lists the working directory, dot dirs "
+                  "marked, not descended; AGENTS.md still follows");
+        }
+        repl_session_free(&r);
+        call_cfg_free(&c);
+        check(unlink("/tmp/llmkit-test-agent/empty/.dotdir/inner.txt") == 0 &&
+                  rmdir("/tmp/llmkit-test-agent/empty/.dotdir") == 0 &&
+                  unlink("/tmp/llmkit-test-agent/empty/plain.txt") == 0,
+              "agent: headstart fixtures cleaned");
         g_factory_wire = fwire_new(turns, 1);
         repl_cfg(&c, PROTO_OPENAI);
         c.system = strdup("custom");
