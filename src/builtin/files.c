@@ -901,7 +901,7 @@ static void tool_file_copy_move(const cJSON *args, buf_t *out,
             return;
         }
     }
-    if (move && rename(src, target) == 0) {
+    if (move && BM_RENAME(src, target) == 0) {
         buf_clear(out);
         buf_appendf(out, "moved %s to %s", src, target);
         return;
@@ -1290,7 +1290,8 @@ void tool_file_edit(const cJSON *args, buf_t *out, bool *is_error) {
             f = NULL;
         }
     }
-    if (!f || rename(tmp, path) != 0) {
+    if (!f || BM_RENAME(tmp, path) != 0) {
+        int e = errno; /* captured before the remove below clobbers it */
         if (f) remove(tmp);
         free(fl);
         free(ol);
@@ -1299,7 +1300,7 @@ void tool_file_edit(const cJSON *args, buf_t *out, bool *is_error) {
         buf_free(&nb);
         buf_free(&basews);
         buf_clear(out);
-        buf_appendf(out, "cannot write '%s'", path);
+        buf_appendf(out, "cannot write '%s': %s", path, strerror(e));
         *is_error = true;
         return;
     }

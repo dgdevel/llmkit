@@ -230,6 +230,10 @@ static char *rx_ere(const char *pat) {
                 else if (e == 'r') buf_append_byte(&b, '\r');
                 else if (e == 'f') buf_append_byte(&b, '\f');
                 else if (e == 'v') buf_append_byte(&b, '\v');
+                else if (e == 'b') /* word boundary: glibc spells it
+                   \b, the vendored openbsd ere only \< \>; (\<|\>)
+                   compiles on both */
+                    buf_append_str(&b, "(\\<|\\>)");
                 else buf_appendf(&b, "\\%c", e); /* escaped metachar */
                 p++;
                 continue;

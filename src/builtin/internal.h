@@ -70,11 +70,31 @@
 #define BM_FDOPEN(fd) _fdopen((fd), "wb")
 #define BM_CLOSE(fd) _close(fd)
 #define BM_CHMOD(p, m) _chmod((p), (m))
+/* the crt rename() follows ms semantics: it refuses an existing
+   destination (EEXIST) where posix replaces it atomically. this goes
+   through MoveFileExW, which also handles the non-ascii paths the
+   ansi crt calls mangle (same utf-8 -> utf-16 as src/platform.c). */
+#include <errno.h>
+static inline int bm_rename_replace(const char *old, const char *nw) {
+    wchar_t wold[BM_PATH_MAX], wnew[BM_PATH_MAX];
+    if (MultiByteToWideChar(CP_UTF8, 0, old, -1, wold, BM_PATH_MAX) == 0 ||
+        MultiByteToWideChar(CP_UTF8, 0, nw, -1, wnew, BM_PATH_MAX) == 0) {
+        errno = EACCES;
+        return -1;
+    }
+    if (!MoveFileExW(wold, wnew, MOVEFILE_REPLACE_EXISTING)) {
+        errno = EACCES; /* good enough for the error paths */
+        return -1;
+    }
+    return 0;
+}
+#define BM_RENAME bm_rename_replace
 #else
 #define BM_OPEN_NEW(p) open((p), O_CREAT | O_EXCL | O_WRONLY, 0666)
 #define BM_FDOPEN(fd) fdopen((fd), "wb")
 #define BM_CLOSE(fd) close(fd)
 #define BM_CHMOD(p, m) chmod((p), (m))
+#define BM_RENAME rename
 #endif
 
 /* ---- tool plumbing (implemented in src/builtin.c) ---- */

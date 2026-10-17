@@ -1674,6 +1674,16 @@ static void test_builtin(void) {
           "builtin: unbalanced parenthesis rejected");
     check(builtin_regex_match("plain", "a plain match", NULL, 0),
           "builtin: literal substring");
+    check(builtin_regex_match("\\bfoo\\b", "a foo bar", NULL, 0) &&
+              builtin_regex_match("\\bbar\\b", "a foo bar", NULL, 0) &&
+              !builtin_regex_match("\\bbaz\\b", "a foo bar", NULL, 0),
+          "builtin: \\b word boundary");
+    check(!builtin_regex_match("\\bfoo\\b", "a foobar baz", NULL, 0) &&
+              builtin_regex_match("\\bar\\b", "foo ar baz", NULL, 0),
+          "builtin: \\b respects word chars");
+    check(builtin_regex_match("\\bfile_edit\\b", "file_edit(x)", NULL, 0) &&
+              builtin_regex_match("\\bfoo\\b", "  (foo)", NULL, 0),
+          "builtin: \\b at string edges");
 
     /* tools/list: every tool present, descriptions bundled (src/prompts) */
     {
