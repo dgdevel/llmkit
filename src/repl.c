@@ -16,6 +16,7 @@
 #include "llmkit.h"
 #include "prompts.gen.h"
 
+#include <errno.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -629,10 +630,99 @@ static void slash_help(dspy_t *d) {
         "commands:",
         "  /help          this list",
         "  /models        pick the model of the session",
+        "  /cd <dir>      change the working directory",
     };
     dspy_ensure_nl(d);
     for (size_t i = 0; i < sizeof lines / sizeof lines[0]; i++)
         dspy_write_str(d, lines[i]), dspy_write_str(d, "\n");
+}
+
+/* errno text when the platform's codes are errno (posix); windows
+   GetLastError codes fall to the lead text */
+static const char *cd_err_of(int code, const char *lead) {
+    if (code >= 0 && code < 200 && strerror(code) && *strerror(code))
+        return strerror(code);
+    return lead;
+}
+
+/* `/cd <dir>`: move the session's working directory. the tool children
+   (builtin mcp, helper, stdio proxies) inherit the cwd of their spawn:
+   they drop and reconcile respawns them in the new directory. the model
+   hears one system block - "current working directory changed to <dir>"
+   - the dir relative to the old one when they share a directory beyond
+   the root ("../prj2"), the absolute path otherwise ("/dir2"). 0 the
+   directory changed (line drawn, message queued), 1 not */
+static int slash_cd(slash_state_t *sl, const char *arg, engine_t *e) {
+    dspy_t *d = sl->d;
+    char msg[512];
+    int mn;
+    if (!*arg) {
+        dspy_ensure_nl(d);
+        mn = snprintf(msg, sizeof msg, "usage: /cd <directory>");
+        dspy_write(d, msg, (size_t)mn >= sizeof msg ? sizeof msg - 1
+                                                    : (size_t)mn);
+        dspy_write_str(d, "\n");
+        return 1;
+    }
+    char cwd[4096] = "";
+    char *cwdh = NULL;
+    int rc = path_getcwd(&cwdh);
+    if (rc) {
+        dspy_error_line(d, NULL, cd_err_of(rc, "cannot get the cwd"));
+        return 1;
+    }
+    snprintf(cwd, sizeof cwd, "%s", cwdh);
+    free(cwdh);
+    /* the direct syscall takes the raw path: windows '\' folds to the
+       canonical '/' first, no shell ever sees it */
+    char dir[4096];
+    snprintf(dir, sizeof dir, "%s", arg);
+    path_slashes(dir);
+    int cdrc = path_chdir(dir);
+    if (cdrc) {
+        char why[280];
+        snprintf(why, sizeof why, "cannot chdir to '%s': %s", arg,
+                 cd_err_of(cdrc, "failed"));
+        dspy_error_line(d, NULL, why);
+        return 1;
+    }
+    char *now = NULL;
+    rc = path_getcwd(&now);
+    if (rc) {
+        dspy_error_line(d, NULL, cd_err_of(rc, "cannot get the cwd"));
+        return 1;
+    }
+    if (!strcmp(cwd, now)) {
+        free(now);
+        return 1; /* same place: nothing to tell the model */
+    }
+    char *rel = path_relative(cwd, now);
+    if (!rel) {
+        free(now);
+        dspy_error_line(d, NULL, "out of memory");
+        return 1;
+    }
+    /* the tool children that carry a cwd: gone, reconcile respawns */
+    mcp_drop_stdio((mcp_mgr_t *)e->mcp);
+    /* the system block the model reads before its next turn */
+    buf_t blk;
+    buf_init(&blk);
+    buf_appendf(&blk,
+                "current working directory changed to %s\n"
+                "the current working directory is now the root of the "
+                "conversation: file tools and commands below it resolve "
+                "without a path, the ones outside need an absolute path",
+                rel);
+    rc = system_append_block(e, NULL, blk.data ? blk.data : "");
+    buf_free(&blk);
+    free(rel);
+    dspy_ensure_nl(d);
+    mn = snprintf(msg, sizeof msg, "cd: %s", now);
+    dspy_write(d, msg, (size_t)mn >= sizeof msg ? sizeof msg - 1
+                                                : (size_t)mn);
+    dspy_write_str(d, "\n");
+    free(now);
+    return rc ? 1 : 0;
 }
 
 /* tab completion over the model ids (mcprepl's shape, whole lines) */
@@ -913,6 +1003,14 @@ static int slash_dispatch(slash_state_t *sl, const char *s, engine_t *e) {
         int r = slash_models(sl, e);
         if (sl->ed) sl->ed->prompt = sl->main_prompt;
         (void)r; /* both cancel and failure leave the session intact */
+        return 0;
+    }
+    if (!strncmp(s, "/cd", 3) && (!s[3] || s[3] == ' ')) {
+        /* the directory: everything after the command, leading spaces
+           skipped - the typed line is the path, quotes never stripped */
+        const char *arg = s + 3;
+        while (*arg == ' ') arg++;
+        slash_cd(sl, arg, e);
         return 0;
     }
     {

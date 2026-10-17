@@ -116,6 +116,102 @@ const char *path_basename(const char *p) {
     return base;
 }
 
+/* ---- current working directory (the session's /cd) ---- */
+
+/* absolute cwd, malloc'd, separators '/', never NULL on 0. failure code
+   returns errno (win: GetLastError mapped to errno-ish values) */
+int path_getcwd(char **out) {
+    size_t sz = 512;
+    for (;;) {
+        char *b = malloc(sz);
+        if (!b) return ENOMEM;
+#ifdef _WIN32
+        DWORD n = GetCurrentDirectoryA((DWORD)sz, b);
+        if (!n) {
+            free(b);
+            return (int)GetLastError();
+        }
+        if (n < (DWORD)sz) {
+            path_slashes(b);
+            *out = b;
+            return 0;
+        }
+        sz = n + 1;
+#else
+        if (getcwd(b, sz)) {
+            *out = b;
+            return 0;
+        }
+        free(b);
+        if (errno != ERANGE) return errno;
+        sz *= 2;
+#endif
+    }
+}
+
+int path_chdir(const char *dir) {
+#ifdef _WIN32
+    if (!SetCurrentDirectoryA(dir)) return (int)GetLastError();
+    return 0;
+#else
+    return chdir(dir) == 0 ? 0 : errno;
+#endif
+}
+
+/* one leading component (before '/', win drive letters stay whole) */
+static size_t comp_len(const char *p, size_t i) {
+    size_t s = i;
+    while (p[i] && p[i] != '/') i++;
+    return i - s;
+}
+
+/* is position i a component boundary of p (a split between path
+   components; 0 always is) */
+static bool comp_boundary(const char *p, size_t i) {
+    if (!i) return true;
+    return !p[i] || p[i] == '/' || p[i - 1] == '/';
+}
+
+/* the shortest walk from `from` to `to`, both absolute, '/' separators.
+   malloc'd "../x" form; "." when equal; NULL when the roots differ or
+   only the root is shared (posix: "/a" -> "/b"; win: different drives) */
+static char *path_rel_from(const char *from, const char *to) {
+    size_t i = 0;
+    while (from[i] && to[i] && from[i] == to[i]) i++;
+    while (i && !(comp_boundary(from, i) && comp_boundary(to, i))) i--;
+    size_t root = 1; /* posix "/" */
+#ifdef _WIN32
+    root = 3; /* "c:/"; unc roots fall to 1: they go absolute, rare */
+#endif
+    if (i <= root) return NULL;
+    size_t ups = 0;
+    for (size_t j = i; from[j];) {
+        size_t cl = comp_len(from, j);
+        if (cl) ups++;
+        j += cl;
+        if (from[j] == '/') j++; /* the separator after the component */
+        else break;              /* or the end of the path */
+    }
+    const char *tail = to + i;
+    if (*tail == '/') tail++; /* the cut landed on the slash: clean tail */
+    buf_t b;
+    buf_init(&b);
+    for (size_t k = 0; k < ups; k++) buf_append_str(&b, "../");
+    buf_append_str(&b, tail);
+    if (!b.len) buf_append_str(&b, ".");
+    else if (b.len > 1 && b.data[b.len - 1] == '/')
+        b.data[--b.len] = '\0'; /* "../" alone: ".." */
+    return b.data; /* the buf's heap block, NUL-terminated */
+}
+
+/* the path the model sees after a /cd: `to` relative to `from` when
+   they share a directory beyond the root, `to` itself when they do
+   not (malloc'd) */
+char *path_relative(const char *from, const char *to) {
+    char *r = path_rel_from(from, to);
+    return r ? r : (strdup(to) ? strdup(to) : NULL);
+}
+
 /* ---- queue: mutex + condvar, unbounded ---- */
 
 typedef struct qnode {

@@ -146,7 +146,7 @@ static void capture_system(const engine_t *e) {
 
 static int fwire_turn(wire_t *base, engine_t *e, turn_out_t *out) {
     fwire_t *f = (fwire_t *)base;
-    if (f->pos == 0) capture_system(e);
+    capture_system(e); /* per-turn: the /cd system block lands between */
     memset(out, 0, sizeof *out);
     fturn_t *t = &f->turns[f->pos < f->nturns ? f->pos++ : f->nturns - 1];
     if (t->kind == TURN_FATAL) {
@@ -2784,6 +2784,32 @@ static void test_path_norm(void) {
     check_str(path_basename("C:\\"), "", "path: basename of drive root");
     check_str(path_basename("dir.v2/file"), "file", "path: basename dot dir");
 
+    /* path_relative: the /cd path the model sees */
+    {
+        static const struct {
+            const char *from, *to, *want;
+        } v[] = {
+            {"/dir1", "/dir2", "/dir2"},
+            {"/home/user/prj1", "/home/user/prj2", "../prj2"},
+            {"/home/user/prj1", "/home/user/prj1", "."},
+            {"/home/user/prj1", "/home/user/prj1/sub", "sub"},
+            {"/home/user/prj1/sub", "/home/user/prj1", ".."},
+            {"/a/b/c", "/a/x/y/z", "../../x/y/z"},
+            {"/same", "/same/deeper/nest", "deeper/nest"},
+            {"/", "/home", "/home"},
+            {"/home", "/", NULL}, /* only the root shared: absolute */
+        };
+        for (size_t i = 0; i < sizeof v / sizeof v[0]; i++) {
+            char *r = path_relative(v[i].from, v[i].to);
+            if (v[i].want)
+                check_str(r ? r : "(null)", v[i].want,
+                          "path: relative hop");
+            else
+                check(r && r[0] == '/', "path: root-only share absolute");
+            free(r);
+        }
+    }
+
     /* tools accept '\' input: read, list, copy-into-dir all normalized */
     bool ie = false;
     char *t;
@@ -3910,6 +3936,65 @@ static void test_repl(void) {
         check(r.rc == EXIT_OK, "repl: empty-prompt session exits 0");
         check_str(g_seen_system, "",
                   "repl: an explicit empty text beats the bundled default");
+        repl_session_free(&r);
+        call_cfg_free(&c);
+    }
+
+    /* ---- /cd: the working directory moves, the model hears ---- */
+    {
+        fturn_t turns[] = {
+            { .recs = (const char *[]){
+                  "{\"type\":\"response\",\"text\":\"ok\",\"partial\":false}"},
+              .nrecs = 1, .kind = TURN_FINAL, .abort_after = -1 },
+            { .recs = (const char *[]){
+                  "{\"type\":\"response\",\"text\":\"ok\",\"partial\":false}"},
+              .nrecs = 1, .kind = TURN_FINAL, .abort_after = -1 },
+        };
+        char here[1024] = "";
+        char script[4096];
+        getcwd(here, sizeof here);
+        /* a real subdirectory of the cwd: `test`, the relative hop */
+        snprintf(script, sizeof script, "/cd %s/test\nhi\n", here);
+        g_factory_wire = fwire_new(turns, 2);
+        repl_cfg(&c, PROTO_OPENAI);
+        repl_out_t r = repl_session(&c, script, strlen(script));
+        check(r.rc == EXIT_OK, "repl: /cd session exits 0");
+        check(strstr(g_seen_system, "current working directory changed "
+                                    "to test") != NULL,
+              "repl: /cd tells the model the relative hop");
+        char after[1024] = "";
+        getcwd(after, sizeof after);
+        check(strstr(after, "/test") != NULL,
+              "repl: /cd moved the process cwd");
+        if (chdir(here)) ; /* back for the rest of the suite */
+        repl_session_free(&r);
+        call_cfg_free(&c);
+
+        /* /cd with no argument: the usage line, session intact */
+        g_factory_wire = fwire_new(turns, 1);
+        repl_cfg(&c, PROTO_OPENAI);
+        snprintf(script, sizeof script, "/cd\nhi\n");
+        r = repl_session(&c, script, strlen(script));
+        check(r.rc == EXIT_OK, "repl: bare /cd session exits 0");
+        check(strstr(r.ob, "usage: /cd") != NULL,
+              "repl: bare /cd prints its usage");
+        check(strstr(g_seen_system, "current working directory changed") ==
+                  NULL,
+              "repl: bare /cd touches no system block");
+        repl_session_free(&r);
+        call_cfg_free(&c);
+
+        /* /cd to a missing directory: an error line, no move, no block */
+        g_factory_wire = fwire_new(turns, 1);
+        repl_cfg(&c, PROTO_OPENAI);
+        snprintf(script, sizeof script, "/cd /no/such/dir/here\nhi\n");
+        r = repl_session(&c, script, strlen(script));
+        check(r.rc == EXIT_OK, "repl: failed /cd session exits 0");
+        check(strstr(r.ob, "cannot chdir to '/no/such/dir/here'") != NULL,
+              "repl: failed /cd draws its error line");
+        check(strstr(g_seen_system, "current working directory changed") ==
+                  NULL,
+              "repl: failed /cd touches no system block");
         repl_session_free(&r);
         call_cfg_free(&c);
     }

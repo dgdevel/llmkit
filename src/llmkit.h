@@ -209,6 +209,13 @@ void self_exe(char *out, size_t sz, const char *argv0);
    past a leading separator, never NULL (empty string yields itself). */
 void path_slashes(char *s);
 const char *path_basename(const char *p);
+/* working directory: 0 with *out malloc'd (absolute, '/' separators) or
+   the errno-ish failure code; path_relative: `to` as seen from `from`,
+   shortest "../" walk when they share a directory beyond the root,
+   `to` itself otherwise (malloc'd) */
+int path_getcwd(char **out);
+int path_chdir(const char *dir);
+char *path_relative(const char *from, const char *to);
 
 /* one-time process setup: utf-8 console, binary pipes (win); no-op posix */
 void platform_init(void);
@@ -644,6 +651,10 @@ int mcp_call(mcp_mgr_t *m,
    -1 when a non-text block appears */
 int mcp_content_join(const cJSON *result, buf_t *out);
 void mcp_kill_all(mcp_mgr_t *m);
+/* drop the stdio servers only: the session's cwd moved, their children
+   carry the stale one; the tools record stays whole, the next
+   mcp_reconcile respawns them at the new cwd */
+void mcp_drop_stdio(mcp_mgr_t *m);
 
 /* json-rpc stdio server loop (agent-as-tool + mcp-proxy) */
 typedef struct rpc_handler {

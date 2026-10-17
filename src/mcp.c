@@ -76,6 +76,24 @@ void mcp_kill_all(mcp_mgr_t *m) {
     }
 }
 
+/* drop the stdio servers (children killed, readers joined); http/sse
+   stay - their endpoints never saw the cwd. the tools record still
+   names every server: the next mcp_reconcile (engine_start) respawns
+   the stdio ones, at spawn cwd = the caller's new directory */
+static void listing_rebuild(mcp_mgr_t *m); /* defined below reconcile */
+void mcp_drop_stdio(mcp_mgr_t *m) {
+    for (size_t i = 0; i < m->n;) {
+        if (m->v[i]->type != MCP_STDIO) {
+            i++;
+            continue;
+        }
+        server_free(m->v[i]); /* kills the child, waits for the reader */
+        memmove(&m->v[i], &m->v[i + 1], (m->n - i - 1) * sizeof *m->v);
+        m->n--;
+    }
+    listing_rebuild(m); /* the stale snapshots of the dead go */
+}
+
 mcp_server_t *mcp_find(mcp_mgr_t *m, const char *name) {
     for (size_t i = 0; i < m->n; i++)
         if (!strcmp(m->v[i]->name, name)) return m->v[i];
