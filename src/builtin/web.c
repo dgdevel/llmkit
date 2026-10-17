@@ -1085,9 +1085,10 @@ static void dl_write(void *ctx, const char *bytes, size_t n) {
 }
 
 void tool_download(const cJSON *args, buf_t *out, bool *is_error) {
-    const char *url = NULL, *outputfile = NULL;
+    const char *url = NULL;
+    char *outputfile;
     if (!bm_need_str(args, "url", &url, out) ||
-        !bm_need_str(args, "outputfile", &outputfile, out)) {
+        !(outputfile = bm_need_path(args, "outputfile", out))) {
         *is_error = true;
         return;
     }
@@ -1095,27 +1096,27 @@ void tool_download(const cJSON *args, buf_t *out, bool *is_error) {
         buf_clear(out);
         buf_append_str(out, "outputfile must not be empty");
         *is_error = true;
-        return;
+        goto done;
     }
     struct stat st;
     if (!stat(outputfile, &st)) {
         buf_clear(out);
         buf_appendf(out, "'%s' already exists", outputfile);
         *is_error = true;
-        return;
+        goto done;
     }
     if (!valid_http_url(url)) {
         buf_clear(out);
         buf_appendf(out, "invalid url: %s", url);
         *is_error = true;
-        return;
+        goto done;
     }
     if (!bm_ensure_parent_dirs(outputfile)) {
         buf_clear(out);
         buf_appendf(out, "cannot create parent directories of '%s'",
                     outputfile);
         *is_error = true;
-        return;
+        goto done;
     }
     int dfd = BM_OPEN_NEW(outputfile); /* exclusive: the open is the
                                           existence check */
@@ -1127,7 +1128,7 @@ void tool_download(const cJSON *args, buf_t *out, bool *is_error) {
             buf_appendf(out, "cannot write '%s': %s", outputfile,
                         strerror(errno));
         *is_error = true;
-        return;
+        goto done;
     }
     FILE *f = BM_FDOPEN(dfd);
     if (!f) {
@@ -1136,7 +1137,7 @@ void tool_download(const cJSON *args, buf_t *out, bool *is_error) {
         buf_clear(out);
         buf_appendf(out, "cannot write '%s': %s", outputfile, strerror(e));
         *is_error = true;
-        return;
+        goto done;
     }
     dl_sink_t sink = { f, true, 0 };
     http_req_t r;
@@ -1172,10 +1173,12 @@ void tool_download(const cJSON *args, buf_t *out, bool *is_error) {
         buf_free(&r.resp);
         buf_free(&r.content_type);
         *is_error = true;
-        return;
+        goto done;
     }
     buf_free(&r.resp);
     buf_free(&r.content_type);
     buf_clear(out);
     buf_appendf(out, "wrote %llu bytes to %s", sink.n, outputfile);
+done:
+    free(outputfile);
 }

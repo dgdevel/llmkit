@@ -202,6 +202,14 @@ void msleep(int ms);
 /* own executable path with argv0 fallback: the mcp-proxy command line */
 void self_exe(char *out, size_t sz, const char *argv0);
 
+/* path helpers: separators are canonicalized to '/' everywhere in
+   llmkit; windows input may arrive with '\' and is normalized at the
+   entry points. path_slashes rewrites '\\' -> '/' in place.
+   path_basename points at the last component after '/' or '\'; never
+   past a leading separator, never NULL (empty string yields itself). */
+void path_slashes(char *s);
+const char *path_basename(const char *p);
+
 /* one-time process setup: utf-8 console, binary pipes (win); no-op posix */
 void platform_init(void);
 

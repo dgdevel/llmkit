@@ -1222,8 +1222,7 @@ enum { ANALYZERS_N = sizeof ANALYZERS / sizeof ANALYZERS[0] };
    the file type is unknown */
 static const analyzer_t *analyzer_for_ext(const char *path) {
     if (!path) return NULL;
-    const char *base = strrchr(path, '/');
-    base = base ? base + 1 : path;
+    const char *base = path_basename(path);
     const char *dot = strrchr(base, '.');
     if (!dot || dot == base) return NULL; /* no (real) extension */
 
@@ -1241,36 +1240,36 @@ static const analyzer_t *analyzer_for_ext(const char *path) {
 
 void tool_file_analyze(const cJSON *args, buf_t *out,
                               bool *is_error) {
-    const char *path = NULL;
-    if (!bm_need_str(args, "path", &path, out)) {
+    char *path;
+    if (!(path = bm_need_path(args, "path", out))) {
         *is_error = true;
-        return;
+        goto done;
     }
     if (!strlen(path)) {
         buf_clear(out);
         buf_append_str(out, "path must not be empty");
         *is_error = true;
-        return;
+        goto done;
     }
     struct stat st;
     if (stat(path, &st)) {
         buf_clear(out);
         buf_appendf(out, "cannot stat '%s': %s", path, strerror(errno));
         *is_error = true;
-        return;
+        goto done;
     }
     if (S_ISDIR(st.st_mode)) {
         buf_clear(out);
         buf_appendf(out, "'%s' is a directory (files_list lists those)",
                     path);
         *is_error = true;
-        return;
+        goto done;
     }
     if (!S_ISREG(st.st_mode)) {
         buf_clear(out);
         buf_appendf(out, "'%s' is not a regular file", path);
         *is_error = true;
-        return;
+        goto done;
     }
     const analyzer_t *an = analyzer_for_ext(path);
     if (!an) {
@@ -1284,7 +1283,7 @@ void tool_file_analyze(const cJSON *args, buf_t *out,
             buf_append_str(out, ")");
         }
         *is_error = true;
-        return;
+        goto done;
     }
     buf_t b;
     buf_init(&b);
@@ -1294,14 +1293,14 @@ void tool_file_analyze(const cJSON *args, buf_t *out,
         buf_clear(out);
         buf_appendf(out, "file too large (over %llu bytes)", BM_FILE_CAP);
         *is_error = true;
-        return;
+        goto done;
     }
     if (rc == -1) {
         buf_free(&b);
         buf_clear(out);
         buf_appendf(out, "cannot read '%s'", path);
         *is_error = true;
-        return;
+        goto done;
     }
     if (memchr(b.data, 0, b.len) ||
         !utf8_valid((const uint8_t *)b.data, b.len)) {
@@ -1309,7 +1308,7 @@ void tool_file_analyze(const cJSON *args, buf_t *out,
         buf_clear(out);
         buf_appendf(out, "'%s' is not a textual file", path);
         *is_error = true;
-        return;
+        goto done;
     }
 
     unsigned long long nlines = 0;
@@ -1329,4 +1328,6 @@ void tool_file_analyze(const cJSON *args, buf_t *out,
         buf_append_str(out, "  (nothing found)\n");
     if (ns.truncated) buf_append_str(out, "... [truncated]\n");
     buf_free(&ns.out);
+done:
+    free(path);
 }

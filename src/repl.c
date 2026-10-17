@@ -1207,7 +1207,13 @@ int repl_run_ex(const call_cfg_t *c, const repl_opts_t *o, int in_fd,
                 }
                 i++;
             }
-            if (stripped) line.data[line.len] = '\0';
+            if (stripped) {
+                /* an @ path entered the line: normalize its separators
+                   to '/' - windows typing shows '\', the model record
+                   and every tool argument speak '/' */
+                path_slashes(line.data);
+                line.data[line.len] = '\0';
+            }
         }
 
         {

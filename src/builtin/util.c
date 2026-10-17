@@ -444,6 +444,17 @@ bool bm_need_str(const cJSON *args, const char *name, const char **out,
     return true;
 }
 
+char *bm_need_path(const cJSON *args, const char *name, buf_t *err) {
+    const char *v = rec_str(args, name);
+    if (!v) {
+        buf_appendf(err, "missing required argument '%s'", name);
+        return NULL;
+    }
+    char *dup = strdup(v);
+    if (dup) path_slashes(dup);
+    return dup;
+}
+
 bool bm_need_int(const cJSON *args, const char *name, long long *out,
                  buf_t *err) {
     const cJSON *v = cJSON_GetObjectItemCaseSensitive(args, name);

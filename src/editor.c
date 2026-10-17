@@ -144,8 +144,11 @@ void editor_complete_path(void *ctx, const char *line,
     const char *tok = path_token(line);
     if (!tok) return;
     size_t toklen = strlen(tok);
-    /* the dir to list: the prefix's dirname, "." when none */
+    /* the dir to list: the prefix's dirname, "." when none; windows
+       typing may carry '\', the last separator of either kind splits */
     const char *slash = path_memrchr(tok, '/', toklen);
+    const char *bslash = path_memrchr(tok, '\\', toklen);
+    if (bslash && (!slash || bslash > slash)) slash = bslash;
     char dir[1024];
     const char *base;
     size_t baselen;
@@ -167,6 +170,7 @@ void editor_complete_path(void *ctx, const char *line,
         base = tok;
         baselen = toklen;
     }
+    path_slashes(dir); /* opendir on posix takes '/' only */
     DIR *d = opendir(dir);
     if (!d) return;
     buf_t cand;

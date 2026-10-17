@@ -2758,6 +2758,79 @@ static void test_builtin(void) {
     }
 }
 
+/* ================= 8c. path separator normalization ================= */
+
+static void test_path_norm(void) {
+    /* path_slashes: in-place '\' -> '/' */
+    {
+        char s[64];
+        snprintf(s, sizeof s, "C:\\Users\\me\\file.txt");
+        path_slashes(s);
+        check_str(s, "C:/Users/me/file.txt", "path: backslashes fold to /");
+        snprintf(s, sizeof s, "plain/path.txt");
+        path_slashes(s);
+        check_str(s, "plain/path.txt", "path: no-op on slash paths");
+        snprintf(s, sizeof s, "%s", "");
+        path_slashes(s);
+        check_str(s, "", "path: empty stays empty");
+    }
+    /* path_basename: both separators, edges */
+    check_str(path_basename("/a/b/name"), "name", "path: basename posix");
+    check_str(path_basename("a\\b\\name"), "name", "path: basename win");
+    check_str(path_basename("name"), "name", "path: basename no sep");
+    check_str(path_basename("/"), "", "path: basename of root");
+    check_str(path_basename("C:\\"), "", "path: basename of drive root");
+    check_str(path_basename("dir.v2/file"), "file", "path: basename dot dir");
+
+    /* tools accept '\' input: read, list, copy-into-dir all normalized */
+    bool ie = false;
+    char *t;
+
+    mkdir("/tmp/llmkit-test-builtin", 0777);
+    mkdir("/tmp/llmkit-test-builtin/pn", 0777);
+    write_file("/tmp/llmkit-test-builtin/pn/a.txt", "one\ntwo\n");
+    t = bc_call("file_read",
+                "{\"path\":\"\\\\tmp\\\\llmkit-test-builtin\\\\pn\\\\a.txt\","
+                "\"lines_offset\":0,\"lines_length\":10}", &ie);
+    check(!ie && t && strstr(t, "one"), "path: file_read takes backslashes");
+    free(t);
+
+    t = bc_call("files_list",
+                "{\"path\":\"\\\\tmp\\\\llmkit-test-builtin\\\\pn\","
+                "\"regex\":\"a\"}", &ie);
+    check(!ie && t && strstr(t, "a.txt"), "path: files_list takes backslashes");
+    free(t);
+
+    mkdir("/tmp/llmkit-test-builtin/pn/sub", 0777);
+    t = bc_call("file_copy",
+                "{\"sourcepath\":\"\\\\tmp\\\\llmkit-test-builtin\\\\pn\\\\a.txt\","
+                "\"destpath\":\"\\\\tmp\\\\llmkit-test-builtin\\\\pn\\\\sub\"}",
+                &ie);
+    check(!ie && t && strstr(t, "sub/a.txt"),
+          "path: file_copy into dir names the child (win separators)");
+    free(t);
+    {
+        char got[64];
+        slurp_file("/tmp/llmkit-test-builtin/pn/sub/a.txt", got, sizeof got);
+        check(!strcmp(got, "one\ntwo\n"),
+              "path: file_copy with backslashes wrote the file");
+    }
+
+    /* editor split: the last separator of either kind (the completion's
+       own logic, mirrored here through path_basename of the dir part) */
+    {
+        char tok[64];
+        snprintf(tok, sizeof tok, "dir\\sub\\name");
+        const char *bslash = strrchr(tok, '\\');
+        char dir[64];
+        size_t dlen = (size_t)(bslash - tok);
+        memcpy(dir, tok, dlen);
+        dir[dlen] = '\0';
+        path_slashes(dir);
+        check_str(dir, "dir/sub", "path: editor dir part normalized");
+    }
+}
+
 
 /* ================= 9. stream parity + agent (localhost fake endpoint) ===== */
 
@@ -6451,6 +6524,8 @@ int main(void) {
     test_rpc_loop();
     fprintf(stderr, "selfcheck: builtin-mcp\n");
     test_builtin();
+    fprintf(stderr, "selfcheck: path normalization\n");
+    test_path_norm();
     fprintf(stderr, "selfcheck: mcp stdio client\n");
     test_mcp_stdio();
     fprintf(stderr, "selfcheck: mcp proxy\n");

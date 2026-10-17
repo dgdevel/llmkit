@@ -95,6 +95,27 @@ time_t ll_timegm(struct tm *tm) {
     return (time_t)secs;
 }
 
+/* ---- path helpers ---- */
+
+/* in-place '\\' -> '/': the canonical separator of every path llmkit
+   builds, parses or shows the model (windows file apis accept '/' for
+   drive-letter paths; the exceptions - unc, \\?\, cmd.exe switches -
+   never cross this code) */
+void path_slashes(char *s) {
+    for (char *p = s; *p; p++)
+        if (*p == '\\') *p = '/';
+}
+
+/* the last path component, after '/' or '\\'; points at the string
+   itself when there is no separator ("name" of "/a/b/name", of
+   "a\\b\\name", of "name"; "" of "/" and of "\\") */
+const char *path_basename(const char *p) {
+    const char *base = p;
+    for (const char *q = p; *q; q++)
+        if (*q == '/' || *q == '\\') base = q + 1;
+    return base;
+}
+
 /* ---- queue: mutex + condvar, unbounded ---- */
 
 typedef struct qnode {

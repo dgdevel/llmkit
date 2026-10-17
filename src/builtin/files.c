@@ -34,8 +34,8 @@ static void entry_line(buf_t *out, const char *path, const struct stat *st,
     else if (S_ISDIR(st->st_mode)) {
         /* a hidden directory the walk will not descend into unless the
            caller names it: its line says so */
-        const char *base = strrchr(path, '/');
-        if (base && base[1] == '.')
+        const char *base = path_basename(path);
+        if (*base == '.' && base[1])
             buf_append_str(out, " (files inside)");
     }
     buf_append_byte(out, '\n');
@@ -203,15 +203,18 @@ bool bm_ensure_parent_dirs(const char *path) {
 
 static void tool_files(const cJSON *args, buf_t *out, bool *is_error,
                        bool content, bool recurse, bool hidden) {
-    const char *path = NULL, *regex = NULL;
-    if (!bm_need_str(args, "path", &path, out) ||
+    char *path = NULL;
+    const char *regex = NULL;
+    if (!(path = bm_need_path(args, "path", out)) ||
         !bm_need_str(args, "regex", &regex, out)) {
+        free(path);
         *is_error = true;
         return;
     }
     if (!strlen(path)) {
         buf_clear(out);
         buf_append_str(out, "path must not be empty");
+        free(path);
         *is_error = true;
         return;
     }
@@ -227,6 +230,7 @@ static void tool_files(const cJSON *args, buf_t *out, bool *is_error,
     char werr[256] = "";
     bool ok = walk_start(&w, path, werr, sizeof werr);
     regfree(&rx);
+    free(path);
     if (!ok) {
         buf_clear(out);
         buf_appendf(out, "%s", werr);
@@ -244,17 +248,19 @@ void tool_files_search(const cJSON *a, buf_t *o, bool *e) {
 }
 
 void tool_file_read(const cJSON *args, buf_t *out, bool *is_error) {
-    const char *path = NULL;
+    char *path;
     long long off = 0, count = -1;
-    if (!bm_need_str(args, "path", &path, out) ||
+    if (!(path = bm_need_path(args, "path", out)) ||
         !bm_need_int(args, "lines_offset", &off, out) ||
         !bm_need_int(args, "lines_length", &count, out)) {
+        free(path);
         *is_error = true;
         return;
     }
     if (off < 0 || count < 0) {
         buf_clear(out);
         buf_append_str(out, "lines_offset and lines_length must not be negative");
+        free(path);
         *is_error = true;
         return;
     }
@@ -262,6 +268,7 @@ void tool_file_read(const cJSON *args, buf_t *out, bool *is_error) {
     if (stat(path, &st) || !S_ISREG(st.st_mode)) {
         buf_clear(out);
         buf_appendf(out, "'%s' is not a regular file", path);
+        free(path);
         *is_error = true;
         return;
     }
@@ -272,6 +279,7 @@ void tool_file_read(const cJSON *args, buf_t *out, bool *is_error) {
         buf_free(&b);
         buf_clear(out);
         buf_appendf(out, "file too large (over %llu bytes)", BM_FILE_CAP);
+        free(path);
         *is_error = true;
         return;
     }
@@ -279,6 +287,7 @@ void tool_file_read(const cJSON *args, buf_t *out, bool *is_error) {
         buf_free(&b);
         buf_clear(out);
         buf_appendf(out, "cannot read '%s'", path);
+        free(path);
         *is_error = true;
         return;
     }
@@ -286,6 +295,7 @@ void tool_file_read(const cJSON *args, buf_t *out, bool *is_error) {
         buf_free(&b);
         buf_clear(out);
         buf_appendf(out, "'%s' is not a textual file", path);
+        free(path);
         *is_error = true;
         return;
     }
@@ -322,37 +332,41 @@ void tool_file_read(const cJSON *args, buf_t *out, bool *is_error) {
         buf_clear(out);
         buf_appendf(out, "lines_offset %lld beyond end of file (%llu lines)",
                     off, lno);
+        free(path);
         *is_error = true;
         return;
     }
+    free(path);
 }
 
 void tool_file_create(const cJSON *args, buf_t *out, bool *is_error) {
-    const char *path = NULL, *content = NULL;
-    if (!bm_need_str(args, "path", &path, out) ||
+    char *path;
+    const char *content = NULL;
+    if (!(path = bm_need_path(args, "path", out)) ||
         !bm_need_str(args, "content", &content, out)) {
+        free(path);
         *is_error = true;
-        return;
+        goto done;
     }
     bool overwrite = rec_bool(args, "overwrite", false);
     if (!strlen(path)) {
         buf_clear(out);
         buf_append_str(out, "path must not be empty");
         *is_error = true;
-        return;
+        goto done;
     }
     struct stat st;
     if (!stat(path, &st) && S_ISDIR(st.st_mode)) {
         buf_clear(out);
         buf_appendf(out, "'%s' is a directory", path);
         *is_error = true;
-        return;
+        goto done;
     }
     if (!bm_ensure_parent_dirs(path)) {
         buf_clear(out);
         buf_appendf(out, "cannot create parent directories of '%s'", path);
         *is_error = true;
-        return;
+        goto done;
     }
     /* write through an exclusive create when the caller said no
        overwrite: the open itself is the existence check, so two
@@ -392,14 +406,14 @@ void tool_file_create(const cJSON *args, buf_t *out, bool *is_error) {
         }
         buf_clear(out);
         buf_appendf(out, "wrote %lu bytes to %s", (unsigned long)n, path);
-        return;
+        goto done;
     }
     FILE *f = fopen(path, "wb");
     if (!f) {
         buf_clear(out);
         buf_appendf(out, "cannot write '%s': %s", path, strerror(errno));
         *is_error = true;
-        return;
+        goto done;
     }
     size_t n = strlen(content);
     bool ok = fwrite(content, 1, n, f) == n;
@@ -409,10 +423,12 @@ void tool_file_create(const cJSON *args, buf_t *out, bool *is_error) {
         buf_clear(out);
         buf_appendf(out, "write error on '%s'", path);
         *is_error = true;
-        return;
+        goto done;
     }
     buf_clear(out);
     buf_appendf(out, "wrote %lu bytes to %s", (unsigned long)n, path);
+done:
+    free(path);
 }
 
 /* ---- file_delete ---- */
@@ -425,10 +441,10 @@ void tool_file_create(const cJSON *args, buf_t *out, bool *is_error) {
    no partial failures. */
 
 /* "name" of "/a/b/name", "" of "/name", whole of "name"; never the
-   leading slash, never past a trailing one */
+   leading slash, never past a trailing one; windows input is already
+   slash-normalized, path_basename still takes both separators */
 static const char *base_ptr(const char *path) {
-    const char *p = strrchr(path, '/');
-    return p ? p + 1 : path;
+    return path_basename(path);
 }
 
 #ifndef _WIN32 /* xdg trash is a freedesktop thing; windows recycles via shell */
@@ -546,9 +562,16 @@ static bool to_wide(const char *s, wchar_t *w, int cap) {
 static int trash_move(const char *src, buf_t *into) {
 #ifdef _WIN32
     /* recycle bin through the shell: FOF_ALLOWUNDO is what makes it a
-       trash instead of a wipe; the double-null tail of pFrom required */
+       trash instead of a wipe; the double-null tail of pFrom required.
+       the shell wants native separators: the tools normalized src to
+       '/', they go back to '\' for this call alone */
+    char native[BM_PATH_MAX];
+    if (snprintf(native, sizeof native, "%s", src) >= (int)sizeof native)
+        return -1;
+    for (char *q = native; *q; q++)
+        if (*q == '/') *q = '\\';
     wchar_t pathbuf[BM_PATH_MAX + 2];
-    if (!to_wide(src, pathbuf, BM_PATH_MAX)) return -1;
+    if (!to_wide(native, pathbuf, BM_PATH_MAX)) return -1;
     size_t n = wcslen(pathbuf);
     pathbuf[n + 1] = 0;
     SHFILEOPSTRUCTW op;
@@ -698,8 +721,8 @@ static void rm_tree(const char *path, buf_t *err, int depth) {
 }
 
 void tool_file_delete(const cJSON *args, buf_t *out, bool *is_error) {
-    const char *path = NULL;
-    if (!bm_need_str(args, "path", &path, out)) {
+    char *path;
+    if (!(path = bm_need_path(args, "path", out))) {
         *is_error = true;
         return;
     }
@@ -707,6 +730,7 @@ void tool_file_delete(const cJSON *args, buf_t *out, bool *is_error) {
         buf_clear(out);
         buf_append_str(out, "path must not be empty");
         *is_error = true;
+        free(path);
         return;
     }
     /* recoverable first: into the trash when one is reachable */
@@ -716,6 +740,7 @@ void tool_file_delete(const cJSON *args, buf_t *out, bool *is_error) {
         buf_clear(out);
         buf_appendf(out, "deleted %s", path);
         buf_free(&where);
+        free(path);
         return;
     }
     buf_free(&where);
@@ -731,6 +756,7 @@ void tool_file_delete(const cJSON *args, buf_t *out, bool *is_error) {
         buf_appendf(out, "deleted %s", path);
     }
     buf_free(&err);
+    free(path);
 }
 
 /* ---- file_copy / file_move ---- */
@@ -837,25 +863,26 @@ static int copy_tree(const char *src, const char *dst, buf_t *err,
    irreversible removal of the source. */
 static void tool_file_copy_move(const cJSON *args, buf_t *out,
                                 bool *is_error, bool move) {
-    const char *src = NULL, *dst = NULL;
-    if (!bm_need_str(args, "sourcepath", &src, out) ||
-        !bm_need_str(args, "destpath", &dst, out)) {
+    char *src, *dst;
+    if (!(src = bm_need_path(args, "sourcepath", out)) ||
+        !(dst = bm_need_path(args, "destpath", out))) {
+        free(src);
         *is_error = true;
-        return;
+        goto done;
     }
     bool overwrite = rec_bool(args, "overwrite", false);
     if (!strlen(src) || !strlen(dst)) {
         buf_clear(out);
         buf_append_str(out, "sourcepath and destpath must not be empty");
         *is_error = true;
-        return;
+        goto done;
     }
     struct stat sst;
     if (stat(src, &sst)) {
         buf_clear(out);
         buf_appendf(out, "cannot access '%s': %s", src, strerror(errno));
         *is_error = true;
-        return;
+        goto done;
     }
     struct stat dst_st;
     bool into_dir = stat(dst, &dst_st) == 0 && S_ISDIR(dst_st.st_mode);
@@ -865,7 +892,7 @@ static void tool_file_copy_move(const cJSON *args, buf_t *out,
         buf_clear(out);
         buf_appendf(out, "destpath too long");
         *is_error = true;
-        return;
+        goto done;
     }
     /* a directory copied into itself would recurse until the path cap */
     size_t sl = strlen(src);
@@ -875,7 +902,7 @@ static void tool_file_copy_move(const cJSON *args, buf_t *out,
         buf_appendf(out, "cannot %s a directory inside itself",
                     move ? "move" : "copy");
         *is_error = true;
-        return;
+        goto done;
     }
     struct stat tst;
     if (!BM_LSTAT(target, &tst)) {
@@ -904,21 +931,21 @@ static void tool_file_copy_move(const cJSON *args, buf_t *out,
     if (move && BM_RENAME(src, target) == 0) {
         buf_clear(out);
         buf_appendf(out, "moved %s to %s", src, target);
-        return;
+        goto done;
     }
     if (move && errno != EXDEV) {
         buf_clear(out);
         buf_appendf(out, "move '%s' to '%s': %s", src, target,
                     strerror(errno));
         *is_error = true;
-        return;
+        goto done;
     }
     if (!bm_ensure_parent_dirs(target)) {
         buf_clear(out);
         buf_appendf(out, "cannot create the parent directories of '%s'",
                     target);
         *is_error = true;
-        return;
+        goto done;
     }
     buf_t err;
     buf_init(&err);
@@ -928,7 +955,7 @@ static void tool_file_copy_move(const cJSON *args, buf_t *out,
                     err.data ? err.data : "unknown error");
         buf_free(&err);
         *is_error = true;
-        return;
+        goto done;
     }
     buf_free(&err);
     if (move) { /* cross-device: the copy is in, the source goes away */
@@ -947,6 +974,9 @@ static void tool_file_copy_move(const cJSON *args, buf_t *out,
     }
     buf_clear(out);
     buf_appendf(out, "%s %s to %s", move ? "moved" : "copied", src, target);
+done:
+    free(src);
+    free(dst);
 }
 
 void tool_file_copy(const cJSON *args, buf_t *out, bool *is_error) {
@@ -1105,12 +1135,14 @@ static long long block_find(const fline_t *fl, size_t nfl, long long line_number
 }
 
 void tool_file_edit(const cJSON *args, buf_t *out, bool *is_error) {
-    const char *path = NULL, *olds = NULL, *news = NULL;
+    char *path;
+    const char *olds = NULL, *news = NULL;
     long long line_number = 0;
-    if (!bm_need_str(args, "path", &path, out) ||
+    if (!(path = bm_need_path(args, "path", out)) ||
         !bm_need_str(args, "oldString", &olds, out) ||
         !bm_need_str(args, "newString", &news, out) ||
         !bm_need_int(args, "line_number", &line_number, out)) {
+        free(path);
         *is_error = true;
         return;
     }
@@ -1118,26 +1150,26 @@ void tool_file_edit(const cJSON *args, buf_t *out, bool *is_error) {
         buf_clear(out);
         buf_append_str(out, "path must not be empty");
         *is_error = true;
-        return;
+        goto done;
     }
     if (!strlen(olds)) {
         buf_clear(out);
         buf_append_str(out, "oldString must not be empty");
         *is_error = true;
-        return;
+        goto done;
     }
     if (line_number < 0) {
         buf_clear(out);
         buf_append_str(out, "line_number must not be negative");
         *is_error = true;
-        return;
+        goto done;
     }
     struct stat st;
     if (stat(path, &st) || !S_ISREG(st.st_mode)) {
         buf_clear(out);
         buf_appendf(out, "'%s' is not a regular file", path);
         *is_error = true;
-        return;
+        goto done;
     }
     buf_t b;
     buf_init(&b);
@@ -1150,14 +1182,14 @@ void tool_file_edit(const cJSON *args, buf_t *out, bool *is_error) {
         else
             buf_appendf(out, "cannot read '%s'", path);
         *is_error = true;
-        return;
+        goto done;
     }
     if (memchr(b.data, 0, b.len) || !utf8_valid((const uint8_t *)b.data, b.len)) {
         buf_free(&b);
         buf_clear(out);
         buf_appendf(out, "'%s' is not a textual file", path);
         *is_error = true;
-        return;
+        goto done;
     }
     fline_t *fl = NULL;
     size_t nfl = split_lines(b.data, b.len, &fl);
@@ -1202,7 +1234,7 @@ void tool_file_edit(const cJSON *args, buf_t *out, bool *is_error) {
         else
             buf_appendf(out, "oldString not found in %s", path);
         *is_error = true;
-        return;
+        goto done;
     }
 
     /* indentation: base whitespace of the first replaced line, new block
@@ -1276,7 +1308,7 @@ void tool_file_edit(const cJSON *args, buf_t *out, bool *is_error) {
         buf_clear(out);
         buf_appendf(out, "cannot write '%s': path too long", path);
         *is_error = true;
-        return;
+        goto done;
     }
     FILE *f = fopen(tmp, "wb");
     if (f) {
@@ -1302,7 +1334,7 @@ void tool_file_edit(const cJSON *args, buf_t *out, bool *is_error) {
         buf_clear(out);
         buf_appendf(out, "cannot write '%s': %s", path, strerror(e));
         *is_error = true;
-        return;
+        goto done;
     }
     buf_clear(out);
     if (mnl == 1)
@@ -1318,6 +1350,8 @@ void tool_file_edit(const cJSON *args, buf_t *out, bool *is_error) {
     buf_free(&b);
     buf_free(&nb);
     buf_free(&basews);
+done:
+    free(path);
 }
 
 /* ---- file_analyze (structure analyzers, ported from flower) ---- */

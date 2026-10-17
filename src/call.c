@@ -80,8 +80,7 @@ static int cfg_str_add(char ***v, size_t *n, size_t *cap, const char *s) {
 /* server name: basename minus last extension, any extension; NULL when the
    result would be empty (design sec.11) */
 static char *proxy_name(const char *path) {
-    const char *base = strrchr(path, '/');
-    base = base ? base + 1 : path;
+    const char *base = path_basename(path);
     size_t n = strlen(base);
     const char *dot = strrchr(base, '.');
     if (dot) n = (size_t)(dot - base);
