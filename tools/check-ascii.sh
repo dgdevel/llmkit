@@ -17,6 +17,7 @@ cd "$(dirname "$0")/.." || exit 2
 
 hits=$(git ls-files --cached --others --exclude-standard |
     grep -v '^src/prompts/' |
+    grep -v -E '^fuzz/(fuzz_[a-z_]+|out/|seeds/mcp_tools/.*\.bin|seeds/regex/.*\.bin)$' |
     while IFS= read -r f; do
         LC_ALL=C grep -Hn '[^[:print:][:space:]]' "$f" || true
     done)

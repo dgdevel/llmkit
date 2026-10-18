@@ -253,6 +253,8 @@ static void dom_parse(hdom_t *d, const char *html, size_t n) {
                 else if (!strcmp(an, "src") && !src) src = val;
                 else if (!strcmp(an, "alt") && !alt) alt = val;
                 else free(val);
+            } else if (!al && s[j] == '=') {
+                j++; /* stray '=' with no name: consume, don't spin */
             }
         }
         i = j;

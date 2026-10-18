@@ -1,0 +1,4 @@
+{"type":"header","version":1}
+{"type":"tools","tools":[{"type":"stdio","name":"fs","command_line":"npx -y @modelcontextprotocol/server-filesystem /tmp"}]}
+{"type":"expose","tool":"fs.list_directory","name":"list_dir","description":"List one directory","arguments":{"path":{"name":"folder","description":"absolute folder path to list"}}}
+{"type":"expose","tool":"fs.read_text_file","name":"read_file","description":"Read one text file","arguments":{"path":{"name":"file","description":"absolute file path to read"}}}

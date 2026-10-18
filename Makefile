@@ -44,6 +44,21 @@ endif
 
 all: llmkit
 
+# fuzzing: libFuzzer harnesses over the project sources (fuzz/README.md).
+# clang only, built on explicit request. FUZZFLAGS defaults to asan;
+FUZZFLAGS ?= -fsanitize=address
+#   make fuzz FUZZFLAGS=-fsanitize=address,undefined
+# run one: ./fuzz/fuzz_sse fuzz/seeds/sse
+# fuzz_mcp_tools (real tools/call) is docker-only: fuzz/docker-fuzz.sh
+FUZZ_HARNESS = sse jsonl html regex proxy mcp mcp_tools
+
+fuzz: $(foreach h,$(FUZZ_HARNESS),fuzz/fuzz_$(h))
+
+fuzz/fuzz_%: fuzz/fuzz_%.c $(SRC) src/llmkit.h src/prompts.gen.h | check-ascii
+	@mkdir -p $(@D)
+	clang $(CFLAGS) -O1 -g -fno-omit-frame-pointer -fsanitize=fuzzer-no-link \
+	      $(FUZZFLAGS) -o $@ $< $(SRC) $(LDLIBS) -fsanitize=fuzzer $(FUZZFLAGS)
+
 # prompt texts bundled into the binary: tools/gen-prompts.sh preprocesses
 # src/prompts/**/*.txt into src/prompts.gen.{c,h} (a changed txt or script
 # regenerates them before the next compilation). both targets share the
@@ -85,8 +100,12 @@ check-vg: test/selfcheck-vg
 
 clean:
 	rm -rf dist
+	rm -rf fuzz/out
 	rm -f llmkit test/selfcheck test/selfcheck-vg test/valgrind.log \
-	      llmkit.exe src/prompts.gen.c src/prompts.gen.h
+	      llmkit.exe src/prompts.gen.c src/prompts.gen.h \
+	      fuzz/fuzz_sse fuzz/fuzz_jsonl fuzz/fuzz_html \
+	      fuzz/fuzz_regex fuzz/fuzz_proxy fuzz/fuzz_mcp \
+	      fuzz/fuzz_mcp_tools
 
 # tag, build and publish binaries to GitHub Releases (needs gh)
 # usage: make release TAG=v1.2.3
@@ -98,4 +117,4 @@ release:
 packages:
 	@tools/package.sh "$(TAG)" $(TGT)
 
-.PHONY: all check check-ascii check-vg clean release packages
+.PHONY: all check check-ascii check-vg clean release packages fuzz

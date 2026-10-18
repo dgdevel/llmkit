@@ -11,3 +11,17 @@ src/prompts.gen.h
 # valgrind run artifacts
 test/selfcheck-vg
 test/valgrind.log
+
+# fuzzing artifacts (harness binaries, corpus growth, crash files)
+fuzz/out/
+fuzz/crash-*
+fuzz/timeout-*
+fuzz/leak-*
+fuzz/oom-*
+fuzz/fuzz_sse
+fuzz/fuzz_jsonl
+fuzz/fuzz_html
+fuzz/fuzz_regex
+fuzz/fuzz_proxy
+fuzz/fuzz_mcp
+fuzz/fuzz_mcp_tools

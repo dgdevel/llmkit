@@ -344,7 +344,6 @@ void tool_file_create(const cJSON *args, buf_t *out, bool *is_error) {
     const char *content = NULL;
     if (!(path = bm_need_path(args, "path", out)) ||
         !bm_need_str(args, "content", &content, out)) {
-        free(path);
         *is_error = true;
         goto done;
     }
@@ -383,7 +382,7 @@ void tool_file_create(const cJSON *args, buf_t *out, bool *is_error) {
                 buf_appendf(out, "cannot write '%s': %s", path,
                             strerror(errno));
             *is_error = true;
-            return;
+            goto done;
         }
         FILE *f = BM_FDOPEN(fd);
         if (!f) {
@@ -392,7 +391,7 @@ void tool_file_create(const cJSON *args, buf_t *out, bool *is_error) {
             buf_clear(out);
             buf_appendf(out, "cannot write '%s': %s", path, strerror(e));
             *is_error = true;
-            return;
+            goto done;
         }
         size_t n = strlen(content);
         bool ok = fwrite(content, 1, n, f) == n;
@@ -402,7 +401,7 @@ void tool_file_create(const cJSON *args, buf_t *out, bool *is_error) {
             buf_clear(out);
             buf_appendf(out, "write error on '%s'", path);
             *is_error = true;
-            return;
+            goto done;
         }
         buf_clear(out);
         buf_appendf(out, "wrote %lu bytes to %s", (unsigned long)n, path);
@@ -863,10 +862,9 @@ static int copy_tree(const char *src, const char *dst, buf_t *err,
    irreversible removal of the source. */
 static void tool_file_copy_move(const cJSON *args, buf_t *out,
                                 bool *is_error, bool move) {
-    char *src, *dst;
+    char *src = NULL, *dst = NULL;
     if (!(src = bm_need_path(args, "sourcepath", out)) ||
         !(dst = bm_need_path(args, "destpath", out))) {
-        free(src);
         *is_error = true;
         goto done;
     }
@@ -911,21 +909,21 @@ static void tool_file_copy_move(const cJSON *args, buf_t *out,
             buf_appendf(out, "'%s' already exists (pass overwrite=true)",
                         target);
             *is_error = true;
-            return;
+            goto done;
         }
         if (S_ISDIR(tst.st_mode) && !S_ISDIR(sst.st_mode)) {
             buf_clear(out);
             buf_appendf(out, "cannot replace directory '%s' with a file",
                         target);
             *is_error = true;
-            return;
+            goto done;
         }
         if (!S_ISDIR(tst.st_mode) && S_ISDIR(sst.st_mode)) {
             buf_clear(out);
             buf_appendf(out, "cannot replace file '%s' with a directory",
                         target);
             *is_error = true;
-            return;
+            goto done;
         }
     }
     if (move && BM_RENAME(src, target) == 0) {
@@ -968,7 +966,7 @@ static void tool_file_copy_move(const cJSON *args, buf_t *out,
                         target, src, rmerr.data);
             buf_free(&rmerr);
             *is_error = true;
-            return;
+            goto done;
         }
         buf_free(&rmerr);
     }

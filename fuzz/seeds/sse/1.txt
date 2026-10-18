@@ -1,0 +1,10 @@
+data: hello
+
+data: {"a":1}
+event: x
+data: y
+
+: comment
+id: 5
+retry: 100
+data: tail
