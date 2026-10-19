@@ -45,7 +45,7 @@ The user asks simple arithmetic.
 
 Every separator line is stamped with the wall clock. Each turn that finishes its answer prints its timing. The timing shows the time to first token (prompt processing), thinking generation, and response generation. It also shows the token totals of the turn (input, output, and their sum) when the endpoint reports usage.
 
-Two session controls ride along. `/help` lists the commands. `/models` fetches the model list from the session's endpoint and shows it as a table. You pick one and the session switches to it. `/cd <dir>` changes the working directory of the session: the tool children respawn in it, and before the next turn the model receives a system message naming the new directory (relative to the previous one when they share a path, like `../prj2`, absolute otherwise).
+Two session controls ride along. `/help` lists the commands. `/models` fetches the model list from the session's endpoint and shows it as a table. You pick one and the session switches to it. `/cd <dir>` changes the working directory of the session: the tool children respawn in it, and before the next turn the model receives a system message naming the new directory (relative to the previous one when they share a path, like `../prj2`, absolute otherwise). `/new` drops the conversation and starts a fresh one: the model, the tools and the working directory stay, the system prompt (and the agent's headstart listing and `AGENTS.md` blocks) rebuild as at boot. A `--conversation-store` keeps appending: the new conversation lands in the same file.
 
 In the input line, a word that starts with `@` names a file or directory path. Tab completes the path from the filesystem.
 

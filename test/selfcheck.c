@@ -124,6 +124,8 @@ typedef struct fwire {
    fwire_turn (one buffer, read right after the session under test);
    multi-block system records join with \n - the openai wire's join */
 static char g_seen_system[4096];
+/* the transcript length at each fake turn: /new drops it to 0 */
+static size_t g_seen_trn;
 
 static void capture_system(const engine_t *e) {
     g_seen_system[0] = '\0';
@@ -147,6 +149,7 @@ static void capture_system(const engine_t *e) {
 static int fwire_turn(wire_t *base, engine_t *e, turn_out_t *out) {
     fwire_t *f = (fwire_t *)base;
     capture_system(e); /* per-turn: the /cd system block lands between */
+    g_seen_trn = e->tr.n;
     memset(out, 0, sizeof *out);
     fturn_t *t = &f->turns[f->pos < f->nturns ? f->pos++ : f->nturns - 1];
     if (t->kind == TURN_FATAL) {
@@ -4091,6 +4094,35 @@ static void test_repl(void) {
         check(strstr(g_seen_system, "current working directory changed") ==
                   NULL,
               "repl: failed /cd touches no system block");
+        repl_session_free(&r);
+        call_cfg_free(&c);
+    }
+
+    /* ---- /new: the conversation clears, the boot's blocks rebuild ---- */
+    {
+        fturn_t turns[] = {
+            { .recs = (const char *[]){
+                  "{\"type\":\"response\",\"text\":\"one\","
+                  "\"partial\":false}"},
+              .nrecs = 1, .kind = TURN_FINAL, .abort_after = -1 },
+            { .recs = (const char *[]){
+                  "{\"type\":\"response\",\"text\":\"two\","
+                  "\"partial\":false}"},
+              .nrecs = 1, .kind = TURN_FINAL, .abort_after = -1 },
+        };
+        g_factory_wire = fwire_new(turns, 2);
+        repl_cfg(&c, PROTO_OPENAI);
+        repl_out_t r = repl_session(&c, "hi\n/new\nagain\n", 14);
+        check(r.rc == EXIT_OK, "repl: /new session exits 0");
+        check(strstr(r.ob, "new conversation") != NULL,
+              "repl: /new draws its line");
+        /* the second turn sees a single-user transcript: the first
+           conversation's records are gone, `again` is record 0 */
+        check(g_seen_trn == 1, "repl: /new clears the transcript");
+        /* no /cd ever ran: no directory block, only the bundled prompt */
+        check(strstr(g_seen_system, "current working directory changed") ==
+                  NULL,
+              "repl: /new carries no stale blocks");
         repl_session_free(&r);
         call_cfg_free(&c);
     }

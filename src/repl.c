@@ -641,6 +641,7 @@ static void slash_help(dspy_t *d) {
         "  /help          this list",
         "  /models        pick the model of the session",
         "  /cd <dir>      change the working directory",
+        "  /new           start a fresh conversation",
     };
     dspy_ensure_nl(d);
     for (size_t i = 0; i < sizeof lines / sizeof lines[0]; i++)
@@ -996,6 +997,50 @@ static int slash_models(slash_state_t *sl, engine_t *e) {
     return 0;
 }
 
+/* `/new`: drop the conversation, start fresh like a boot. the model
+   keeps the session's llm (and model) and tool children - what clears
+   is the transcript and the system blocks the boot wrote (the
+   session's own system prompt, the headstart listing, AGENTS.md),
+   rebuilt from the same sources. the store keeps appending: the new
+   conversation lands in the same file, one history. */
+static int slash_new(slash_state_t *sl, engine_t *e) {
+    dspy_t *d = sl->d;
+    tlist_clear(&e->tr);
+    e->llm_mark = 0; /* thinking of the dropped turns is gone with them */
+    /* the boot's system blocks, rebuilt: the prompt text (an explicit
+       --system-prompt overrode the default, sl->cfg carries it), then
+       headstart and AGENTS.md as their own blocks */
+    const char *prompt_text = sl->cfg.system;
+    if (prompt_text) {
+        cJSON *sys = call_build_system(&sl->cfg);
+        char *m = validate_content(
+            cJSON_GetObjectItemCaseSensitive(sys, "content"));
+        if (m) { /* the prompt text itself: immutable since the boot */
+            dspy_error_line(d, NULL, m);
+            free(m);
+            cJSON_Delete(sys);
+            return 1;
+        }
+        engine_apply_config_record(e, sys);
+        cJSON_Delete(sys);
+    }
+    if (sl->o->headstart) {
+        char *ls = builtin_headstart_listing();
+        if (ls) {
+            int rc = system_append_block(e, NULL, ls);
+            free(ls);
+            if (rc) return 1;
+        }
+    }
+    if (sl->o->agents_md) {
+        int rc = inject_agents_md(e, NULL);
+        if (rc) return 1;
+    }
+    dspy_ensure_nl(d);
+    dspy_write_str(d, "new conversation\n");
+    return 0;
+}
+
 /* one input line: a slash command consumed (its own result), any other
    input falls through to the prompt (1). The model picker gets the
    `model> ` prompt; the session's own is restored around it. */
@@ -1022,6 +1067,10 @@ static int slash_dispatch(slash_state_t *sl, const char *s, engine_t *e) {
         const char *arg = s + 3;
         while (*arg == ' ') arg++;
         slash_cd(sl, arg, e);
+        return 0;
+    }
+    if (!strcmp(s, "/new")) {
+        slash_new(sl, e);
         return 0;
     }
     {
