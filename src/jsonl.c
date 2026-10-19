@@ -137,6 +137,7 @@ static const opt_def_t option_types[] = {
     { "max_tool_rounds", true },   { "tool_call_timeout", true },
     { "stream_interval", true },   { "llm_connect_timeout", true },
     { "llm_read_timeout", true },  { "retain_context", false },
+    { "verbose", false },
 };
 
 static const char *const known_inference[] = {

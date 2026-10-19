@@ -189,8 +189,9 @@ The `call` and `repl` commands share one hand-rolled flag parser, without getopt
   answer is the terminal tool's text and the exit code is 9. The server
   prefix must name a `--mcp-proxy` server of the same command line.
 - `--verbose`, `--conversation-store <file>`, `--no-helper` - `agent`
-  only: full tool traffic, a persistent jsonl conversation, and leaving
-  the `helper` subagent tool out.
+  only: full tool traffic (in the session and its helper subagent's
+  mirror), a persistent jsonl conversation, and leaving the `helper`
+  subagent tool out.
 
 `mcp-repl` has its own flags. Exactly one transport flag is required:
 

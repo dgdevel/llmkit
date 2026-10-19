@@ -132,7 +132,7 @@ minimal:
 complete (every field, with its default spelled out):
 
 ```
-{"type":"options","max_tool_rounds":8,"tool_call_timeout":30,"stream_interval":1,"llm_connect_timeout":5,"llm_read_timeout":1200,"retain_context":false}
+{"type":"options","max_tool_rounds":8,"tool_call_timeout":30,"stream_interval":1,"llm_connect_timeout":5,"llm_read_timeout":1200,"retain_context":false,"verbose":false}
 ```
 
 | field | type | default | description |
@@ -143,6 +143,7 @@ complete (every field, with its default spelled out):
 | `llm_connect_timeout` | number (seconds) | `5` | budget to establish the connection to the llm endpoint. Expiry surfaces as a fatal `connect_failed` |
 | `llm_read_timeout` | number (seconds) | `1200` | budget for response data from the endpoint, first byte and between chunks alike. Expiry surfaces as a fatal `http_error` |
 | `retain_context` | boolean | `false` | only meaningful in an `agent-as-tool` seed (whether `invoke` keeps one growing conversation). The runner accepts and ignores it |
+| `verbose` | boolean | `false` | only meaningful in an `agent-as-tool` seed (the helper's stderr mirror renders the whole thinking and tool traffic: full arguments, whole replies). The runner accepts and ignores it. `llmkit agent --verbose` writes it into its helper's seed |
 
 ## system
 

@@ -14,6 +14,10 @@ typedef struct cap_rec {
 
 typedef struct agent_sink {
     cap_rec_t *head, *tail;
+    bool verbose;     /* seed options flag: the mirror renders the whole
+                         traffic; the quiet default draws one thinking
+                         line, trimmed arguments, one reply summary */
+    bool think_shown; /* quiet: the invoke's one thinking line drew */
 } agent_sink_t;
 
 /* the live mirror's line writer: one (helper) line per text line,
@@ -43,30 +47,55 @@ static void agent_sink_fn(void *ctx, cJSON *rec) {
     else s->head = c;
     s->tail = c;
     /* the same record prints live too: the helper's whole conversation
-       as it happens, capture for the reply unchanged */
+       as it happens, capture for the reply unchanged. the quiet default
+       (no verbose in the seed) mirrors the session's own display: one
+       `thinking...` line per invoke, trimmed tool arguments, one reply
+       summary line - the responses and errors render whole either way */
     int k = rec_classify(rec);
+    const char *text = rec_str(rec, "text");
     if (k == R_RESPONSE) {
-        helper_print_lines(NULL, rec_str(rec, "text"));
+        helper_print_lines(NULL, text);
     } else if (k == R_THINKING) {
-        helper_print_lines("thinking ", rec_str(rec, "text"));
+        if (s->verbose) {
+            helper_print_lines("thinking ", text);
+        } else if (!s->think_shown &&
+                   (!rec_bool(rec, "partial", false) || (text && *text))) {
+            s->think_shown = true;
+            fputs("(helper) thinking...\n", stderr);
+            fflush(stderr);
+        }
     } else if (k == R_TOOL_REQUEST) {
         const char *tool = rec_str(rec, "tool");
         const cJSON *args =
             cJSON_GetObjectItemCaseSensitive(rec, "arguments");
-        char *a = cJSON_IsObject(args)
-                      ? cJSON_PrintUnformatted((cJSON *)args)
-                      : NULL;
+        buf_t a;
+        buf_init(&a);
+        if (cJSON_IsObject(args))
+            s->verbose ? buf_append_tree(&a, args)
+                       : buf_append_tree_trim(&a, args);
         fputs("(helper) -> ", stderr);
         if (tool) fputs(tool, stderr);
-        if (a) {
+        if (a.len) {
             fputc(' ', stderr);
-            fputs(a, stderr);
-            cJSON_free(a);
+            fwrite(a.data, 1, a.len, stderr);
         }
         fputc('\n', stderr);
         fflush(stderr);
+        buf_free(&a);
     } else if (k == R_TOOL_RESPONSE) {
-        helper_print_lines("<- ", rec_str(rec, "text"));
+        if (s->verbose) {
+            helper_print_lines("<- ", text);
+        } else {
+            /* one summary line: the reply's shape, not its body (the
+               invoke's own response at the end renders whole) */
+            size_t n = text ? strlen(text) : 0, lines = 0;
+            for (const char *p = text; p && *p; p++)
+                if (*p == '\n') lines++;
+            if (n && text[n - 1] != '\n') lines++;
+            fprintf(stderr, "(helper) <- tool replied, %zu lines, %zu bytes\n",
+                    lines, n);
+            fflush(stderr);
+        }
     } else if (k == R_ERROR) {
         const char *code = rec_str(rec, "code");
         const char *msg = rec_str(rec, "message");
@@ -91,6 +120,11 @@ typedef struct agent_state {
     cJSON *agent_cfg;
     tlist_t seed; /* seed transcript records */
     bool retain;
+    bool verbose; /* seed options: the live mirror renders the whole
+                     thinking and tool traffic; default (false) draws
+                     one thinking line, trimmed arguments, and one
+                     summary line per tool reply - the session's
+                     --verbose writes the flag into the helper's seed */
     size_t mark; /* transcript length after the last successful invoke */
 } agent_state_t;
 
@@ -262,6 +296,7 @@ static void invoke_run(agent_state_t *a, const char *input,
                        invoke_out_t *out) {
     engine_t *e = a->eng;
     agent_sink_t sink = { 0 };
+    sink.verbose = a->verbose;
     e->emit = agent_sink_fn;
     e->emit_ctx = &sink;
 
@@ -499,11 +534,14 @@ int cmd_agent(const char *seed_path) {
                 "records\n");
         return 1;
     }
-    /* options: retain_context */
+    /* options: retain_context, verbose */
     if (a.eng->options) {
         const cJSON *rc =
             cJSON_GetObjectItemCaseSensitive(a.eng->options, "retain_context");
         if (cJSON_IsTrue(rc)) a.retain = true;
+        const cJSON *vb =
+            cJSON_GetObjectItemCaseSensitive(a.eng->options, "verbose");
+        if (cJSON_IsTrue(vb)) a.verbose = true;
     }
     /* retain mode keeps one accumulated transcript: it starts as the bare
        seed (the rollback marker); each invoke appends to it. Forget mode

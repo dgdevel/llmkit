@@ -3206,6 +3206,102 @@ static void test_agent_tool(void) {
     check(first, "agent retain: the first invoke is retained in the next");
     check(postreset, "agent: context_reset drops the accumulated turns");
     spawn_kill(&sp);
+
+    /* the live mirror's verbose flag: the quiet default (no `verbose`
+       in the seed's options) draws one thinking line, trimmed
+       arguments, reply summaries; `verbose` set renders the whole
+       traffic. The endpoint's odd round answers a thinking + tool-call
+       turn (fs.echo with {"x":"hi"}), the even round the final text */
+    for (int round = 0; round < 2; round++) {
+        char mlog[128], murl[128];
+        snprintf(mlog, sizeof mlog, "/tmp/llmkit-test-agent-mirror-%d.log",
+                 round);
+        unlink(mlog);
+        spawn_t msp;
+        if (!endpoint_spawn(&msp, mlog, murl, sizeof murl)) {
+            check(false, "agent mirror endpoint spawned");
+            return;
+        }
+        check(true, "agent mirror endpoint spawned");
+        char mseed[1024];
+        snprintf(mseed, sizeof mseed,
+                 "{\"type\":\"header\",\"version\":1}\n"
+                 "{\"type\":\"llm\",\"endpoint_protocol\":\"openai\","
+                 "\"api_base\":\"%s\",\"model\":\"m\",\"inference_options\":"
+                 "{\"stream\":false}}\n"
+                 "%s"
+                 "{\"type\":\"tools\",\"tools\":[{\"type\":\"stdio\","
+                 "\"name\":\"fs\",\"command_line\":\"python3 "
+                 "/tmp/llmkit-test-fake-mcp.py\"}]}\n"
+                 "{\"type\":\"agent-as-tool\",\"tool_description\":\"t\","
+                 "\"input_description\":\"i\"}\n",
+                 murl, round ? "{\"type\":\"options\",\"verbose\":true}\n"
+                             : "");
+        write_file("/tmp/llmkit-test-agent-mirror-seed.jsonl", mseed);
+        const char *mtmp = "/tmp/llmkit-test-agent-mirror-err.txt";
+        unlink(mtmp);
+        int min_pipe[2], mout_pipe[2];
+        if (pipe(min_pipe) || pipe(mout_pipe)) {
+            check(false, "agent mirror pipes");
+            spawn_kill(&msp);
+            return;
+        }
+        pid_t mpid = fork();
+        check(mpid >= 0, "agent mirror fork");
+        if (mpid == 0) {
+            dup2(min_pipe[0], 0);
+            dup2(mout_pipe[1], 1);
+            FILE *mf = fopen(mtmp, "w");
+            if (mf) dup2(fileno(mf), 2);
+            close(min_pipe[0]); close(min_pipe[1]);
+            close(mout_pipe[0]); close(mout_pipe[1]);
+            int rc = cmd_agent("/tmp/llmkit-test-agent-mirror-seed.jsonl");
+            _exit(rc == 0 ? 0 : 1);
+        }
+        close(min_pipe[0]);
+        close(mout_pipe[1]);
+        FILE *mto = fdopen(min_pipe[1], "w");
+        FILE *mfrom = fdopen(mout_pipe[0], "r");
+        char mline[8192] = "";
+        fprintf(mto, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/"
+                     "call\",\"params\":{\"name\":\"invoke\",\"arguments\":"
+                     "{\"input\":\"go\"}}}\n");
+        fflush(mto);
+        check(fgets(mline, sizeof mline, mfrom) != NULL &&
+                  strstr(mline, "all done") != NULL,
+              "agent mirror: invoke replies");
+        fclose(mto);
+        fclose(mfrom);
+        int mst = 0;
+        waitpid(mpid, &mst, 0);
+        check(WIFEXITED(mst) && WEXITSTATUS(mst) == 0,
+              "agent mirror: exits 0");
+        char errtxt[8192] = "";
+        slurp_file(mtmp, errtxt, sizeof errtxt);
+        if (round == 0) {
+            /* quiet: thinking one line, trimmed args, reply summary */
+            check(errtxt && strstr(errtxt, "(helper) thinking...") != NULL,
+                  "agent mirror quiet: one thinking line");
+            check(errtxt && strstr(errtxt, "thinking hard") == NULL,
+                  "agent mirror quiet: thinking text hidden");
+            check(errtxt && strstr(errtxt, "{\"x\":\"hi\"}") != NULL,
+                  "agent mirror quiet: short arguments render whole");
+            check(errtxt && strstr(errtxt, "echo:") == NULL,
+                  "agent mirror quiet: reply body hidden behind summary");
+            check(errtxt &&
+                      strstr(errtxt, "tool replied, 1 lines, 6 bytes") !=
+                          NULL,
+                  "agent mirror quiet: reply summary line");
+        } else {
+            /* verbose: everything renders whole */
+            check(errtxt && strstr(errtxt, "(helper) thinking thinking hard")
+                      != NULL,
+                  "agent mirror verbose: thinking text renders");
+            check(errtxt && strstr(errtxt, "<- echo:") != NULL,
+                  "agent mirror verbose: reply body renders");
+        }
+        spawn_kill(&msp);
+    }
 }
 
 /* agent-as-tool with streaming on and a zero flush interval: the answer
@@ -4831,8 +4927,8 @@ static void test_agent(void) {
         engine_t *e = engine_new(NULL, NULL);
         char seedp[512] = "", cfgp[512] = "";
         cJSON *srv = NULL;
-        check(repl_helper_build(&c, "sys text", base, "/bin", e, seedp,
-                                sizeof seedp, cfgp, sizeof cfgp,
+        check(repl_helper_build(&c, "sys text", base, "/bin", false, e,
+                                seedp, sizeof seedp, cfgp, sizeof cfgp,
                                 &srv) == EXIT_OK,
               "helper: build ok");
         check(srv != NULL, "helper: server entry built");
@@ -4870,6 +4966,26 @@ static void test_agent(void) {
                   "helper seed: no recursion - no helper server");
             check(strstr(got, "\"type\":\"agent-as-tool\"") != NULL,
                   "helper seed: the agent-as-tool record");
+            check(strstr(got, "\"type\":\"options\"") == NULL,
+                  "helper seed: quiet session writes no verbose flag");
+        }
+        /* the verbose seed: the session's --verbose rides along */
+        {
+            char seedp2[512] = "", cfgp2[512] = "";
+            cJSON *srv2 = NULL;
+            e = engine_new(NULL, NULL);
+            check(repl_helper_build(&c, "sys text", base, "/bin", true, e,
+                                    seedp2, sizeof seedp2, cfgp2,
+                                    sizeof cfgp2, &srv2) == EXIT_OK,
+                  "helper: build ok (verbose case)");
+            if (srv2) cJSON_Delete(srv2);
+            engine_free(e);
+            char got[8192];
+            slurp_file(seedp2, got, sizeof got);
+            check(strstr(got, "\"verbose\":true") != NULL,
+                  "helper seed: verbose session writes the flag");
+            unlink(seedp2);
+            unlink(cfgp2);
         }
         /* the config: the as-tool server and the helper rename */
         {
@@ -4904,8 +5020,8 @@ static void test_agent(void) {
         cJSON_AddItemToArray(
             cJSON_GetObjectItemCaseSensitive(with_helper, "tools"), hs);
         e = engine_new(NULL, NULL);
-        check(repl_helper_build(&c, "s", with_helper, "/bin", e, seedp,
-                                sizeof seedp, cfgp, sizeof cfgp,
+        check(repl_helper_build(&c, "s", with_helper, "/bin", false, e,
+                                seedp, sizeof seedp, cfgp, sizeof cfgp,
                                 &srv) == EXIT_OK,
               "helper: build ok (cut case)");
         if (srv) cJSON_Delete(srv);

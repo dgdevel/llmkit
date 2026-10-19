@@ -957,13 +957,16 @@ int repl_nohelper_extract(int argc, char **argv, char *err, size_t errsz);
 /* build the helper's two config files (a jsonl seed for agent-as-tool,
    a jsonl mcp-proxy config renaming its `invoke` to `helper`) plus the
    helper server entry for the session's tools record; the seed carries
-   the session's llm/system records and base_tools' servers verbatim.
-   0 ok (seed_path/cfg_path filled, srv owned), else the exit code with
-   the error rendered through e */
+   the session's llm/system records and base_tools' servers verbatim,
+   and the session's --verbose as a `verbose` options record (the
+   helper's live mirror renders the whole traffic when set). 0 ok
+   (seed_path/cfg_path filled, srv owned), else the exit code with the
+   error rendered through e */
 int repl_helper_build(const call_cfg_t *c, const char *system_prompt,
                       const cJSON *base_tools, const char *exe_path,
-                      engine_t *e, char *seed_path, size_t seed_sz,
-                      char *cfg_path, size_t cfg_sz, cJSON **srv_out);
+                      bool verbose, engine_t *e, char *seed_path,
+                      size_t seed_sz, char *cfg_path, size_t cfg_sz,
+                      cJSON **srv_out);
 /* wipe the helper's temp files (safe when never built) */
 void repl_helper_cleanup(const char *seed_path, const char *cfg_path);
 

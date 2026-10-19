@@ -489,8 +489,9 @@ static void helper_fail(engine_t *e, const char *what) {
 
 int repl_helper_build(const call_cfg_t *c, const char *system_prompt,
                       const cJSON *base_tools, const char *exe_path,
-                      engine_t *e, char *seed_path, size_t seed_sz,
-                      char *cfg_path, size_t cfg_sz, cJSON **srv_out) {
+                      bool verbose, engine_t *e, char *seed_path,
+                      size_t seed_sz, char *cfg_path, size_t cfg_sz,
+                      cJSON **srv_out) {
     *srv_out = NULL;
     *seed_path = *cfg_path = '\0';
     FILE *seed = repl_mktemp(seed_path, seed_sz);
@@ -515,6 +516,15 @@ int repl_helper_build(const call_cfg_t *c, const char *system_prompt,
     cJSON *llm = call_build_llm(c);
     write_jsonl_line(seed, llm);
     cJSON_Delete(llm);
+    /* the session's --verbose: the helper's live mirror renders the
+       whole thinking and tool traffic; absent (the quiet default) it
+       draws one thinking line, trimmed arguments, reply summaries */
+    if (verbose) {
+        cJSON *opts = cJSON_Parse(
+            "{\"type\":\"options\",\"verbose\":true}");
+        write_jsonl_line(seed, opts);
+        cJSON_Delete(opts);
+    }
     if (system_prompt && *system_prompt) {
         cJSON *sys = cJSON_CreateObject();
         cJSON_AddStringToObject(sys, "type", "system");
@@ -949,7 +959,8 @@ static int slash_models(slash_state_t *sl, engine_t *e) {
         remove(sl->cfg_path);
         cJSON *helper_srv = NULL;
         int rc = repl_helper_build(&sl->cfg, prompt_system_prompts_helper,
-                                   e->tools_cfg, sl->exe_path, e,
+                                   e->tools_cfg, sl->exe_path,
+                                   sl->o->full_tools, e,
                                    (char *)sl->seed_path,
                                    strlen(sl->seed_path) + 1,
                                    (char *)sl->cfg_path,
@@ -1181,9 +1192,9 @@ int repl_run_ex(const call_cfg_t *c, const repl_opts_t *o, int in_fd,
            not the session's */
         cJSON *helper_srv = NULL;
         rc = repl_helper_build(&cfg, prompt_system_prompts_helper,
-                               e->tools_cfg, exe_path, e, helper_seed,
-                               sizeof helper_seed, helper_cfg,
-                               sizeof helper_cfg, &helper_srv);
+                               e->tools_cfg, exe_path, o->full_tools,
+                               e, helper_seed, sizeof helper_seed,
+                               helper_cfg, sizeof helper_cfg, &helper_srv);
         if (rc) goto done;
         cJSON *tools =
             e->tools_cfg
