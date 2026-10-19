@@ -19,6 +19,7 @@ SRC  = src/buf.c src/sse.c src/platform.c src/jsonl.c src/wire_openai.c \
        src/builtin/skills.c src/builtin/now.c \
        src/crash_report.c \
        src/call.c src/models.c src/editor.c src/repl.c src/mcprepl.c \
+       src/update.c \
        src/pretty.c src/llmproxy.c src/prompts.gen.c \
        src/vendor/linenoise/linenoise.c
 MAIN = src/main.c

@@ -37,6 +37,8 @@ static int usage(FILE *out) {
           "  models <flags>         list the models of one endpoint:\n"
           "                         aligned columns, or --json for a\n"
           "                         normalized record per model\n"
+          "  update [--yes]         check github for a newer release and\n"
+          "                         install it\n"
           "  help                   show this help\n"
           "  version                show the version\n",
           out);
@@ -87,6 +89,7 @@ int main(int argc, char **argv) {
     }
     if (!strcmp(cmd, "proxy")) return cmd_llmproxy(argc, argv);
     if (!strcmp(cmd, "models")) return cmd_models(argc, argv);
+    if (!strcmp(cmd, "update")) return cmd_update(argc, argv);
     if (!strcmp(cmd, "help")) return cmd_help();
     if (!strcmp(cmd, "version")) return cmd_version();
     fprintf(stderr, "llmkit: unknown command '%s'\n", cmd);
