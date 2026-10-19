@@ -17,6 +17,7 @@ SRC  = src/buf.c src/sse.c src/platform.c src/jsonl.c src/wire_openai.c \
        src/builtin.c src/builtin/util.c src/builtin/files.c \
        src/builtin/web.c src/builtin/analyze.c src/builtin/process.c \
        src/builtin/skills.c src/builtin/now.c \
+       src/crash_report.c \
        src/call.c src/models.c src/editor.c src/repl.c src/mcprepl.c \
        src/pretty.c src/llmproxy.c src/prompts.gen.c \
        src/vendor/linenoise/linenoise.c
@@ -98,9 +99,22 @@ check-vg: test/selfcheck-vg
 	$(VG) $(VGFLAGS) ./test/selfcheck-vg
 	@echo "valgrind clean (log: test/valgrind.log)"
 
+# sanitizer build of the same binary (plan.md task 2): the default
+# `make` target stays untouched; the sanitized objects are compiled
+# fresh into build/asan so they never collide with the plain ones.
+# usage: make asan && LLMKIT_CRASH_BACKTRACE=1 ./build/asan/llmkit-asan builtin-mcp
+ASANFLAGS = -fsanitize=address,undefined -fno-omit-frame-pointer -g
+
+build/asan/llmkit-asan: $(MAIN) $(SRC) src/llmkit.h src/prompts.gen.h | check-ascii
+	@mkdir -p $(@D)
+	$(CC) $(CFLAGS) $(ASANFLAGS) -o $@ $(MAIN) $(SRC) $(LDLIBS)
+
+asan: build/asan/llmkit-asan
+
 clean:
 	rm -rf dist
 	rm -rf fuzz/out
+	rm -rf build
 	rm -f llmkit test/selfcheck test/selfcheck-vg test/valgrind.log \
 	      llmkit.exe src/prompts.gen.c src/prompts.gen.h \
 	      fuzz/fuzz_sse fuzz/fuzz_jsonl fuzz/fuzz_html \
@@ -117,4 +131,4 @@ release:
 packages:
 	@tools/package.sh "$(TAG)" $(TGT)
 
-.PHONY: all check check-ascii check-vg clean release packages fuzz
+.PHONY: all check check-ascii check-vg clean release packages fuzz asan

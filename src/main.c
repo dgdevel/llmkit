@@ -1,5 +1,6 @@
 /* main.c - subcommand dispatch, help, version (design sec.13). */
 #include "llmkit.h"
+#include "crash_report.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -53,6 +54,9 @@ int cmd_version(void) {
 }
 
 int main(int argc, char **argv) {
+    /* crash-report context (crash_report.c): captured before any setup
+       can fail */
+    g_argv0 = argc > 0 && argv[0] ? argv[0] : "llmkit";
     platform_init(); /* console codepage/VT and byte-exact pipes on windows */
     http_global_init();
     if (argc < 2) return usage(stderr);

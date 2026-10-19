@@ -1,6 +1,7 @@
 /* mcp.c - mcp client (stdio, streamable http, legacy sse; v1 and v2 flows,
    design sec.6) and the shared json-rpc stdio server loop (design sec.9, sec.10). */
 #include "llmkit.h"
+#include "crash_report.h"
 
 #include <curl/curl.h>
 #include <errno.h>
@@ -864,6 +865,13 @@ static void serve_line(serve_ctx_t *c, const char *line) {
     cJSON *pcopy = params ? cJSON_Duplicate(params, 1) : cJSON_CreateObject();
     cJSON *result = NULL;
     char *errmsg = NULL;
+    /* crash-report breadcrumb: the fatal-signal handler in crash_report.c
+       names the method that was in flight. plain bounded array copy, no
+       heap - safe to read from the handler at any moment */
+    if (method) {
+        strncpy(g_last_method, method, CRASH_METHOD_MAX - 1);
+        g_last_method[CRASH_METHOD_MAX - 1] = '\0';
+    }
     int rc = c->h->handle(c->h->ctx, method, pcopy, idc, &result, &errmsg);
     /* the reply payload: the handler's result tree ({} when it sent
        none) or the error envelope */
