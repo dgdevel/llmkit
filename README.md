@@ -16,7 +16,6 @@ One binary, eleven commands:
 | `llmkit prettyprint <conversation.jsonl>` | renders a recorded conversation jsonl with the repl's typography (stdin without a file) |
 | `llmkit proxy <flags>` | a plain-http llm endpoint that forwards to one upstream and prints the passing conversation prettyprint-style |
 | `llmkit models <flags>` | lists the models of one endpoint: aligned columns for reading, `--json` for scripts |
-| `llmkit update [--yes]` | checks github for a newer release and installs it: self-replace for plain installs, the system package for managed ones |
 
 llmkit is written in C11. It talks to any openai-compatible endpoint (chat completions and responses apis) and any anthropic-compatible endpoint. Tools are mcp (Model Context Protocol) servers. The transports are `stdio`, `http` (streamable http), and `sse` (legacy). All current protocol revisions up to `2026-07-28` are supported.
 
@@ -162,6 +161,7 @@ Runnable examples for every command live in [examples/](examples/). See [docs/re
 | `llmkit models <flags>` | flags below, one protocol flag required |
 | `llmkit help` | none: the usage text on stdout |
 | `llmkit version` | none: the version on stdout |
+| `llmkit update` | `--yes` optional, check for updates, try to update the binary or the package that contains it |
 
 The `call` and `repl` commands share one hand-rolled flag parser, without getopt. Flags go in any order. The value is the next argv token. There is no `--flag=value` form, no short form, no abbreviation. Exactly one protocol flag and the `api_base` positional are required. Everything else is optional.
 
