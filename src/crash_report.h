@@ -1,7 +1,8 @@
-/* crash_report.h - fatal-signal crash report for the stdio servers
-   (see src/crash_report.c and docs/crash-report.md). the handler stays
-   async-signal-safe: no malloc, no stdio, only open/write/close and
-   manual number formatting. */
+/* crash_report.h - fatal-signal crash report for every llmkit
+   subcommand (registered in main(), see src/crash_report.c and
+   docs/crash-report.md). the handler stays async-signal-safe: no
+   malloc, no stdio, only open/write/close and manual number
+   formatting. */
 #ifndef CRASH_REPORT_H
 #define CRASH_REPORT_H
 
@@ -17,11 +18,12 @@ extern char g_last_method[CRASH_METHOD_MAX];
 /* program name for the report; main() sets it once, NULL until then */
 extern const char *g_argv0;
 
-/* one-time setup (idempotent): resolve the report file (env
-   LLMKIT_CRASH_FILE, else TMPDIR | %TEMP% | /tmp +
-   llmkit-builtin-mcp-crash.log), pre-format the constant report lines
-   and register the SIGSEGV/SIGBUS/SIGILL/SIGFPE/SIGABRT handlers.
-   pass NULL to read the default env vars. */
+/* one-time setup (idempotent): resolve the report destination (env
+   LLMKIT_CRASH_FILE = one explicit append file; else TMPDIR | %TEMP% |
+   /tmp with one file per crash: llmkit-crash-<epoch>-<pid>.log),
+   pre-format the constant report lines and register the
+   SIGSEGV/SIGBUS/SIGILL/SIGFPE/SIGABRT handlers. pass NULL to read the
+   default env vars. */
 void crash_report_init(const char *path_env);
 
 #endif

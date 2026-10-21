@@ -60,6 +60,9 @@ int main(int argc, char **argv) {
        can fail */
     g_argv0 = argc > 0 && argv[0] ? argv[0] : "llmkit";
     platform_init(); /* console codepage/VT and byte-exact pipes on windows */
+    /* crash reports for every subcommand (docs/crash-report.md): cmd_builtin
+       used to init this itself, now the dispatcher does it once for all */
+    crash_report_init(NULL);
     http_global_init();
     if (argc < 2) return usage(stderr);
     const char *cmd = argv[1];

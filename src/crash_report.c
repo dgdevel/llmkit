@@ -1,9 +1,9 @@
-/* crash_report.c - fatal-signal crash report for the stdio servers
-   (llmkit builtin-mcp). a crash of the stateless json-rpc loop is
-   observable only from outside the process, so on SIGSEGV/SIGBUS/
-   SIGILL/SIGFPE/SIGABRT the handler appends a one-crash record to a
-   log file before dying, then restores the default disposition and
-   re-raises so core dumps still happen. see docs/crash-report.md.
+/* crash_report.c - fatal-signal crash report for every llmkit
+   subcommand (registered in main(), see docs/crash-report.md). a crash
+   of a stateless json-rpc loop is observable only from outside the
+   process, so on SIGSEGV/SIGBUS/SIGILL/SIGFPE/SIGABRT the handler
+   appends a one-crash record to a log file before dying, then restores
+   the default disposition and re-raises so core dumps still happen.
 
    the handler is async-signal-safe: no malloc, no stdio, no snprintf -
    the constant lines are pre-formatted at init time, numbers (pid,
@@ -40,10 +40,16 @@ const char *g_argv0 = NULL;
 
 /* handler inputs resolved or pre-formatted once at init: g_report_path
    (opened lazily in the handler: the crash may come hours after init),
-   g_hdr_* constant report lines. */
-static char g_report_path[512];
+   g_hdr_* constant report lines. when no explicit path is configured,
+   only g_report_dir is set and the handler builds one file per crash:
+   <dir>/llmkit-crash-<epoch>-<pid>.log (time/getpid are
+   async-signal-safe, digits formatted with put_u). */
+static char g_report_dir[512];
 static volatile sig_atomic_t g_enabled = 0;
 static volatile sig_atomic_t g_want_bt = 0;
+/* explicit report path (LLMKIT_CRASH_FILE) or NULL for the per-crash
+   default; the handler reads this to decide what to open */
+static const char *g_report_path = NULL;
 
 /* LLMKIT_VERSION comes from llmkit.h (release builds stamp it). the
    lengths are cached at init so the handler never calls strlen. */
@@ -123,11 +129,33 @@ static void crash_handler(int sig) {
         if (p < end) *p++ = g_last_method[i];
     if (p < end) *p++ = '\n';
 
+/* report path: explicit LLMKIT_CRASH_FILE, or one file per crash
+   built in the stack buffer - <dir>/llmkit-crash-<epoch>-<pid>.log.
+   time() and getpid() are async-signal-safe, put_u does the digits */
+char pathbuf[576];
+const char *path = g_report_path;
+if (!path) {
+    char *e = pathbuf + sizeof(pathbuf) - 1;
+    char *q = pathbuf;
+    for (const char *d = g_report_dir; q < e && *d; ) *q++ = *d++;
+    q = put_s(q, "llmkit-crash-", 13);
+    q = put_u(q, (unsigned long)time(NULL));
+    *q++ = '-';
 #ifdef _WIN32
-    int fd = _open(g_report_path, _O_WRONLY | _O_CREAT | _O_APPEND,
-                   _S_IREAD | _S_IWRITE);
+    q = put_u(q, (unsigned long)GetCurrentProcessId());
 #else
-    int fd = open(g_report_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    q = put_u(q, (unsigned long)getpid());
+#endif
+    q = put_s(q, ".log", 4);
+    *q = '\0';
+    path = pathbuf;
+}
+
+#ifdef _WIN32
+int fd = _open(path, _O_WRONLY | _O_CREAT | _O_APPEND,
+               _S_IREAD | _S_IWRITE);
+#else
+int fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0644);
 #endif
     if (fd >= 0) {
         const char *q = buf;
@@ -180,8 +208,9 @@ void crash_report_init(const char *path_env) {
     if (g_enabled) return;
     if (!path_env) path_env = getenv("LLMKIT_CRASH_FILE");
     if (path_env && *path_env) {
-        strncpy(g_report_path, path_env, sizeof(g_report_path) - 1);
-        g_report_path[sizeof(g_report_path) - 1] = '\0';
+        strncpy(g_report_dir, path_env, sizeof(g_report_dir) - 1);
+        g_report_dir[sizeof(g_report_dir) - 1] = '\0';
+        g_report_path = g_report_dir; /* explicit path: use it as is */
     } else {
         const char *dir = NULL;
 #ifdef _WIN32
@@ -194,10 +223,10 @@ void crash_report_init(const char *path_env) {
         size_t dl = strlen(dir);
         char sep = (dl && (dir[dl - 1] == '/' || dir[dl - 1] == '\\'))
                        ? '\0' : '/';
-        int n = snprintf(g_report_path, sizeof(g_report_path), "%s%c%s", dir,
-                         sep, "llmkit-builtin-mcp-crash.log");
+        int n = snprintf(g_report_dir, sizeof(g_report_dir), "%s%c", dir, sep);
         (void)n;
-        g_report_path[sizeof(g_report_path) - 1] = '\0';
+        g_report_dir[sizeof(g_report_dir) - 1] = '\0';
+        g_report_path = NULL; /* per-crash default: handler adds the name */
     }
 
     /* pre-format the constant lines (snprintf is fine here: init runs in

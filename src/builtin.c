@@ -11,7 +11,6 @@
    (one file per tool family, shared helpers in src/builtin/util.c); this
    file is the tool table, the dispatcher and the json-rpc handler. */
 #include "llmkit.h"
-#include "crash_report.h"
 #include "builtin/internal.h"
 #include "prompts.gen.h"
 
@@ -288,9 +287,7 @@ int builtin_handle(void *ctx, const char *method, cJSON *params, cJSON *id,
 }
 
 int cmd_builtin(void) {
-    /* crash observability before anything can die: registers the
-       fatal-signal report handlers (docs/crash-report.md) */
-    crash_report_init(NULL);
+    /* crash_report_init runs in main() for every subcommand now */
     signals_init();
     rpc_handler_t h = { builtin_handle, NULL };
     rpc_serve_stdio(&h);
