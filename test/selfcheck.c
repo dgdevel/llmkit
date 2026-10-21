@@ -3283,24 +3283,21 @@ static void test_agent_tool(void) {
         slurp_file(mtmp, errtxt, sizeof errtxt);
         if (round == 0) {
             /* quiet: thinking one line, trimmed args, reply summary */
-            check(errtxt && strstr(errtxt, "(helper) thinking...") != NULL,
+            check(strstr(errtxt, "(helper) thinking...") != NULL,
                   "agent mirror quiet: one thinking line");
-            check(errtxt && strstr(errtxt, "thinking hard") == NULL,
+            check(strstr(errtxt, "thinking hard") == NULL,
                   "agent mirror quiet: thinking text hidden");
-            check(errtxt && strstr(errtxt, "{\"x\":\"hi\"}") != NULL,
+            check(strstr(errtxt, "{\"x\":\"hi\"}") != NULL,
                   "agent mirror quiet: short arguments render whole");
-            check(errtxt && strstr(errtxt, "echo:") == NULL,
+            check(strstr(errtxt, "echo:") == NULL,
                   "agent mirror quiet: reply body hidden behind summary");
-            check(errtxt &&
-                      strstr(errtxt, "tool replied, 1 lines, 6 bytes") !=
-                          NULL,
+            check(strstr(errtxt, "tool replied, 1 lines, 6 bytes") != NULL,
                   "agent mirror quiet: reply summary line");
         } else {
             /* verbose: everything renders whole */
-            check(errtxt && strstr(errtxt, "(helper) thinking thinking hard")
-                      != NULL,
+            check(strstr(errtxt, "(helper) thinking thinking hard") != NULL,
                   "agent mirror verbose: thinking text renders");
-            check(errtxt && strstr(errtxt, "<- echo:") != NULL,
+            check(strstr(errtxt, "<- echo:") != NULL,
                   "agent mirror verbose: reply body renders");
         }
         spawn_kill(&msp);
@@ -4065,7 +4062,7 @@ static void test_repl(void) {
         getcwd(after, sizeof after);
         check(strstr(after, "/test") != NULL,
               "repl: /cd moved the process cwd");
-        if (chdir(here)) ; /* back for the rest of the suite */
+        (void)chdir(here); /* back for the rest of the suite */
         repl_session_free(&r);
         call_cfg_free(&c);
 
