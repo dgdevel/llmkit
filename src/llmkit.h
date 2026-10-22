@@ -934,6 +934,9 @@ typedef struct repl_opts {
     bool helper_tool;           /* agent: attach the `helper` subagent -
                                    this same agent as one tool (the
                                    subagent's copy lacks it) */
+    bool deepwiki_tool;         /* agent: attach the free deepwiki server
+                                   through an mcp-proxy wrapper that
+                                   renames its tools */
 } repl_opts_t;
 
 /* run the chat session: records compiled from c, input lines from in_fd,
@@ -969,6 +972,18 @@ int repl_helper_build(const call_cfg_t *c, const char *system_prompt,
                       cJSON **srv_out);
 /* wipe the helper's temp files (safe when never built) */
 void repl_helper_cleanup(const char *seed_path, const char *cfg_path);
+/* build the deepwiki server's proxy config (a jsonl mcp-proxy file in a
+   temp path: the http upstream plus three renamed/described expose
+   records) and the session's `deepwiki` stdio server entry (never
+   required - a failed connect warns and the agent runs without it).
+   always returns EXIT_OK: a failed temp file degrades to no server */
+int repl_deepwiki_build(const char *exe_path, engine_t *e,
+                        char *cfg_path, size_t cfg_sz, cJSON **srv_out);
+/* wipe the deepwiki temp config (safe when never built) */
+void repl_deepwiki_cleanup(const char *cfg_path);
+/* pull --no-deepwiki out of the agent flag range, in place; returns 1
+   seen, 0 absent, -1 on a duplicate (err filled) */
+int repl_nodeepwiki_extract(int argc, char **argv, char *err, size_t errsz);
 
 /* ================= pretty.c ================= */
 

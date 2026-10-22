@@ -5100,6 +5100,81 @@ static void test_agent(void) {
         call_cfg_free(&c);
     }
 
+    /* ---- the bundled deepwiki server: builder shapes ---- */
+    {
+        engine_t *e = engine_new(NULL, NULL);
+        char cfgp[512] = "";
+        cJSON *srv = NULL;
+        check(repl_deepwiki_build("/bin", e, cfgp, sizeof cfgp, &srv) ==
+                  EXIT_OK,
+              "deepwiki: build ok");
+        check(srv != NULL, "deepwiki: server entry built");
+        check_str(rec_str(srv, "type"), "stdio",
+                  "deepwiki: the entry is a stdio server (the proxy)");
+        check_str(rec_str(srv, "name"), "deepwiki",
+                  "deepwiki: the entry is named deepwiki");
+        {
+            const char *cl = rec_str(srv, "command_line");
+            check(cl && strstr(cl, "mcp-proxy") != NULL,
+                  "deepwiki: the entry runs the mcp-proxy child");
+        }
+        check(rec_bool(srv, "required", true) == false,
+              "deepwiki: the entry is not required");
+        cJSON_Delete(srv);
+        engine_free(e);
+        /* the config: one http upstream, three renamed exposes with the
+           descriptions and argument descriptions */
+        {
+            char got[8192];
+            slurp_file(cfgp, got, sizeof got);
+            check(strstr(got, "\"type\":\"http\"") != NULL &&
+                      strstr(got, "https://mcp.deepwiki.com/mcp") != NULL,
+                  "deepwiki config: the http upstream");
+            check(strstr(got, "\"tool\":\"deepwiki-upstream."
+                              "read_wiki_structure\"") != NULL &&
+                      strstr(got, "\"name\":\"repo_topics\"") != NULL &&
+                      strstr(got, "\"name\":\"repo_info\"") != NULL &&
+                      strstr(got, "\"name\":\"repo_ask\"") != NULL,
+                  "deepwiki config: the three renames");
+            check(strstr(got, "\"description\":\"Ask question about repo\"")
+                          != NULL &&
+                      strstr(got, "owner/repo format") != NULL &&
+                      strstr(got, "\"question\":{\"description\":\"question "
+                                  "to ask\"}") != NULL,
+                  "deepwiki config: tool and argument descriptions");
+        }
+        repl_deepwiki_cleanup(cfgp);
+        {
+            FILE *f = fopen(cfgp, "r");
+            check(f == NULL, "deepwiki: config temp removed");
+            if (f) fclose(f);
+        }
+    }
+
+    /* ---- --no-deepwiki flag: extraction, compaction, errors ---- */
+    {
+        char *av[] = {"--openai", "http://x", "--no-deepwiki", "--model",
+                      "m"};
+        char err2[256] = "";
+        check(repl_nodeepwiki_extract(5, av, err2, sizeof err2) == 1,
+              "agent: --no-deepwiki extracted");
+        check_str(av[0], "--openai", "agent: --no-deepwiki compacts argv");
+        check_str(av[3], "m",
+                  "agent: --no-deepwiki keeps the rest in order");
+        char *av2[] = {"--openai", "http://x"};
+        check(repl_nodeepwiki_extract(2, av2, err2, sizeof err2) == 0,
+              "agent: no --no-deepwiki reports 0");
+        char *av3[] = {"--no-deepwiki", "--no-deepwiki"};
+        check(repl_nodeepwiki_extract(2, av3, err2, sizeof err2) == -1 &&
+                  strstr(err2, "given twice") != NULL,
+              "agent: --no-deepwiki twice is a usage error");
+        /* the repl surface does not know the flag either */
+        char *av4[] = {"--openai", "http://x", "--no-deepwiki"};
+        check(call_parse_ex(3, av4, &c, err, sizeof err, false) == 1 &&
+                  strstr(err, "unknown flag '--no-deepwiki'") != NULL,
+              "agent: --no-deepwiki is agent-only");
+    }
+
     /* ---- a session with the helper: the tools record gains the server,
        the spawn of the fake exe fails and renders connect_failed ---- */
     {
@@ -5122,6 +5197,68 @@ static void test_agent(void) {
               "helper: the turn still ran");
         repl_session_free(&r);
         call_cfg_free(&c);
+    }
+
+    /* ---- the bundled deepwiki server in a session: attached behind its
+       proxy, non-required - the fake exe fails to spawn, the warning
+       renders, the session runs on ---- */
+    {
+        fturn_t turns[] = {
+            { .recs = (const char *[]){
+                  "{\"type\":\"response\",\"text\":\"ok\",\"partial\":false}"},
+              .nrecs = 1, .kind = TURN_FINAL, .abort_after = -1 },
+        };
+        repl_opts_t o = { .default_prompt = prompt_system_prompts_agent,
+                          .builtin_mcp = true,
+                          .agents_md = true,
+                          .deepwiki_tool = true };
+        g_factory_wire = fwire_new(turns, 1);
+        repl_cfg(&c, PROTO_OPENAI);
+        repl_out_t r = repl_session_opt(&c, &o, "hi\n", 3);
+        check(r.rc == EXIT_OK, "deepwiki: session exits 0");
+        check(strstr(r.ob, "! connect_failed: mcp server 'deepwiki':") !=
+                  NULL,
+              "deepwiki: the server is attached behind its proxy (connect "
+              "attempted), the warning renders");
+        check(strstr(r.ob, "ok\n") != NULL,
+              "deepwiki: a failed connect does not stop the session");
+        repl_session_free(&r);
+        call_cfg_free(&c);
+    }
+
+    /* the same session with a user proxy already named deepwiki: the
+       bundled one steps aside (the proxy file's basename names its
+       server) */
+    {
+        char dwproxyp[] = "/tmp/llmkit-test-agent/deepwiki.jsonl";
+        FILE *f = fopen(dwproxyp, "w");
+        if (f) {
+            fputs("{\"type\":\"tools\",\"tools\":[{\"type\":\"stdio\","
+                  "\"name\":\"deepwiki\",\"command_line\":\"true\"}]}\n",
+                  f);
+            fclose(f);
+        }
+        fturn_t turns[] = {
+            { .recs = (const char *[]){ 
+                  "{\"type\":\"response\",\"text\":\"ok\",\"partial\":false}"},
+              .nrecs = 1, .kind = TURN_FINAL, .abort_after = -1 },
+        };
+        char *av[] = {"--openai", "http://x", "--mcp-proxy", dwproxyp};
+        check(call_parse_ex(4, av, &c, err, sizeof err, false) == 0,
+              "deepwiki: the own proxy vector parses");
+        repl_opts_t o = { .default_prompt = prompt_system_prompts_agent,
+                          .builtin_mcp = true,
+                          .agents_md = true,
+                          .deepwiki_tool = true };
+        g_factory_wire = fwire_new(turns, 1);
+        repl_out_t r = repl_session_opt(&c, &o, "hi\n", 3);
+        check(r.rc == EXIT_OK, "deepwiki: skip session exits 0");
+        check(strstr(r.ob, "a server named 'deepwiki' already exists: the "
+                           "bundled deepwiki server is skipped") != NULL,
+              "deepwiki: the bundled server steps aside for a user's own");
+        repl_session_free(&r);
+        call_cfg_free(&c);
+        unlink(dwproxyp);
     }
 
     /* ---- the conversation store: append, byte-exact records ---- */

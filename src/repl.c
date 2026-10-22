@@ -614,6 +614,96 @@ void repl_helper_cleanup(const char *seed_path, const char *cfg_path) {
     if (cfg_path && *cfg_path) remove(cfg_path);
 }
 
+/* the free deepwiki server: one jsonl mcp-proxy config (an http
+   upstream plus three expose records) in a temp file, plus the stdio
+   server entry that runs it. exposes rename its tools per the bundled
+   descriptor: repo_topics/repo_info/repo_ask with argument
+   descriptions. failure is never fatal here: the entry carries
+   required:false, and the build itself only fails when no temp file
+   can be made - then the agent simply runs without the server */
+int repl_deepwiki_build(const char *exe_path, engine_t *e,
+                        char *cfg_path, size_t cfg_sz, cJSON **srv_out) {
+    *srv_out = NULL;
+    *cfg_path = '\0';
+    FILE *cfg = repl_mktemp(cfg_path, cfg_sz);
+    if (!cfg) {
+        engine_emit_record(
+            e, rec_error(EC_IO_ERROR,
+                         "cannot prepare the deepwiki server: the config "
+                         "temp file failed",
+                         false));
+        return EXIT_OK; /* degraded: no server, the session lives */
+    }
+    /* the upstream: streamable http, mcp.deepwiki.com */
+    cJSON *tools = cJSON_CreateObject();
+    cJSON_AddStringToObject(tools, "type", "tools");
+    cJSON *arr = cJSON_AddArrayToObject(tools, "tools");
+    cJSON *up = cJSON_CreateObject();
+    cJSON_AddStringToObject(up, "type", "http");
+    cJSON_AddStringToObject(up, "name", "deepwiki-upstream");
+    cJSON_AddStringToObject(up, "url", "https://mcp.deepwiki.com/mcp");
+    cJSON_AddItemToArray(arr, up);
+    write_jsonl_line(cfg, tools);
+    cJSON_Delete(tools);
+    /* the exposes: upstream tool -> renamed with a fresh description */
+    static const struct {
+        const char *tool, *name, *desc, *arg, *argdesc;
+    } ex[] = {
+        { "read_wiki_structure", "repo_topics",
+          "List of topics for a GitHub repo",
+          "repoName", "GitHub repo in owner/repo format" },
+        { "read_wiki_contents", "repo_info",
+          "Extensive info about GitHub repo",
+          "repoName", "GitHub repo in owner/repo format" },
+        { "ask_question", "repo_ask",
+          "Ask question about repo",
+          "repoName", "GitHub repo in owner/repo format" },
+    };
+    for (size_t i = 0; i < sizeof ex / sizeof ex[0]; i++) {
+        cJSON *er = cJSON_CreateObject();
+        cJSON_AddStringToObject(er, "type", "expose");
+        char sel[128];
+        snprintf(sel, sizeof sel, "deepwiki-upstream.%s", ex[i].tool);
+        cJSON_AddStringToObject(er, "tool", sel);
+        cJSON_AddStringToObject(er, "name", ex[i].name);
+        cJSON_AddStringToObject(er, "description", ex[i].desc);
+        cJSON *args = cJSON_AddObjectToObject(er, "arguments");
+        cJSON *a1 = cJSON_CreateObject();
+        cJSON_AddStringToObject(a1, "description", ex[i].argdesc);
+        cJSON_AddItemToObject(args, ex[i].arg, a1);
+        if (!strcmp(ex[i].tool, "ask_question")) { /* the second argument */
+            cJSON *a2 = cJSON_CreateObject();
+            cJSON_AddStringToObject(a2, "description",
+                                    "question to ask");
+            cJSON_AddItemToObject(args, "question", a2);
+        }
+        write_jsonl_line(cfg, er);
+        cJSON_Delete(er);
+    }
+    fclose(cfg);
+    /* the session's tools entry: the proxy as the `deepwiki` server,
+       not required - offline (or a blocked endpoint) degrades to a
+       warning line and a session without the server */
+    cJSON *srv = cJSON_CreateObject();
+    cJSON_AddStringToObject(srv, "type", "stdio");
+    cJSON_AddStringToObject(srv, "name", "deepwiki");
+    buf_t cl;
+    buf_init(&cl);
+    call_shell_quote(&cl, exe_path);
+    buf_append_str(&cl, " mcp-proxy ");
+    call_shell_quote(&cl, cfg_path);
+    cJSON_AddStringToObject(srv, "command_line", cl.data);
+    buf_free(&cl);
+    cJSON_AddBoolToObject(srv, "required", false);
+    *srv_out = srv;
+    return EXIT_OK;
+}
+
+/* wipe the deepwiki temp config (safe when never built) */
+void repl_deepwiki_cleanup(const char *cfg_path) {
+    if (cfg_path && *cfg_path) remove(cfg_path);
+}
+
 /* ================= session ================= */
 
 /* ================= slash commands ================= */
@@ -1127,6 +1217,7 @@ int repl_run_ex(const call_cfg_t *c, const repl_opts_t *o, int in_fd,
     style_t st;
     style_probe(&st, out);
     char helper_seed[512] = "", helper_cfg[512] = "";
+    char deepwiki_cfg[512] = "";
     repl_sink_t sink;
     memset(&sink, 0, sizeof sink);
     sink.d.out = out;
@@ -1251,6 +1342,52 @@ int repl_run_ex(const call_cfg_t *c, const repl_opts_t *o, int in_fd,
         }
         engine_apply_config_record(e, tools);
         cJSON_Delete(tools);
+    }
+    if (o->deepwiki_tool) {
+        /* the free deepwiki server: wrapped in an mcp-proxy child that
+           renames its tools (repo_topics/repo_info/repo_ask). skipped
+           whole when a server of that name already exists (a
+           --mcp-proxy config may carry its own). non-required: a
+           failed connect renders a warning, the session continues */
+        cJSON *cur = e->tools_cfg
+                         ? cJSON_GetObjectItemCaseSensitive(e->tools_cfg,
+                                                            "tools")
+                         : NULL;
+        bool taken = false;
+        if (cJSON_IsArray(cur))
+            for (const cJSON *s = cur->child; s && !taken; s = s->next)
+                if (!strcmp(rec_str(s, "name"), "deepwiki")) taken = true;
+        if (taken) {
+            engine_emit_record(
+                e, rec_error(EC_INVALID_RECORD,
+                             "a server named 'deepwiki' already exists: the "
+                             "bundled deepwiki server is skipped",
+                             false));
+        } else {
+            cJSON *dw = NULL;
+            rc = repl_deepwiki_build(exe_path, e, deepwiki_cfg,
+                                     sizeof deepwiki_cfg, &dw);
+            if (rc) goto done;
+            if (dw) {
+                cJSON *tools =
+                    e->tools_cfg
+                        ? cJSON_Duplicate(e->tools_cfg, 1)
+                        : cJSON_Parse("{\"type\":\"tools\",\"tools\":[]}");
+                cJSON_AddItemToArray(
+                    cJSON_GetObjectItemCaseSensitive(tools, "tools"), dw);
+                char *m = validate_tools(tools);
+                if (m) {
+                    engine_emit_record(e, rec_error(EC_INVALID_RECORD, m,
+                                                    true));
+                    free(m);
+                    cJSON_Delete(tools);
+                    rc = EXIT_INVALID_RECORD;
+                    goto done;
+                }
+                engine_apply_config_record(e, tools);
+                cJSON_Delete(tools);
+            }
+        }
     }
     if (o->helper_tool) {
         /* the helper subagent: this same agent as one `helper(prompt)`
@@ -1445,6 +1582,7 @@ done:
     }
     engine_free(e); /* process teardown: the mcp children die here */
     repl_helper_cleanup(helper_seed, helper_cfg);
+    repl_deepwiki_cleanup(deepwiki_cfg);
     if (sink.d.io_fail) rc = EXIT_OUT_OF_CHANNEL;
     return rc;
 }
@@ -1545,6 +1683,25 @@ int repl_nohelper_extract(int argc, char **argv, char *err, size_t errsz) {
     return seen ? 1 : 0;
 }
 
+/* pull --no-deepwiki out of the agent flag range, in place; returns 1
+   when seen, 0 when absent, -1 on a duplicate (err filled) */
+int repl_nodeepwiki_extract(int argc, char **argv, char *err, size_t errsz) {
+    bool seen = false;
+    int n = 0;
+    for (int i = 0; i < argc; i++) {
+        if (!strcmp(argv[i], "--no-deepwiki")) {
+            if (seen) {
+                snprintf(err, errsz, "--no-deepwiki given twice");
+                return -1;
+            }
+            seen = true;
+            continue;
+        }
+        argv[n++] = argv[i];
+    }
+    return seen ? 1 : 0;
+}
+
 static void agent_usage(FILE *out) {
     fputs("usage: llmkit agent (--anthropic|--openai|--openai-responses) "
           "<api_base>\n"
@@ -1556,7 +1713,8 @@ static void agent_usage(FILE *out) {
           "                [--mcp-proxy <config>]... "
           "[--terminal-tool <name.tool>]...\n"
           "                [--conversation-store <file>] [--verbose] "
-          "[--no-helper]\n",
+          "[--no-helper]\n"
+          "                [--no-deepwiki]\n",
           out);
 }
 
@@ -1575,6 +1733,11 @@ int cmd_agent_repl(int argc, char **argv) {
             n = -1;
         else {
             n -= h; /* the flag compacted away when seen */
+            int w = repl_nodeepwiki_extract(n, argv + 2, err, sizeof err);
+            if (w < 0)
+                n = -1;
+            else {
+            n -= w; /* the deepwiki flag compacted away when seen */
             int v = repl_verbose_extract(n, argv + 2, err, sizeof err);
             if (v < 0)
                 n = -1;
@@ -1600,13 +1763,17 @@ int cmd_agent_repl(int argc, char **argv) {
                                       .trim_args = v != 1,
                                       /* the helper subagent rides along
                                          unless --no-helper */
-                                      .helper_tool = h != 1 };
+                                      .helper_tool = h != 1,
+                                      /* the bundled deepwiki server rides
+                                         along unless --no-deepwiki */
+                                      .deepwiki_tool = w != 1 };
                     int rc = repl_run_ex(&c, &o, STDIN_FILENO, stdout, exe,
                                          NULL);
                     call_cfg_free(&c);
                     return rc;
                 }
             }
+        }
         }
     }
     fprintf(stderr, "llmkit agent: %s\n", err);

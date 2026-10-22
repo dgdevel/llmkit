@@ -193,6 +193,14 @@ The `call` and `repl` commands share one hand-rolled flag parser, without getopt
   only: full tool traffic (in the session and its helper subagent's
   mirror), a persistent jsonl conversation, and leaving the `helper`
   subagent tool out.
+- `--no-deepwiki` - `agent` only: leave the bundled deepwiki server
+  out. By default the agent connects to the free `mcp.deepwiki.com`
+  server on start, wrapped in an `llmkit mcp-proxy` child that renames
+  its tools (`repo_topics`, `repo_info`, `repo_ask`) and rewrites their
+  descriptions. The server is not required: when the connection fails
+  the session renders a warning line and runs without it. A
+  `--mcp-proxy` config whose server is already named `deepwiki` takes
+  the name - the bundled server steps aside.
 
 `mcp-repl` has its own flags. Exactly one transport flag is required:
 
