@@ -94,6 +94,14 @@ A file counts as textual when it holds no NUL bytes and is strict utf-8. Everyth
 
 A walk that matches nothing (an unreadable `path` aside) is a plain success: `No files or directory match the requested filters`. `files_search` answers the same sentence when no line matched anywhere.
 
+More than 30 lines and the reply stops at the first 30, closing with a count line:
+
+```
+${total} Matches, only first 30 displayed, refine filters if needed
+```
+
+The walk still visits the whole tree - the count is the true total. `files_search` counts one line per matching file (the entry plus its `Matching lines:` line are one unit).
+
 ### files_search(path, regex, show_hidden_files=false)
 
 Same walk as `files_list` with `recurse_subdirectories` set, but the regex matches line *content*. Every textual file under `path` (16Mb cap per file) whose lines match is listed with the matching line numbers, comma separated. Dot-prefixed (hidden) files are read when `show_hidden_files` is true; hidden directories are never descended into - naming one as `path` searches inside it:

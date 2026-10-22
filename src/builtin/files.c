@@ -13,6 +13,11 @@ static int cmp_names(const void *a, const void *b) {
     return bm_cmp_names(a, b);
 }
 
+/* the reply's entry cap: the first 30 lines render, a count line
+   reports the rest (the full tree is not hidden, the filters are the
+   way in). the headstart listing runs uncapped */
+#define BM_LIST_CAP 30
+
 /* ---- listing walk ---- */
 
 typedef struct walk_ctx {
@@ -21,7 +26,19 @@ typedef struct walk_ctx {
     bool content; /* files_search: pattern matches content lines */
     bool recurse; /* descend into subdirectories */
     bool hidden;  /* show_hidden_files: keep dot-prefixed entries */
+    bool cap;     /* apply BM_LIST_CAP (the tool calls; not headstart) */
+    size_t shown; /* lines written so far */
+    size_t total; /* every line the walk would have written */
 } walk_ctx_t;
+
+/* one reply line under the cap: counts every would-be line, allows
+   the write only while the budget holds */
+static bool line_budget(walk_ctx_t *w) {
+    w->total++;
+    if (w->cap && w->shown >= BM_LIST_CAP) return false; /* cut */
+    w->shown++;
+    return true;
+}
 
 static void entry_line(buf_t *out, const char *path, const struct stat *st,
                        unsigned long long lines, bool has_lines) {
@@ -45,7 +62,7 @@ static void emit_entry(walk_ctx_t *w, const char *path,
                        const struct stat *st) {
     if (!w->content && !bm_rx_match(&w->rx, path, strlen(path))) return;
     if (S_ISDIR(st->st_mode)) {
-        if (!w->content) entry_line(w->out, path, st, 0, false);
+        if (!w->content && line_budget(w)) entry_line(w->out, path, st, 0, false);
         return;
     }
     if (w->content) {
@@ -89,7 +106,7 @@ static void emit_entry(walk_ctx_t *w, const char *path,
             }
             nlines++;
         }
-        if (any) {
+        if (any && line_budget(w)) {
             entry_line(w->out, path, st, nlines, true);
             buf_appendf(w->out, "Matching lines: %s\n", nums.data ? nums.data : "");
         }
@@ -98,6 +115,7 @@ static void emit_entry(walk_ctx_t *w, const char *path,
         return;
     }
     tscan_t ts = bm_scan_text(path, BM_FILE_CAP);
+    if (!line_budget(w)) return;
     entry_line(w->out, path, st, ts.lines, ts.ok && ts.textual);
 }
 
@@ -167,7 +185,7 @@ char *builtin_headstart_listing(void) {
         buf_free(&out);
         return NULL;
     }
-    walk_ctx_t w = { &out, rx, false, false, true };
+    walk_ctx_t w = { &out, rx, false, false, true, false, 0, 0 };
     char err[256] = "";
     bool ok = walk_start(&w, ".", err, sizeof err);
     regfree(&rx);
@@ -229,7 +247,7 @@ static void tool_files(const cJSON *args, buf_t *out, bool *is_error,
         *is_error = true;
         return;
     }
-    walk_ctx_t w = { out, rx, content, recurse, hidden };
+    walk_ctx_t w = { out, rx, content, recurse, hidden, true, 0, 0 };
     char werr[256] = "";
     bool ok = walk_start(&w, path, werr, sizeof werr);
     regfree(&rx);
@@ -238,9 +256,13 @@ static void tool_files(const cJSON *args, buf_t *out, bool *is_error,
         buf_clear(out);
         buf_appendf(out, "%s", werr);
         *is_error = true;
-    } else if (!out->len) {
+    } else if (!w.total) {
         buf_clear(out);
         buf_append_str(out, "No files or directory match the requested filters");
+    } else if (w.total > w.shown) {
+        buf_appendf(out, "%zu Matches, only first %d displayed, refine "
+                         "filters if needed\n",
+                    w.total, BM_LIST_CAP);
     }
 }
 

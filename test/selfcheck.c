@@ -2111,6 +2111,36 @@ static void test_builtin(void) {
                                  "filters"),
           "builtin: files_list with no match answers a message");
     free(t);
+    /* more than 30 lines: the reply stops at 30 with the true total */
+    {
+        check(system("rm -rf /tmp/llmkit-test-builtin/cap && mkdir -p "
+                     "/tmp/llmkit-test-builtin/cap") == 0,
+              "builtin: cap fixtures made");
+        for (int i = 0; i < 35; i++) {
+            char p[128];
+            snprintf(p, sizeof p,
+                     "/tmp/llmkit-test-builtin/cap/f%02d.txt", i);
+            write_file(p, "x\n");
+        }
+        t = bc_call("files_list", "{\"path\":\"/tmp/llmkit-test-builtin/"
+                                  "cap\",\"regex\":\"f\"}", &ie);
+        check(!ie && t && strstr(t, "f34.txt") == NULL &&
+                  strstr(t, "f30.txt") == NULL &&
+                  strstr(t, "f29.txt") != NULL &&
+                  strstr(t, "35 Matches, only first 30 displayed, refine "
+                            "filters if needed") != NULL,
+              "builtin: files_list caps at 30 with the total count");
+        free(t);
+        /* files_search caps too: one line per matching file */
+        t = bc_call("files_search", "{\"path\":\"/tmp/llmkit-test-builtin/"
+                                    "cap\",\"regex\":\"^x$\"}", &ie);
+        check(!ie && t && strstr(t, "35 Matches, only first 30 displayed, "
+                                    "refine filters if needed") != NULL,
+              "builtin: files_search caps at 30 with the total count");
+        free(t);
+        check(system("rm -rf /tmp/llmkit-test-builtin/cap") == 0,
+              "builtin: cap fixtures cleaned");
+    }
     t = bc_call("files_list", "{\"path\":\"/tmp/llmkit-test-builtin\","
                               "\"regex\":\"deep\","
                               "\"recurse_subdirectories\":true}", &ie);
