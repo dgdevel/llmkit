@@ -1,1 +1,1 @@
-Run a command line, long running get backgrounded
+Run a command line, long running get backgrounded, get stdout and stderr
