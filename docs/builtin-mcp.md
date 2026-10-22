@@ -92,6 +92,8 @@ rwx 4Kb ./path/to/directory
 
 A file counts as textual when it holds no NUL bytes and is strict utf-8. Everything else (including oversized files, over 64Mb) is listed without the line count.
 
+A walk that matches nothing (an unreadable `path` aside) is a plain success: `No files or directory match the requested filters`. `files_search` answers the same sentence when no line matched anywhere.
+
 ### files_search(path, regex, show_hidden_files=false)
 
 Same walk as `files_list` with `recurse_subdirectories` set, but the regex matches line *content*. Every textual file under `path` (16Mb cap per file) whose lines match is listed with the matching line numbers, comma separated. Dot-prefixed (hidden) files are read when `show_hidden_files` is true; hidden directories are never descended into - naming one as `path` searches inside it:

@@ -155,10 +155,12 @@ static bool walk_start(walk_ctx_t *w, const char *root, char *err,
 /* the agent's head start: the first listing the model would otherwise
    call for - files_list(".", ".*", false, true), the working
    directory's entries, hidden ones included (their marker says which
-   hold more). malloc'd text, NULL when the directory cannot be read */
+   hold more), under a one-line header. malloc'd text, NULL when the
+   directory cannot be read */
 char *builtin_headstart_listing(void) {
     buf_t out;
     buf_init(&out);
+    buf_append_str(&out, "Content of current working directory\n");
     regex_t rx;
     char rxerr[128] = ""; /* ".*" cannot fail, the slot is a safety net */
     if (!bm_rx_compile(&rx, ".*", rxerr, sizeof rxerr)) {
@@ -169,7 +171,8 @@ char *builtin_headstart_listing(void) {
     char err[256] = "";
     bool ok = walk_start(&w, ".", err, sizeof err);
     regfree(&rx);
-    if (!ok || !out.len) {
+    size_t head = strlen("Content of current working directory\n");
+    if (!ok || out.len <= head) {
         buf_free(&out);
         return ok ? strdup("(empty directory)") : NULL;
     }
@@ -235,6 +238,9 @@ static void tool_files(const cJSON *args, buf_t *out, bool *is_error,
         buf_clear(out);
         buf_appendf(out, "%s", werr);
         *is_error = true;
+    } else if (!out->len) {
+        buf_clear(out);
+        buf_append_str(out, "No files or directory match the requested filters");
     }
 }
 

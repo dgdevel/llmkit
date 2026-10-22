@@ -2103,6 +2103,14 @@ static void test_builtin(void) {
     check(!ie && t && !strstr(t, "deep.txt"),
           "builtin: files_list stays on the top level by default");
     free(t);
+    /* a walk that keeps nothing still answers a plain sentence, not
+       empty air */
+    t = bc_call("files_list", "{\"path\":\"/tmp/llmkit-test-builtin\","
+                              "\"regex\":\"nothing-matches-this\"}", &ie);
+    check(!ie && t && !strcmp(t, "No files or directory match the requested "
+                                 "filters"),
+          "builtin: files_list with no match answers a message");
+    free(t);
     t = bc_call("files_list", "{\"path\":\"/tmp/llmkit-test-builtin\","
                               "\"regex\":\"deep\","
                               "\"recurse_subdirectories\":true}", &ie);
@@ -4892,9 +4900,11 @@ static void test_agent(void) {
                listing and ends before the AGENTS.md prefix */
             const char *ls = strstr(g_seen_system, "plain.txt");
             const char *dot = strstr(g_seen_system, ".dotdir/");
+            const char *hdr =
+                strstr(g_seen_system, "Content of current working directory\n");
             const char *ag =
                 strstr(g_seen_system, "##### Content of AGENTS.md #####");
-            check(ls && dot && ag && ls < ag && dot < ag &&
+            check(ls && dot && ag && hdr && hdr < ls && ls < ag && dot < ag &&
                       !strstr(g_seen_system, "inner.txt") &&
                       strstr(g_seen_system, ".dotdir/ (files inside)\n"),
                   "agent: headstart lists the working directory, dot dirs "
