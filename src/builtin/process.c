@@ -20,12 +20,14 @@
    but partial-line interleave at the boundary is accepted), a detached
    reader stamps each line "HH:MM:SS: STDOUT: " or "HH:MM:SS: STDERR: "
    per source pipe, appends it to a per-process temp file and rotates
-   a three-line tail. */
+   a three-line tail. The reply quotes at most three leading and three
+   trailing lines, each cut at 150 bytes (utf-8 safe) with a note. */
 
 #define BM_PROC_WAIT_MS 10000  /* process_exec completion wait */
 #define BM_PROC_WAIT_MAX_S 600 /* process_wait timeout ceiling, seconds */
 #define BM_PROC_TAIL 3         /* lines quoted in the reply */
 #define BM_PROC_HEAD 3         /* leading lines quoted in the reply */
+#define BM_PROC_QUOTE 150      /* bytes of a quoted line before a cut */
 #define BM_PROC_LINE_CAP 65536 /* one line's byte cap (newline floods) */
 
 typedef struct proc_rec {
@@ -511,6 +513,22 @@ static void proc_reap(proc_rec_t *p) {
 
 #endif
 
+/* one quoted line, capped at BM_PROC_QUOTE bytes; a cut at a utf-8
+   seam would corrupt the json string, so it steps back to whole
+   characters */
+static void proc_quote(buf_t *out, const char *line, bool *cut) {
+    size_t n = strlen(line);
+    if (n <= BM_PROC_QUOTE) {
+        buf_append_str(out, line);
+        return;
+    }
+    size_t end = BM_PROC_QUOTE;
+    while (end > 0 && ((unsigned char)line[end] & 0xC0) == 0x80)
+        end--; /* back onto the start byte of the character */
+    buf_append(out, line, end);
+    *cut = true;
+}
+
 /* the shared reply body: state line, quoted output, temp file,
    advice */
 static void proc_report(buf_t *out, proc_rec_t *p) {
@@ -523,8 +541,9 @@ static void proc_report(buf_t *out, proc_rec_t *p) {
         buf_appendf(out, "PID %ld is still running.\n", p->pid);
     }
     buf_append_str(out, "First and last three output lines:\n");
+    bool cut = false;
     for (int i = 0; i < p->nhead; i++) {
-        buf_append_str(out, p->head[i]);
+        proc_quote(out, p->head[i], &cut);
         buf_append_byte(out, '\n');
     }
     /* short output: head and tail overlap, so each line prints once */
@@ -534,10 +553,14 @@ static void proc_report(buf_t *out, proc_rec_t *p) {
     else if (p->nhead + p->ntail > (int)p->nlines)
         skip = p->nhead + p->ntail - (int)p->nlines;
     for (int i = skip; i < p->ntail; i++) {
-        buf_append_str(out, p->tail[i]);
+        proc_quote(out, p->tail[i], &cut);
         buf_append_byte(out, '\n');
     }
-    if (p->nlines > (unsigned)BM_PROC_HEAD + (unsigned)BM_PROC_TAIL) {
+    if (cut)
+        buf_appendf(out,
+                    "Output was cut at 150 characters, see full output "
+                    "file for full data\n");
+    if (cut || p->nlines > (unsigned)BM_PROC_HEAD + (unsigned)BM_PROC_TAIL) {
         /* "currently" only makes sense while output can still grow */
         buf_appendf(out, "Process output available in %s (%s%llu lines)\n",
                     p->out_path ? p->out_path : "?",

@@ -187,9 +187,13 @@ First and last three output lines:
 Use process_status or process_wait.
 ```
 
-`First and last three output lines` carries whatever the process printed so far: the first three lines, `[...]`, the last three. A process with six lines or fewer is quoted whole. Head and tail overlap there, so each line prints once and no `[...]` appears. Each line is stamped with its stream.
+`First and last three output lines` carries whatever the process printed so far: the first three lines, `[...]`, the last three. A process with six lines or fewer is quoted whole. Head and tail overlap there, so each line prints once and no `[...]` appears. Each line is stamped with its stream. A quoted line longer than 150 bytes is cut at that width (never mid-utf-8-character) and one note follows the quote:
 
-The full stamped output is appended to one temp file per process (`$TMPDIR`, else `/tmp`, on posix. The user temp dir on windows) for the lifetime of the server. Once more than six lines exist, the reply names it:
+```
+Output was cut at 150 characters, see full output file for full data
+```
+
+The full stamped output is appended to one temp file per process (`$TMPDIR`, else `/tmp`, on posix. The user temp dir on windows) for the lifetime of the server. Once more than six lines exist, or any quoted line was cut, the reply names it:
 
 ```
 Process output available in ${path} (currently ${n} lines)

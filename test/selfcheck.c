@@ -2457,6 +2457,19 @@ static void test_builtin(void) {
           "builtin: process_exec separates stdout and stderr stamps");
     free(t);
 
+    /* a long line is quoted cut at 150 characters, the note follows,
+       and the temp file is named even though only one line exists */
+    t = bc_call("process_exec",
+                "{\"cmdline\":"
+                "\"printf '%0.sx' $(seq 1 200); echo\"}",
+                &ie);
+    check(!ie && t && strstr(t, "Output was cut at 150 characters") &&
+              strstr(t, "see full output file for full data") &&
+              strstr(t, "Process output available in") &&
+              strstr(t, "(1 lines)"),
+          "builtin: process_exec long line is cut with a note");
+    free(t);
+
     /* the recap carries the lifetime: 0.4s sleep, duration in range,
        and a fast one stays under a tenth */
     t = bc_call("process_exec",
