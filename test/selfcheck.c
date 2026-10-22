@@ -4909,6 +4909,13 @@ static void test_agent(void) {
                       strstr(g_seen_system, ".dotdir/ (files inside)\n"),
                   "agent: headstart lists the working directory, dot dirs "
                   "marked, not descended; AGENTS.md still follows");
+            /* the shell shows the listing as the files_list call it
+               stands for: request line then the reply text */
+            const char *rq = strstr(r.ob, "files_list {\"path\":\".\","
+                                          "\"regex\":\".*\"");
+            check(rq && strstr(r.ob, "Content of current working directory\n") &&
+                      strstr(r.ob, "plain.txt"),
+                  "agent: headstart renders as a files_list call");
         }
         repl_session_free(&r);
         call_cfg_free(&c);

@@ -997,6 +997,23 @@ static int slash_models(slash_state_t *sl, engine_t *e) {
     return 0;
 }
 
+/* the headstart's display twin: the listing is a system block, not a
+   transcript tool call, but the shell shows it as the files_list call
+   it stands for - request line then reply text, brief style. display
+   only: no record reaches the engine, the store, or the transcript */
+static void headstart_show(dspy_t *d, const char *ls) {
+    cJSON *args = cJSON_Parse(
+        "{\"path\":\".\",\"regex\":\".*\",\"show_hidden_files\":true}");
+    cJSON *req = rec_tool_request("files_list", args, "headstart");
+    dspy_tool_request(d, req);
+    cJSON *resp = rec_tool_response("headstart", ls, false);
+    dspy_brief_count(d, resp);
+    dspy_tool_response(d, resp);
+    cJSON_Delete(args);
+    cJSON_Delete(req);
+    cJSON_Delete(resp);
+}
+
 /* `/new`: drop the conversation, start fresh like a boot. the model
    keeps the session's llm (and model) and tool children - what clears
    is the transcript and the system blocks the boot wrote (the
@@ -1027,6 +1044,7 @@ static int slash_new(slash_state_t *sl, engine_t *e) {
     if (sl->o->headstart) {
         char *ls = builtin_headstart_listing();
         if (ls) {
+            headstart_show(d, ls);
             int rc = system_append_block(e, NULL, ls);
             free(ls);
             if (rc) return 1;
@@ -1208,6 +1226,7 @@ int repl_run_ex(const call_cfg_t *c, const repl_opts_t *o, int in_fd,
            is, the model lists on its own */
         char *ls = builtin_headstart_listing();
         if (ls) {
+            headstart_show(&sink.d, ls);
             rc = system_append_block(e, cfg.system, ls);
             free(ls);
             if (rc) goto done;
