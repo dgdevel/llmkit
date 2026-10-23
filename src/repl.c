@@ -671,7 +671,7 @@ int repl_deepwiki_build(const char *exe_path, engine_t *e,
         cJSON *a1 = cJSON_CreateObject();
         cJSON_AddStringToObject(a1, "description", ex[i].argdesc);
         cJSON_AddItemToObject(args, ex[i].arg, a1);
-        if (!strcmp(ex[i].tool, "ask_question")) { /* the second argument */
+        if (!strcmp(ex[i].tool, "ask_wiki_question")) { /* the second arg */
             cJSON *a2 = cJSON_CreateObject();
             cJSON_AddStringToObject(a2, "description",
                                     "question to ask, in natural language");

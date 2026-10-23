@@ -5170,7 +5170,7 @@ static void test_agent(void) {
                           != NULL &&
                       strstr(got, "owner/repo format") != NULL &&
                       strstr(got, "\"question\":{\"description\":\"question "
-                                  "to ask\"}") != NULL,
+                                  "to ask, in natural language\"}") != NULL,
                   "deepwiki config: tool and argument descriptions");
         }
         repl_deepwiki_cleanup(cfgp);
