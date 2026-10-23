@@ -655,7 +655,7 @@ int repl_deepwiki_build(const char *exe_path, engine_t *e,
         { "read_wiki_contents", "repo_info",
           "Extensive info about GitHub repo",
           "repoName", "GitHub repo in owner/repo format" },
-        { "ask_question", "repo_ask",
+        { "ask_wiki_question", "repo_ask",
           "Ask question about repo",
           "repoName", "GitHub repo in owner/repo format" },
     };
@@ -674,7 +674,7 @@ int repl_deepwiki_build(const char *exe_path, engine_t *e,
         if (!strcmp(ex[i].tool, "ask_question")) { /* the second argument */
             cJSON *a2 = cJSON_CreateObject();
             cJSON_AddStringToObject(a2, "description",
-                                    "question to ask");
+                                    "question to ask, in natural language");
             cJSON_AddItemToObject(args, "question", a2);
         }
         write_jsonl_line(cfg, er);
