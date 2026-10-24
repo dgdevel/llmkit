@@ -213,6 +213,9 @@ int call_parse_ex(int argc, char **argv, call_cfg_t *c, char *err,
                     goto fail;
                 }
             }
+            /* every branch above has copied v out of argv: hide the
+               secret ones from the process list (ps/htop) */
+            argv_mask_secret(a, argv[i]);
         } else if (a[0] == '-' && a[1] == '-') {
             usage_err(err, errsz, "unknown flag '%s'", a);
             goto fail;

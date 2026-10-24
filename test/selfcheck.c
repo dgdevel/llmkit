@@ -3454,9 +3454,11 @@ static void test_call(void) {
     char err[256];
     buf_t b;
 
-    /* parse: the full vector, exact llm serialization */
+    /* parse: the full vector, exact llm serialization. argv_mask_secret
+       overwrites the --key element in place, so it must be writable */
     {
-        char *av[] = {"--anthropic", "http://x/v1", "--key", "k",
+        char kv[] = "k";
+        char *av[] = {"--anthropic", "http://x/v1", "--key", kv,
                       "--model", "m", "--max-tokens", "1024",
                       "--system-prompt", "sys",
                       "--header", "a=1", "--header", "b=2",
@@ -3529,6 +3531,45 @@ static void test_call(void) {
         check(c.protocol == PROTO_RESPONSES, "call: responses mapping");
         check(c.nhdrs == 1 && !strcmp(c.hdr_values[0], "2"),
               "call: later --header replaces the earlier");
+        call_cfg_free(&c);
+    }
+
+    /* argv masking: --key and key/password/token-named --header values
+       are overwritten in place after the parser copied them; other
+       headers keep their bytes (ps/htop read the same memory) */
+    {
+        char k[] = "sk-secret";
+        char h1[] = "X-Api-Key=hush";
+        char h2[] = "X-Auth-Token=tok";
+        char h3[] = "trace-id=keep";
+        char h4[] = "Authorization=Bearer sk-hush";
+        argv_mask_secret("--key", k);
+        argv_mask_secret("--header", h1);
+        argv_mask_secret("--header", h2);
+        argv_mask_secret("--header", h3);
+        argv_mask_secret("--header", h4);
+        check_str(k, "*********", "mask: --key fully overwritten");
+        check_str(h1, "X-Api-Key=****", "mask: key header value only");
+        check_str(h2, "X-Auth-Token=***", "mask: token header value only");
+        check_str(h3, "trace-id=keep",
+                  "mask: plain header left untouched");
+        check_str(h4, "Authorization=**************",
+                  "mask: authorization header value only");
+
+        /* writable copies: argv_mask_secret writes into the vector, and
+           string literals would sit in read-only memory */
+        char w0[] = "--anthropic", w1[] = "http://x/v1", w2[] = "--key",
+             w3[] = "sk-secret", w4[] = "--header",
+             w5[] = "X-Api-Key=hush", w6[] = "--prompt", w7[] = "p";
+        char *av[] = {w0, w1, w2, w3, w4, w5, w6, w7};
+        check(call_parse((int)(sizeof av / sizeof av[0]), av, &c, err,
+                         sizeof err) == 0,
+              "mask: vector with secrets parses");
+        check_str(c.key, "sk-secret", "mask: key copied before masking");
+        check(c.nhdrs == 1 && !strcmp(c.hdr_values[0], "hush"),
+              "mask: header copied before masking");
+        check_str(av[3], "*********", "mask: argv key element masked");
+        check_str(av[5], "X-Api-Key=****", "mask: argv header masked");
         call_cfg_free(&c);
     }
 
@@ -3640,7 +3681,8 @@ static void test_call(void) {
                        "--mcp-proxy", "/b/x.jsonl", "--prompt", "p"};
         check(call_parse(8, e10, &c, err, sizeof err) == 1,
               "call: repeated proxy server name");
-        char *e11[] = {"--openai", "http://x", "--key", "a", "--key", "b",
+        char k1[] = "a";
+        char *e11[] = {"--openai", "http://x", "--key", k1, "--key", "b",
                        "--prompt", "p"};
         check(call_parse(7, e11, &c, err, sizeof err) == 1,
               "call: --key twice");
@@ -3660,7 +3702,8 @@ static void test_call(void) {
 
     /* record tier: validation fires before anything runs */
     {
-        char *av[] = {"--openai", "http://x", "--key", "a\r", "--prompt", "p"};
+        char kv[] = "a\r"; /* writable: the mask overwrites it in place */
+        char *av[] = {"--openai", "http://x", "--key", kv, "--prompt", "p"};
         check(call_parse((int)(sizeof av / sizeof av[0]), av, &c, err, sizeof err) == 0,
               "call: CR-in-key vector parses (CLI shape is fine)");
         char *ob = NULL, *eb = NULL;
@@ -6318,7 +6361,8 @@ static void test_llm_proxy(void) {
 
     /* ---- parse ---- */
     {
-        char *av[] = {"--openai", "http://x/v1", "--key", "k",
+        char kv[] = "k"; /* writable: the mask overwrites it in place */
+        char *av[] = {"--openai", "http://x/v1", "--key", kv,
                       "--listen", "0.0.0.0:9090"};
         check(llm_proxy_parse(6, av, &c, err, sizeof err) == 0,
               "proxy: full vector parses");
@@ -6368,7 +6412,8 @@ static void test_llm_proxy(void) {
         llm_proxy_cfg_free(&c);
     }
     {
-        char *av[] = {"--key", "k"};
+        char kv[] = "k"; /* writable: the mask overwrites it in place */
+        char *av[] = {"--key", kv};
         check(llm_proxy_parse(2, av, &c, err, sizeof err) == 1,
               "proxy: missing protocol flag rejected");
         llm_proxy_cfg_free(&c);

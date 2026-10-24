@@ -327,6 +327,41 @@ int thread_start_detached(thread_fn fn, void *arg) {
     return rc;
 }
 
+/* ---- argv secret masking ---- */
+
+/* the mysql-client trick: ps, htop and /proc/<pid>/cmdline render the
+   same stack bytes main() received, so once a value is copied out of
+   argv the only way to hide it is to overwrite those bytes in place.
+   same-length filler only: the argv area cannot shift (arg_start/
+   arg_end are fixed at exec), and a shorter write with an early NUL
+   would leave the secret's tail readable past the embedded NUL. on
+   windows this scrubs the crt copy process viewers do not read (they
+   see the peb command line), but it costs nothing and matches posix. */
+
+/* case-insensitive substring scan of a bounded name */
+static bool name_has_secret_word(const char *s, size_t n) {
+    static const char *words[] = {"key", "password", "token",
+                                  "authorization"};
+    for (size_t w = 0; w < sizeof words / sizeof words[0]; w++) {
+        size_t wl = strlen(words[w]);
+        for (size_t i = 0; i + wl <= n; i++)
+            if (!strncasecmp(s + i, words[w], wl)) return true;
+    }
+    return false;
+}
+
+void argv_mask_secret(const char *flag, char *value) {
+    if (!flag || !value) return;
+    if (!strcmp(flag, "--key")) {
+        for (char *p = value; *p; p++) *p = '*';
+    } else if (!strcmp(flag, "--header")) {
+        char *eq = strchr(value, '=');
+        if (!eq || eq == value || !eq[1]) return; /* parser rejects it */
+        if (name_has_secret_word(value, (size_t)(eq - value)))
+            for (char *p = eq + 1; *p; p++) *p = '*';
+    }
+}
+
 /* ---- spawn ---- */
 
 #ifdef _WIN32

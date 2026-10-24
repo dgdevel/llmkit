@@ -398,6 +398,8 @@ int cmd_models(int argc, char **argv) {
                     goto fail;
                 }
             }
+            /* the value is copied: hide the secret ones from ps/htop */
+            argv_mask_secret(a, argv[i]);
         } else if (!strcmp(a, "--json")) {
             c.json = true;
         } else if (a[0] == '-' && a[1] == '-') {

@@ -89,6 +89,8 @@ int llm_proxy_parse(int argc, char **argv, llm_proxy_cfg_t *c, char *err,
                 }
                 have_key = true;
                 c->key = strdup(v);
+                /* the key is copied: hide it from ps/htop */
+                argv_mask_secret(a, argv[i]);
             } else {
                 if (have_listen) {
                     usage_err(err, errsz, "--listen given twice");

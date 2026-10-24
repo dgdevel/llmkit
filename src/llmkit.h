@@ -144,6 +144,14 @@ double mono_now(void);
    is the caller */
 time_t ll_timegm(struct tm *tm);
 
+/* overwrite a parsed secret argument in place so ps/htop (which read
+   the same argv bytes) stop showing it: "--key" masks the whole value,
+   "--header <name>=<value>" masks the value half when the name half
+   contains key/password/token/authorization (case-insensitive).
+   callers must have copied the value out of argv first - this destroys
+   the original */
+void argv_mask_secret(const char *flag, char *value);
+
 /* shell spawn with pipes (posix: /bin/sh -c; win: %ComSpec% /c);
    returns 0, or -1 with all fields reset */
 #ifdef _WIN32

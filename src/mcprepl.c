@@ -129,6 +129,8 @@ int mcp_repl_parse(int argc, char **argv, mcp_repl_cfg_t *c, char *err,
             }
             c->hdrs = h;
             c->hdrs[c->nhdrs++] = d;
+            /* the whole pair is copied: hide secret values from ps/htop */
+            argv_mask_secret(a, argv[i]);
         } else if (a[0] == '-' && a[1] == '-') {
             usage_err(err, errsz, "unknown flag '%s'", a);
             goto fail;
