@@ -545,7 +545,8 @@ struct engine {
     char *terminal_id; /* id of the answered terminal tool_request, NULL
                           when none ran (design sec.4; the sinks read it) */
     int wire_proto;
-    bool keep_mcp; /* repl: sessions continue after engine_run endings;
+    bool keep_mcp; /* repl and agent-as-tool: sessions continue after
+                       engine_run endings;
                       mcp children die at engine_free only (sec.12) */
     bool llm_retry; /* agent: retry failed llm calls on the fibonacci
                        schedule 2,3,5,8,13,21,34,... seconds (sec.12) */

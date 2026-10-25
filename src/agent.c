@@ -520,6 +520,12 @@ int cmd_agent(const char *seed_path) {
     agent_state_t a;
     memset(&a, 0, sizeof a);
     a.eng = engine_new(agent_sink_fn, NULL);
+    /* the helper is a session, not a one-off call: engine_run ends every
+       invoke with mcp_kill_all unless this is set, so the seed's servers
+       (the builtin one included) would die with the first invoke and
+       every later invoke would fail with "mcp server 'builtin' died".
+       The repl sets the same flag for the same reason (repl.c). */
+    a.eng->keep_mcp = true; /* teardown: mcp_kill_all + engine_free below */
     a.retain = false;
 
     seed_ctx_t sc = { &a, true, true };

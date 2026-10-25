@@ -3243,6 +3243,7 @@ static void test_agent_tool(void) {
        retained first invoke must appear in the second invoke's requests */
     FILE *lg = fopen(log, "r");
     bool hist = false, first = false, postreset = false;
+    bool died = false, last_echo = false;
     if (lg) {
         char lbuf[8192];
         while (fgets(lbuf, sizeof lbuf, lg)) {
@@ -3253,12 +3254,21 @@ static void test_agent_tool(void) {
             if (strstr(lbuf, "\"fresh\"") && strstr(lbuf, "seed-answer") &&
                 !strstr(lbuf, "\"go\"") && !strstr(lbuf, "\"again\""))
                 postreset = true;
+            /* regression: engine_run ends every invoke with mcp_kill_all
+               unless keep_mcp is set - the seed's fs server must survive
+               the first invoke, so every invoke's tool round (the odd
+               endpoint requests) must reach fs.echo again. a dead server
+               turns the tool response into "mcp server 'fs' died". */
+            if (strstr(lbuf, "died")) died = true;
+            last_echo = strstr(lbuf, "echo:") != NULL;
         }
         fclose(lg);
     }
     check(hist, "agent retain: the seed history reaches the endpoint");
     check(first, "agent retain: the first invoke is retained in the next");
     check(postreset, "agent: context_reset drops the accumulated turns");
+    check(!died, "agent: no invoke reports its mcp server died");
+    check(last_echo, "agent: the last invoke's tool round still reached fs");
     spawn_kill(&sp);
 
     /* the live mirror's verbose flag: the quiet default (no `verbose`
