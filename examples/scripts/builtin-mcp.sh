@@ -2,9 +2,12 @@
 # Drive `llmkit builtin-mcp` by hand over its stdio mcp interface:
 # newline-delimited JSON-RPC 2.0. The server never talks to an llm
 # endpoint; the file tools work on the current directory, the web tools
-# go out to duckduckgo / the fetched site. Every tool and argument
-# description starts empty; they are editable in one block at the top of
-# src/builtin.c (docs/builtin-mcp.md has the contracts).
+# go out to duckduckgo / the fetched site. Tool and argument
+# descriptions live in src/prompts/mcp/<tool>/ and are bundled into the
+# binary at build time (docs/builtin-mcp.md has the contracts). Add
+# `--read-only` after `builtin-mcp` below to hide the file-writing tools
+# (file_create, file_edit, file_delete, file_copy, file_move, download)
+# from tools/list and have their calls refused.
 #
 # Swap the last line for any other tool, e.g.:
 #   {"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"file_edit","arguments":{"path":"editme.txt","oldString":"old","newString":"new","line_number":1}}}

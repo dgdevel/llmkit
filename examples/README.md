@@ -35,6 +35,7 @@ examples/
     |-- repl-scripted.sh          a piped session, one turn per line
     |-- agent-store.sh            llmkit agent: built-in tools, AGENTS.md,
     |                             a conversation store that resumes
+    |                             (add --read-only to hide file writes)
     |-- mcp-repl.sh               a piped mcp-repl session over builtin-mcp
     |-- prettyprint.sh             a saved transcript rendered repl-style
     `-- proxy.sh                   llmkit proxy in front of llama.cpp, one watched request
