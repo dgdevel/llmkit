@@ -1,6 +1,6 @@
 # builtin-mcp
 
-`llmkit builtin-mcp` is an mcp server on stdio. It exposes a set of generic-use tools: web search, web fetch, file download, seven file operations, four process operations, two agent-skill operations, and the current date and time. It takes no arguments and has no configuration file.
+`llmkit builtin-mcp` is an mcp server on stdio. It exposes a set of generic-use tools: web search, web fetch, file download, seven file operations, four process operations, two agent-skill operations, and the current date and time. It takes one optional argument: `--read-only` hides the tools that write the file system (`file_create`, `file_edit`, `file_delete`, `file_copy`, `file_move`, `download`) from tools/list and refuses their tools/call. `llmkit agent --read-only` passes the flag to the bundled server; the helper subagent inherits it (its seed copies the session's tool servers verbatim). It has no configuration file.
 
 Test it with the mcp-repl feature:
 

@@ -24,6 +24,7 @@ $ llmkit agent --openai http://localhost:9931/v1 --model llama3.1 \
 ```
 
 - **Persistence**: Use `--conversation-store <file>` to save your chat history and resume it later.
+- **Safety**: Use `--read-only` to hide the file-writing built-in tools (`file_create`, `file_edit`, `file_delete`, `file_copy`, `file_move`, `download`). Search and read tools stay; the helper subagent inherits the restriction.
 
 ### One-off Calls
 For scripts or simple questions, use the `call` command. It takes one prompt and returns one answer.
@@ -93,6 +94,7 @@ Requires one protocol flag (`--anthropic`, `--openai`, `--openai-responses`) and
 - `--terminal-tool <server.tool>`: Mark a tool as the final output.
 - `--verbose`, `--conversation-store <file>`, `--no-helper`: Agent-specific options for logging, persistence, and subagent control.
 - `--no-deepwiki`: Disable the bundled DeepWiki MCP server.
+- `--read-only`: (Agent only) Hide the file-writing built-in tools.
 
 ### MCP-REPL Flags
 Requires one transport flag.

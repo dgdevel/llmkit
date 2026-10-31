@@ -1331,7 +1331,8 @@ int repl_run_ex(const call_cfg_t *c, const repl_opts_t *o, int in_fd,
     if (o->builtin_mcp) {
         /* the built-in server rides the proxies' tools record: one
            record owns the whole server set (engine_apply replaces) */
-        cJSON *tools = call_build_agent_tools(&cfg, exe_path);
+        cJSON *tools = call_build_agent_tools(&cfg, exe_path,
+                                              o->read_only);
         char *m = validate_tools(tools);
         if (m) {
             engine_emit_record(e, rec_error(EC_INVALID_RECORD, m, true));
@@ -1702,6 +1703,25 @@ int repl_nodeepwiki_extract(int argc, char **argv, char *err, size_t errsz) {
     return seen ? 1 : 0;
 }
 
+/* pull --read-only out of the agent flag range, in place; returns 1
+   when seen, 0 when absent, -1 on a duplicate (err filled) */
+int repl_readonly_extract(int argc, char **argv, char *err, size_t errsz) {
+    bool seen = false;
+    int n = 0;
+    for (int i = 0; i < argc; i++) {
+        if (!strcmp(argv[i], "--read-only")) {
+            if (seen) {
+                snprintf(err, errsz, "--read-only given twice");
+                return -1;
+            }
+            seen = true;
+            continue;
+        }
+        argv[n++] = argv[i];
+    }
+    return seen ? 1 : 0;
+}
+
 static void agent_usage(FILE *out) {
     fputs("usage: llmkit agent (--anthropic|--openai|--openai-responses) "
           "<api_base>\n"
@@ -1714,7 +1734,7 @@ static void agent_usage(FILE *out) {
           "[--terminal-tool <name.tool>]...\n"
           "                [--conversation-store <file>] [--verbose] "
           "[--no-helper]\n"
-          "                [--no-deepwiki]\n",
+          "                [--no-deepwiki] [--read-only]\n",
           out);
 }
 
@@ -1738,6 +1758,11 @@ int cmd_agent_repl(int argc, char **argv) {
                 n = -1;
             else {
             n -= w; /* the deepwiki flag compacted away when seen */
+            int r = repl_readonly_extract(n, argv + 2, err, sizeof err);
+            if (r < 0)
+                n = -1;
+            else {
+            n -= r; /* the read-only flag compacted away when seen */
             int v = repl_verbose_extract(n, argv + 2, err, sizeof err);
             if (v < 0)
                 n = -1;
@@ -1766,13 +1791,18 @@ int cmd_agent_repl(int argc, char **argv) {
                                       .helper_tool = h != 1,
                                       /* the bundled deepwiki server rides
                                          along unless --no-deepwiki */
-                                      .deepwiki_tool = w != 1 };
+                                      .deepwiki_tool = w != 1,
+                                      /* the built-in server hides its
+                                         file-writing tools with
+                                         --read-only */
+                                      .read_only = r == 1 };
                     int rc = repl_run_ex(&c, &o, STDIN_FILENO, stdout, exe,
                                          NULL);
                     call_cfg_free(&c);
                     return rc;
                 }
             }
+        }
         }
         }
     }

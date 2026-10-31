@@ -1757,6 +1757,96 @@ static void test_builtin(void) {
         buf_free(&io.out);
     }
 
+    /* read-only mode: the writing tools drop out of tools/list and
+       their tools/call is refused */
+    {
+        builtin_set_read_only(true);
+        loop_io_t io = { 0 };
+        buf_init(&io.out);
+        io.in = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}";
+        rpc_handler_t h = { builtin_handle, NULL };
+        rpc_serve(&h, loop_read, loop_write, &io);
+        cJSON *r = cJSON_Parse(io.out.data);
+        check(r != NULL, "builtin: read-only tools/list replies");
+        const cJSON *tools = r
+            ? cJSON_GetObjectItemCaseSensitive(
+                  cJSON_GetObjectItemCaseSensitive(r, "result"), "tools")
+            : NULL;
+        check(cJSON_IsArray(tools) && cJSON_GetArraySize(tools) == 13,
+              "builtin: read-only hides the six writing tools");
+        bool has_create = false, has_download = false,
+             has_read = false, has_list = false;
+        if (cJSON_IsArray(tools)) {
+            const cJSON *t = NULL;
+            cJSON_ArrayForEach(t, tools) {
+                const cJSON *nm =
+                    cJSON_GetObjectItemCaseSensitive(t, "name");
+                if (!cJSON_IsString(nm)) continue;
+                if (!strcmp(nm->valuestring, "file_create")) has_create = true;
+                if (!strcmp(nm->valuestring, "download")) has_download = true;
+                if (!strcmp(nm->valuestring, "file_read")) has_read = true;
+                if (!strcmp(nm->valuestring, "files_list")) has_list = true;
+            }
+        }
+        check(!has_create && !has_download,
+              "builtin: read-only tools/list lacks the writers");
+        check(has_read && has_list,
+              "builtin: read-only tools/list keeps the readers");
+        cJSON_Delete(r);
+        buf_free(&io.out);
+
+        /* the refusal is an rpc error reply; bc_call collapses those to
+           "(rpc error)", so the message is read from the raw round trip */
+        bool refused = false;
+        {
+            loop_io_t io2 = { 0 };
+            buf_init(&io2.out);
+            io2.in = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":"
+                     "\"tools/call\",\"params\":{\"name\":\"file_create\","
+                     "\"arguments\":{\"path\":\"/tmp/llmkit-test-builtin/"
+                     "ro.txt\",\"content\":\"x\"}}}";
+            rpc_serve(&h, loop_read, loop_write, &io2);
+            cJSON *er = cJSON_Parse(io2.out.data);
+            const cJSON *err = er
+                ? cJSON_GetObjectItemCaseSensitive(er, "error")
+                : NULL;
+            const cJSON *msg = err
+                ? cJSON_GetObjectItemCaseSensitive(err, "message")
+                : NULL;
+            refused = msg && cJSON_IsString(msg) &&
+                      strstr(msg->valuestring, "read-only") != NULL;
+            cJSON_Delete(er);
+            buf_free(&io2.out);
+        }
+        check(refused, "builtin: read-only refuses file_create");
+        system("rm -rf /tmp/llmkit-test-builtin/ro.txt");
+        builtin_set_read_only(false);
+
+        memset(&io, 0, sizeof io);
+        buf_init(&io.out);
+        io.in = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}";
+        rpc_serve(&h, loop_read, loop_write, &io);
+        r = cJSON_Parse(io.out.data);
+        tools = r
+            ? cJSON_GetObjectItemCaseSensitive(
+                  cJSON_GetObjectItemCaseSensitive(r, "result"), "tools")
+            : NULL;
+        bool create_back = false;
+        if (cJSON_IsArray(tools)) {
+            const cJSON *it = NULL;
+            cJSON_ArrayForEach(it, tools) {
+                const cJSON *nm =
+                    cJSON_GetObjectItemCaseSensitive(it, "name");
+                if (cJSON_IsString(nm) &&
+                    !strcmp(nm->valuestring, "file_create"))
+                    create_back = true;
+            }
+        }
+        check(create_back, "builtin: clearing read-only restores file_create");
+        cJSON_Delete(r);
+        buf_free(&io.out);
+    }
+
     /* file tool lifecycle */
     const char *notes = "/tmp/llmkit-test-builtin/notes.txt";
     system("rm -rf /tmp/llmkit-test-builtin");
@@ -4885,7 +4975,7 @@ static void test_agent(void) {
         char *av[] = {"--openai", "http://x", "--mcp-proxy", "/tmp/fs.jsonl"};
         check(call_parse_ex(4, av, &c, err, sizeof err, false) == 0,
               "agent: proxy vector parses");
-        cJSON *t = call_build_agent_tools(&c, "/bin");
+        cJSON *t = call_build_agent_tools(&c, "/bin", false);
         buf_t b;
         buf_init(&b);
         buf_append_tree(&b, t);
@@ -4902,7 +4992,7 @@ static void test_agent(void) {
         char *av2[] = {"--openai", "http://x"};
         check(call_parse_ex(2, av2, &c, err, sizeof err, false) == 0,
               "agent: bare vector parses");
-        t = call_build_agent_tools(&c, "/bin");
+        t = call_build_agent_tools(&c, "/bin", false);
         buf_init(&b);
         buf_append_tree(&b, t);
         cJSON_Delete(t);
@@ -4913,6 +5003,34 @@ static void test_agent(void) {
                   "agent: without proxies the built-in rides alone");
         buf_free(&b);
         call_cfg_free(&c);
+
+        /* read-only: the built-in spawns with the flag */
+        char *av3[] = {"--openai", "http://x"};
+        check(call_parse_ex(2, av3, &c, err, sizeof err, false) == 0,
+              "agent: read-only vector parses");
+        t = call_build_agent_tools(&c, "/bin", true);
+        buf_init(&b);
+        buf_append_tree(&b, t);
+        cJSON_Delete(t);
+        check_str(b.data,
+                  "{\"type\":\"tools\",\"tools\":[{\"type\":\"stdio\","
+                  "\"name\":\"builtin\",\"command_line\":\"'/bin' "
+                  "builtin-mcp --read-only\"}]}",
+                  "agent: read-only rides the built-in command line");
+        buf_free(&b);
+        call_cfg_free(&c);
+    }
+
+    /* ---- read-only flag extraction ---- */
+    {
+        char *av[] = {"--openai", "--read-only", "http://x"};
+        check(repl_readonly_extract(3, av, err, sizeof err) == 1 &&
+              !strcmp(av[0], "--openai") && !strcmp(av[1], "http://x"),
+              "agent: read-only extraction compacts the range");
+        char *av2[] = {"--read-only", "--read-only"};
+        check(repl_readonly_extract(2, av2, err, sizeof err) == -1 &&
+              strstr(err, "given twice") != NULL,
+              "agent: read-only flag twice is a usage error");
     }
 
     /* ---- sessions: the agent default prompt, AGENTS.md, builtin ---- */
@@ -5064,7 +5182,7 @@ static void test_agent(void) {
         char *av[] = {"--openai", "http://x", "--mcp-proxy", "/tmp/fs.jsonl"};
         check(call_parse_ex(4, av, &c, err, sizeof err, false) == 0,
               "helper: proxy vector parses");
-        cJSON *base = call_build_agent_tools(&c, "/bin");
+        cJSON *base = call_build_agent_tools(&c, "/bin", false);
 
         engine_t *e = engine_new(NULL, NULL);
         char seedp[512] = "", cfgp[512] = "";

@@ -79,8 +79,8 @@ int main(int argc, char **argv) {
         return cmd_proxy(argv[2]);
     }
     if (!strcmp(cmd, "builtin-mcp")) {
-        if (argc != 2) return usage(stderr);
-        return cmd_builtin();
+        if (argc < 2) return usage(stderr);
+        return cmd_builtin(argc, argv);
     }
     if (!strcmp(cmd, "call")) return cmd_call(argc, argv);
     if (!strcmp(cmd, "repl")) return cmd_repl(argc, argv);

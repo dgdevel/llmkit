@@ -770,6 +770,9 @@ char *builtin_ddg_results(const char *html, size_t n);
    ignored */
 int builtin_handle(void *ctx, const char *method, cJSON *params, cJSON *id,
                    cJSON **result_out, char **errmsg_out);
+/* flip the server into --read-only (the hidden file-writing tools;
+   process-local, no lock - one flag setter before serving or testing) */
+void builtin_set_read_only(bool ro);
 
 /* ================= call.c ================= */
 
@@ -806,7 +809,8 @@ cJSON *call_build_system(const call_cfg_t *c); /* NULL when absent */
 cJSON *call_build_tools(const call_cfg_t *c, const char *exe_path); /* NULL */
 /* call_build_tools plus the built-in server (`llmkit builtin-mcp` on
    stdio, name "builtin") appended - the agent surface's one record */
-cJSON *call_build_agent_tools(const call_cfg_t *c, const char *exe_path);
+cJSON *call_build_agent_tools(const call_cfg_t *c, const char *exe_path,
+                              bool read_only);
 cJSON *call_build_user(const char *prompt);
 /* quote for the shell spawn_shell uses (posix sh / windows cmd.exe) */
 void call_shell_quote(buf_t *b, const char *s);
@@ -946,6 +950,9 @@ typedef struct repl_opts {
     bool deepwiki_tool;         /* agent: attach the free deepwiki server
                                    through an mcp-proxy wrapper that
                                    renames its tools */
+    bool read_only;            /* agent --read-only: spawn the built-in
+                                   server with its file-writing tools
+                                   hidden */
 } repl_opts_t;
 
 /* run the chat session: records compiled from c, input lines from in_fd,
@@ -966,6 +973,8 @@ int repl_store_extract(int argc, char **argv, const char **store,
 int repl_verbose_extract(int argc, char **argv, char *err, size_t errsz);
 /* the same for --no-helper */
 int repl_nohelper_extract(int argc, char **argv, char *err, size_t errsz);
+/* the same for --read-only */
+int repl_readonly_extract(int argc, char **argv, char *err, size_t errsz);
 /* build the helper's two config files (a jsonl seed for agent-as-tool,
    a jsonl mcp-proxy config renaming its `invoke` to `helper`) plus the
    helper server entry for the session's tools record; the seed carries
@@ -1119,7 +1128,7 @@ void llm_proxy_sse_free(llm_proxy_sse_t *s);
 int cmd_runner(void);
 int cmd_agent(const char *seed_path);
 int cmd_proxy(const char *config_path);
-int cmd_builtin(void);
+int cmd_builtin(int argc, char **argv);
 int cmd_call(int argc, char **argv);
 int cmd_repl(int argc, char **argv);
 int cmd_agent_repl(int argc, char **argv); /* llmkit agent */

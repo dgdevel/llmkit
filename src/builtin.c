@@ -14,6 +14,7 @@
 #include "builtin/internal.h"
 #include "prompts.gen.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -160,6 +161,21 @@ static const tool_def_t TOOLS[] = {
 };
 enum { TOOLS_N = sizeof TOOLS / sizeof TOOLS[0] };
 
+/* --read-only (process-local, set by the agent's spawn line): the
+   file-writing tools disappear from tools/list and their tools/call
+   is refused. the flag survives rpc re-initialize; the server has no
+   reset path because the process runs one conversation */
+static bool g_builtin_read_only;
+
+/* the tools that write the file system or spawn: hidden by --read-only */
+static bool tool_is_write(const char *name) {
+    return !strcmp(name, "file_create") || !strcmp(name, "file_edit") ||
+           !strcmp(name, "file_delete") || !strcmp(name, "file_copy") ||
+           !strcmp(name, "file_move") || !strcmp(name, "download");
+}
+
+void builtin_set_read_only(bool ro) { g_builtin_read_only = ro; }
+
 /* ================= small utilities ================= */
 
 /* ---- tool entry points (the .c files under src/builtin) ---- */
@@ -206,6 +222,7 @@ static const tool_fn TOOL_FNS[TOOLS_N] = {
 static cJSON *tools_list_result(void) {
     cJSON *tools = cJSON_CreateArray();
     for (size_t i = 0; i < TOOLS_N; i++) {
+        if (g_builtin_read_only && tool_is_write(TOOLS[i].name)) continue;
         cJSON *t = cJSON_CreateObject();
         cJSON_AddStringToObject(t, "name", TOOLS[i].name);
         cJSON_AddStringToObject(t, "description", TOOLS[i].desc);
@@ -253,6 +270,13 @@ int builtin_handle(void *ctx, const char *method, cJSON *params, cJSON *id,
                      : prompt_mcp_builtin_mcp_errors_missing_tool_name);
             return 1;
         }
+        if (g_builtin_read_only && tool_is_write(name)) {
+            char msg[256];
+            snprintf(msg, sizeof msg,
+                     "read-only mode: the tool '%s' is disabled", name);
+            *errmsg_out = strdup(msg);
+            return 1;
+        }
         const cJSON *args =
             cJSON_GetObjectItemCaseSensitive(params, "arguments");
         if (args && !cJSON_IsObject(args)) {
@@ -286,8 +310,16 @@ int builtin_handle(void *ctx, const char *method, cJSON *params, cJSON *id,
     return 1;
 }
 
-int cmd_builtin(void) {
+int cmd_builtin(int argc, char **argv) {
     /* crash_report_init runs in main() for every subcommand now */
+    for (int i = 2; i < argc; i++) {
+        if (!strcmp(argv[i], "--read-only"))
+            builtin_set_read_only(true);
+        else {
+            fprintf(stderr, "usage: llmkit builtin-mcp [--read-only]\n");
+            return 1;
+        }
+    }
     signals_init();
     rpc_handler_t h = { builtin_handle, NULL };
     rpc_serve_stdio(&h);
