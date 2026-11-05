@@ -68,7 +68,11 @@ typedef struct repl_sink {
        jstream decodes the `content` field as it parses and the decoded
        bytes go straight to the display. the preview's frame is closed
        when the call's tool_request record renders (dspy_tool_request
-       sees the same tool+id) or the turn ends */
+       sees the same tool+id) or the turn ends. armed only when the
+       session carries the bundled built-in server (agent): its
+       file_create is the schema the decoder assumes, a user-added
+       server's same-named tool is not */
+    bool pv_enabled;   /* the bundled server rides this session */
     jstream_t pv;     /* decoder state, live mid-call */
     bool pv_active;   /* a wanted call's decoder is armed */
     bool pv_open;     /* the frame is open (header + rule drawn) */
@@ -152,13 +156,15 @@ static void usage_accum(repl_sink_t *s, const cJSON *rec) {
    wire delivered something the decoder cannot walk) kills the preview
    silently; the record still renders as always. */
 
-/* the exposed tool name a preview follows: bare after the last dot
-   (builtin.file_create names the built-in server's entry) */
+/* the tool name a preview follows: exactly the bundled server's
+   file_create. the bundled server and the helper flatten (mcp.c): a
+   bare name on the wire is one of theirs - and only the bundled server
+   exposes file_create - while every user-added mcp server carries its
+   prefix (`fs.file_create`), whatever schema that tool really has.
+   together with the session gate (pv_enabled, agent only) the preview
+   follows the one call whose `content` is a file body by contract */
 static bool preview_wanted(const char *tool) {
-    if (!tool) return false;
-    const char *dot = strrchr(tool, '.');
-    if (dot && dot[1]) tool = dot + 1;
-    return !strcmp(tool, "file_create");
+    return tool && !strcmp(tool, "file_create");
 }
 
 /* the content decoder's sink: decoded bytes go to the display */
@@ -201,7 +207,11 @@ static void repl_tool_preview(void *ctx, const char *tool, const char *id,
     /* done carries the closing flush (whole args): the decoder already
        consumed every byte incrementally, nothing feeds - the frame
        closes at the record or the turn end */
-    if (done || !preview_wanted(tool)) return;
+    /* done carries the closing flush (whole args): the decoder already
+       consumed every byte incrementally, nothing feeds - the frame
+       closes at the record or the turn end. disabled sessions (no
+       bundled server) never preview */
+    if (done || !s->pv_enabled || !preview_wanted(tool)) return;
     /* a new call: a fresh id (or none, chat slots stream name-less
        until their first delta) starts a fresh decoder */
     if (!s->pv_active || (id && *id && s->pv_id[0] && strcmp(id, s->pv_id))) {
@@ -1349,6 +1359,7 @@ int repl_run_ex(const call_cfg_t *c, const repl_opts_t *o, int in_fd,
     /* the live file preview: streaming file_create arguments decode and
        render as they arrive (display only, never a record) */
     e->tool_preview = repl_tool_preview;
+    sink.pv_enabled = o->builtin_mcp; /* the bundled server's schema */
     e->tool_preview_ctx = &sink;
     if (factory) e->wire_factory = factory;
     e->keep_mcp = true; /* the session continues; engine_free tears down */
