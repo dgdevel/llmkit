@@ -7,7 +7,7 @@ CFLAGS  += $(EXTRA_CFLAGS)
 CJSON    = -lcjson
 LDLIBS   = $(CJSON) -lcurl -pthread
 
-# release builds stamp the version into the binary (tools/release.sh)
+# release builds stamp the version into the binary (tools/stage.sh)
 ifneq ($(VERSION),)
 CFLAGS  += -DLLMKIT_VERSION=\"$(VERSION)\"
 endif
@@ -122,14 +122,19 @@ clean:
 	      fuzz/fuzz_regex fuzz/fuzz_proxy fuzz/fuzz_mcp \
 	      fuzz/fuzz_mcp_tools
 
-# tag, build and publish binaries to GitHub Releases (needs gh)
-# usage: make release TAG=v1.2.3
-release:
-	@tools/release.sh "$(TAG)"
+# stage: tests, build, packages in dist/ - runs inside the build container
+# usage: make stage TAG=v1.2.3
+stage:
+	@tools/stage.sh "$(TAG)"
+
+# publish: tag + gh release upload of the staged dist/ - runs outside
+# the container on a machine with gh. usage: make publish TAG=v1.2.3
+publish:
+	@tools/publish.sh "$(TAG)"
 
 # build distro packages (.deb/.rpm/.pkg.tar.zst/.zip) in docker; needs
 # docker, artifacts land in dist/. usage: make packages TAG=v1.2.3 [TGT="deb arch"]
 packages:
 	@tools/package.sh "$(TAG)" $(TGT)
 
-.PHONY: all check check-ascii check-vg clean release packages fuzz asan
+.PHONY: all check check-ascii check-vg clean stage publish packages fuzz asan

@@ -8,7 +8,7 @@
 set -eu
 TAG=${1:?usage: tools/release-notes.sh v1.2.3}
 cd "$(dirname "$0")/.."
-[ -d dist ] || { echo "release-notes.sh: no dist/ here - run tools/package.sh first" >&2; exit 1; }
+[ -d dist ] || { echo "release-notes.sh: no dist/ here - run tools/stage.sh first" >&2; exit 1; }
 
 echo "one binary for llm interaction from the shell: \`repl\`, \`call\`,"
 echo "\`runner\`, \`agent-as-tool\` and \`mcp-proxy\` - see the README."

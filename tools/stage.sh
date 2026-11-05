@@ -1,22 +1,28 @@
 #!/bin/sh
-# release.sh - tag a version, build the binary, publish it to GitHub Releases.
+# stage.sh - build everything a release needs into dist/: tests, version-
+# stamped binary, tarball, distro packages, checksums. no github access
+# needed - tagging and uploading happen outside the build container with
+# tools/publish.sh.
 #
-# usage: tools/release.sh v1.2.3
+# usage: tools/stage.sh v1.2.3        (run inside the build container)
 #
 # what it does, in order:
-#   1. sanity checks: tag format, tag not taken, clean tree, gh present+authed
+#   1. sanity checks: tag format, tag not taken, clean tree
 #   2. runs the test suite (make check)
 #   3. builds llmkit with the version stamped into `llmkit version`
 #   4. packs dist/llmkit-<tag>-<os>-<arch>.tar.gz
 #   4b. distro packages in docker, when docker is available (PACKAGES=0 skips)
 #   4c. sha256 checksums over everything in dist/
-#   5. tags, pushes the tag, creates the GitHub release and uploads dist/*
+#   4d. records the commit the artifacts were built from (dist/.staged-commit,
+#       a dotfile: the dist/* globs skip it, so it never gets checksummed
+#       or uploaded; tools/publish.sh verifies it)
+# afterwards: copy dist/ out of the container and run tools/publish.sh <tag>
 set -eu
 
-die() { echo "release.sh: $*" >&2; exit 1; }
+die() { echo "stage.sh: $*" >&2; exit 1; }
 
 TAG=${1:-}
-[ -n "$TAG" ] || die "usage: tools/release.sh v1.2.3"
+[ -n "$TAG" ] || die "usage: tools/stage.sh v1.2.3"
 printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+(\.[0-9]+)?$' \
     || die "tag '$TAG' must look like v1.2 or v1.2.3"
 VER=${TAG#v}
@@ -32,8 +38,6 @@ git diff --quiet HEAD || die "working tree has uncommitted changes"
 upstream=$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || true)
 [ -z "$upstream" ] || git merge-base --is-ancestor HEAD "$upstream" \
     || die "HEAD is ahead of $upstream - push first"
-command -v gh >/dev/null 2>&1 || die "gh is not installed"
-gh auth status >/dev/null 2>&1 || die "gh is not authenticated (gh auth login)"
 
 # ---- 2. tests ---------------------------------------------------------------
 make check
@@ -46,20 +50,20 @@ make "VERSION=$VER"
 # ---- 4. pack -----------------------------------------------------------------
 os=$(uname -s | tr '[:upper:]' '[:lower:]')
 arch=$(uname -m)
-stage="dist/llmkit-$TAG-$os-$arch"
+staging="dist/llmkit-$TAG-$os-$arch"
 rm -rf dist
-mkdir -p "$stage"
-cp llmkit LICENSE.md README.md "$stage/"
-tar -C dist -czf "$stage.tar.gz" "${stage#dist/}"
-rm -rf "$stage"
+mkdir -p "$staging"
+cp llmkit LICENSE.md README.md "$staging/"
+tar -C dist -czf "$staging.tar.gz" "${staging#dist/}"
+rm -rf "$staging"
 
 # ---- 4b. distro packages (docker; set PACKAGES=0 to skip) --------------------
 if [ "${PACKAGES:-1}" = 0 ]; then
-    echo "release.sh: PACKAGES=0 - skipping distro packages"
+    echo "stage.sh: PACKAGES=0 - skipping distro packages"
 elif command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
     tools/package.sh "$TAG"
 else
-    echo "release.sh: docker not available - skipping distro packages"
+    echo "stage.sh: docker not available - skipping distro packages"
 fi
 
 # ---- 4c. checksums over everything in dist/ ----------------------------------
@@ -71,16 +75,13 @@ for f in dist/*; do
                   || shasum -a 256 "$(basename "$f")" >> "checksums-$TAG.txt"; })
 done
 
-# ---- 5. tag, push, release ---------------------------------------------------
-# notes: artifact-to-system table + the generated changelog appended
-# (tools/release-notes.sh); --notes-file instead of --generate-notes
-notes=$(mktemp /tmp/llmkit-notes.XXXXXX)
-tools/release-notes.sh "$TAG" > "$notes"
-git tag -a "$TAG" -m "llmkit $TAG"
-git push origin "refs/tags/$TAG"
-gh release create "$TAG" dist/* \
-    --title "llmkit $TAG" --notes-file "$notes"
-rm -f "$notes"
+# ---- 4d. record the commit these artifacts were built from -------------------
+# dotfile: the dist/* globs above and in publish.sh skip it, so it never
+# gets checksummed or uploaded; tools/publish.sh verifies it
+git rev-parse HEAD > dist/.staged-commit
 
-echo "released $TAG:"
+echo "staged $TAG in dist/:"
 ls -l dist/*
+echo
+echo "next: copy dist/ out of the container, then on a machine with gh run:"
+echo "  tools/publish.sh $TAG"

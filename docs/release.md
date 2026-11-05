@@ -1,22 +1,42 @@
 # llmkit release process
 
-This page explains how a version gets tagged, built, packaged, and published. The scripts are the source of truth. This page is the map. Everything runs from the repo root on a machine with `gh` (installed and authenticated with `gh auth login`). Docker is optional. Without docker, the release ships the plain tarball only, with a note.
+This page explains how a version gets staged, then tagged and published. The scripts are the source of truth. This page is the map. The work is split in two halves that run on two different machines:
 
-## the one command
+- **stage** — inside the build container (docker available, no github access needed): tests, version-stamped build, tarball, distro packages, checksums. Everything lands in `dist/`.
+- **publish** — outside the container, on a machine with `gh` (installed and authenticated with `gh auth login`): verify `dist/`, tag, push, create the GitHub release and upload.
+
+The split exists because the build container has docker but no `gh` credentials, and leaking those into the container is not wanted.
+
+## the two commands
 
 ```sh
-make release TAG=v1.2.3        # or: tools/release.sh v1.2.3
+tools/stage.sh v1.2.3        # or: make stage TAG=v1.2.3   (in the container)
+# copy dist/ out of the container to the publishing checkout
+tools/publish.sh v1.2.3      # or: make publish TAG=v1.2.3 (outside, needs gh)
 ```
 
-[tools/release.sh](../tools/release.sh) runs these steps in order:
+`dist/` is the handoff between the two. It must arrive in a checkout of the same commit: stage.sh records the commit in `dist/.staged-commit` and publish.sh refuses to run when it does not match `HEAD`.
 
-1. Guards. The script refuses to start unless all of these hold: the tag matches `v1.2`/`v1.2.3`, the tag does not exist yet, the working tree is clean (no uncommitted and no untracked files), HEAD is not ahead of the upstream branch, and `gh` is installed and authenticated. Everything fails before anything is built or tagged.
+### stage — tools/stage.sh
+
+[tools/stage.sh](../tools/stage.sh) runs these steps in order:
+
+1. Guards. The script refuses to start unless all of these hold: the tag matches `v1.2`/`v1.2.3`, the tag does not exist yet, the working tree is clean (no uncommitted and no untracked files), and HEAD is not ahead of the upstream branch. Everything fails before anything is built.
 2. Tests. `make check` runs the full selfcheck suite.
 3. Build. The binary is rebuilt with the version stamped in. `llmkit version` reports `1.2.3`. The stamp comes from the `VERSION=` make variable and the `#ifndef LLMKIT_VERSION` guard in `src/llmkit.h`.
 4. Tarball. The build produces `dist/llmkit-v1.2.3-<os>-<arch>.tar.gz` with the binary, `LICENSE.md`, and `README.md` inside a top-level directory.
 5. Distro packages. When docker is up, [tools/package.sh](../tools/package.sh) builds the matrix below. Set `PACKAGES=0` to skip this step. No docker skips with a warning.
 6. Checksums. One `dist/checksums-v1.2.3.txt` covers every artifact.
-7. Publish. The script creates the annotated tag, pushes the tag, and runs `gh release create` with everything in `dist/` uploaded. The release body comes from [tools/release-notes.sh](../tools/release-notes.sh) via `--notes-file`. It contains a which-file-for-which-system table generated from what is actually in `dist/` (rows appear only for artifacts that were built), followed by the auto-generated changelog (commits since the previous release) fetched through the `generate-notes` api and appended. The changelog is the text that `--generate-notes` produces, below the table.
+7. Stamp. The commit is recorded in `dist/.staged-commit`.
+
+### publish — tools/publish.sh
+
+[tools/publish.sh](../tools/publish.sh) runs these steps in order:
+
+1. Guards. Same tag/tree checks as stage.sh, plus: `gh` installed and authenticated, `dist/` present with `checksums-v1.2.3.txt` for this tag, and `dist/.staged-commit` matching `HEAD`. A mismatch means the checkout and the artifacts drifted apart between the two halves - checkout the staged commit or re-stage.
+2. Checksums. `sha256sum -c` re-verifies every artifact, so a corrupted copy out of the container dies before anything is tagged.
+3. Tag and push. The annotated tag goes to `HEAD`, which is already verified to be the commit the artifacts were built from.
+4. Release. `gh release create` uploads everything in `dist/` (the dotfile stamp is not matched by the glob and never uploaded). The release body comes from [tools/release-notes.sh](../tools/release-notes.sh) via `--notes-file`. It contains a which-file-for-which-system table generated from what is actually in `dist/` (rows appear only for artifacts that were built), followed by the auto-generated changelog (commits since the previous release) fetched through the `generate-notes` api and appended. The changelog is the text that `--generate-notes` produces, below the table.
 
 The tag and the GitHub release only happen at the very end. Any earlier failure leaves nothing behind to clean up.
 
@@ -46,7 +66,7 @@ make packages TAG=v1.2.3           # same, via make
 | `mac` | `llmkit-osxcross:11.3` (local build) | `llmkit-1.2.3-macos-x86_64.zip` | macOS 10.13+, rosetta 2 on apple silicon |
 
 Install commands for users: `apt install ./llmkit_..._.deb`,
-`dnf install ./llmkit-..._.rpm`, `pacman -U llmkit-..._.pkg.tar.zst`.
+`dnf install ./llmkit-..._.rpm`, `pacman -U llmkit-..._...pkg.tar.zst`.
 The windows zip unzips in place. `llmkit.exe` carries everything it needs.
 
 Each target builds inside the container of its own distro, with the packaging tool of that distro (`dpkg-deb`, `rpmbuild`, `makepkg`). The tool that consumes the package metadata also produces it.
