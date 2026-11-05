@@ -164,6 +164,12 @@ void engine_emit_record(engine_t *e, cJSON *rec) {
     e->emit(e->emit_ctx, rec); /* sink consumes the record */
 }
 
+void engine_tool_preview(engine_t *e, const char *tool, const char *id,
+                         const char *args, size_t n, bool done) {
+    if (!e || !e->tool_preview || !args || !n) return;
+    e->tool_preview(e->tool_preview_ctx, tool, id, args, n, done);
+}
+
 static void engine_emit_error(engine_t *e, const char *code, const char *msg,
                               bool fatal) {
     e->emit(e->emit_ctx, rec_error(code, msg, fatal));

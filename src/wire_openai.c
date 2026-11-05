@@ -394,7 +394,7 @@ static bool oai_usage(const wire_t *wp, double *in, double *out,
     return w->have_usage;
 }
 
-static void chat_chunk(owire_t *w, const cJSON *ch) {
+static void chat_chunk(owire_t *w, engine_t *e, const cJSON *ch) {
     const cJSON *choices = cJSON_GetObjectItemCaseSensitive(ch, "choices");
     if (cJSON_IsArray(choices))
         for (const cJSON *c = choices->child; c; c = c->next) {
@@ -426,8 +426,15 @@ static void chat_chunk(owire_t *w, const cJSON *ch) {
                         const cJSON *ar = fn
                               ? cJSON_GetObjectItemCaseSensitive(fn, "arguments")
                               : NULL;
-                        if (cJSON_IsString(ar) && ar->valuestring)
+                        if (cJSON_IsString(ar) && ar->valuestring) {
                             buf_append_str(&s->args, ar->valuestring);
+                            /* the preview feeds the new bytes only: its
+                               decoder state advances across deltas */
+                            engine_tool_preview(e, s->name, s->id,
+                                                ar->valuestring,
+                                                strlen(ar->valuestring),
+                                                false);
+                        }
                     }
             }
             const char *fr = rec_str(c, "finish_reason");
@@ -552,7 +559,11 @@ static void rsp_event(owire_t *w, engine_t *e, const char *ev, const char *data,
                                     rec_num(d, "output_index", 0));
         if (s) {
             const char *s2 = rec_str(d, "delta");
-            if (s2) buf_append_str(&s->args, s2);
+            if (s2) {
+                buf_append_str(&s->args, s2);
+                engine_tool_preview(e, s->name, s->id, s2, strlen(s2),
+                                    false);
+            }
         }
     } else if (!strcmp(ev, "response.output_text.done")) {
         blk_stop(&w->be);
@@ -606,7 +617,7 @@ static void sse_event_cb(void *ctx, const char *event, const char *data,
     }
     cJSON *d = cJSON_ParseWithLength(data, n);
     if (!d) return;
-    chat_chunk(c->w, d);
+    chat_chunk(c->w, c->e, d);
     cJSON_Delete(d);
 }
 

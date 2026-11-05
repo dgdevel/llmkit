@@ -12,7 +12,7 @@ ifneq ($(VERSION),)
 CFLAGS  += -DLLMKIT_VERSION=\"$(VERSION)\"
 endif
 
-SRC  = src/buf.c src/sse.c src/platform.c src/jsonl.c src/wire_openai.c \
+SRC  = src/buf.c src/sse.c src/platform.c src/jsonl.c src/jstream.c src/wire_openai.c \
        src/wire_anthropic.c src/engine.c src/mcp.c src/agent.c src/proxy.c \
        src/builtin.c src/builtin/util.c src/builtin/files.c \
        src/builtin/web.c src/builtin/analyze.c src/builtin/process.c \

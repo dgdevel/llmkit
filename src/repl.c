@@ -63,6 +63,19 @@ typedef struct repl_sink {
     bool quiet_think; /* armed at startup, never reset */
     bool think_shown; /* this turn's line drew already */
     bool think_done;  /* this turn's thinking blocks all closed */
+    /* the live file preview: one streaming file_create call at a time.
+       the wires feed the raw argument bytes (engine_tool_preview); the
+       jstream decodes the `content` field as it parses and the decoded
+       bytes go straight to the display. the preview's frame is closed
+       when the call's tool_request record renders (dspy_tool_request
+       sees the same tool+id) or the turn ends */
+    jstream_t pv;     /* decoder state, live mid-call */
+    bool pv_active;   /* a wanted call's decoder is armed */
+    bool pv_open;     /* the frame is open (header + rule drawn) */
+    bool pv_dead;     /* a syntax break: silent rest of the call */
+    char pv_tool[64]; /* the call's exposed tool name */
+    char pv_id[128];  /* and its id, for the pairing */
+    size_t pv_bytes;  /* content bytes shown so far */
 } repl_sink_t;
 
 /* the store's write side: called from the sink for every emitted record
@@ -121,6 +134,86 @@ static void usage_accum(repl_sink_t *s, const cJSON *rec) {
     s->tok_out = rec_num(u, "output_tokens", 0.0);
     s->have_usage = true;
 }
+
+/* ---- the live file preview (file_create) ----
+   The wires stream a tool call's accumulating argument bytes through
+   engine_tool_preview as they arrive; a jstream decodes the `content`
+   field as the bytes parse and the decoded bytes go straight to the
+   display, so the user watches the file generate ahead of the request
+   completing and the tool running. The frame:
+
+     file_create (streaming <n> bytes)
+     ------------------------------------ (light rule)
+     the content bytes, as they parse
+
+   drawn when the first decoded byte lands. It closes (one blank line)
+   when the paired tool_request record renders - the request line below
+   is the storage moment - or at the turn's end. A syntax break (the
+   wire delivered something the decoder cannot walk) kills the preview
+   silently; the record still renders as always. */
+
+/* the exposed tool name a preview follows: bare after the last dot
+   (builtin.file_create names the built-in server's entry) */
+static bool preview_wanted(const char *tool) {
+    if (!tool) return false;
+    const char *dot = strrchr(tool, '.');
+    if (dot && dot[1]) tool = dot + 1;
+    return !strcmp(tool, "file_create");
+}
+
+/* the content decoder's sink: decoded bytes go to the display */
+static void pv_content(void *ctx, const char *bytes, size_t n) {
+    repl_sink_t *s = ctx;
+    if (!s->pv_open) {
+        /* the first decoded byte opens the frame */
+        s->pv_open = true;
+        s->d.sep_pending = false; /* the preview owns its own rule */
+        dspy_ensure_nl(&s->d);
+        dspy_write_str(&s->d, s->pv_tool);
+        dspy_write_str(&s->d, " (streaming...)\n");
+        dspy_rule(&s->d, '-');
+    }
+    s->pv_bytes += n;
+    dspy_write(&s->d, bytes, n);
+}
+
+/* close the preview frame: blank line, state reset. safe when never
+   opened */
+static void preview_close(repl_sink_t *s) {
+    if (s->pv_open) {
+        dspy_ensure_nl(&s->d);
+        dspy_write_str(&s->d, "\n");
+        s->pv_open = false;
+    }
+    jstream_free(&s->pv);
+    memset(&s->pv, 0, sizeof s->pv);
+    s->pv_dead = false;
+    s->pv_active = false;
+    s->pv_bytes = 0;
+    s->pv_id[0] = '\0';
+}
+
+/* the wires' feed: one call's argument bytes as they accumulate. done
+   = the arguments string closed (the request record follows) */
+static void repl_tool_preview(void *ctx, const char *tool, const char *id,
+                              const char *args, size_t n, bool done) {
+    repl_sink_t *s = ctx;
+    /* done carries the closing flush (whole args): the decoder already
+       consumed every byte incrementally, nothing feeds - the frame
+       closes at the record or the turn end */
+    if (done || !preview_wanted(tool)) return;
+    /* a new call: a fresh id (or none, chat slots stream name-less
+       until their first delta) starts a fresh decoder */
+    if (!s->pv_active || (id && *id && s->pv_id[0] && strcmp(id, s->pv_id))) {
+        preview_close(s);
+        jstream_init(&s->pv, pv_content, s, "content");
+        s->pv_active = true;
+        snprintf(s->pv_tool, sizeof s->pv_tool, "%s", tool);
+        snprintf(s->pv_id, sizeof s->pv_id, "%s", id ? id : "");
+    }
+    if (!s->pv_dead && !jstream_feed(&s->pv, args, n)) s->pv_dead = true;
+}
+
 
 /* the turn's stats line, drawn at every request's end whatever the
    termination: response completed, interrupted, fatal, max rounds. The
@@ -223,6 +316,9 @@ static void repl_sink_fn(void *ctx, cJSON *rec) {
             s->d.cur = -1;
         }
     } else if (k == R_TOOL_REQUEST) {
+        /* a tool call completed: the streaming preview's frame closes
+           here - the request line below is the storage moment */
+        preview_close(s);
         dspy_tool_request(&s->d, rec);
     } else if (k == R_TOOL_RESPONSE) {
         dspy_brief_count(&s->d, rec);
@@ -1250,6 +1346,10 @@ int repl_run_ex(const call_cfg_t *c, const repl_opts_t *o, int in_fd,
     sink.quiet_think = o->quiet_think;
 
     engine_t *e = engine_new(repl_sink_fn, &sink);
+    /* the live file preview: streaming file_create arguments decode and
+       render as they arrive (display only, never a record) */
+    e->tool_preview = repl_tool_preview;
+    e->tool_preview_ctx = &sink;
     if (factory) e->wire_factory = factory;
     e->keep_mcp = true; /* the session continues; engine_free tears down */
     e->llm_retry = o->llm_retry; /* agent: fibonacci retry of llm calls */
@@ -1553,6 +1653,7 @@ int repl_run_ex(const call_cfg_t *c, const repl_opts_t *o, int in_fd,
         timing_reset(&sink);
         rc = engine_start(e);
         if (rc == 0) rc = engine_run(e);
+        preview_close(&sink); /* a frame the record never closed */
         render_stats_exit(&sink, rc); /* every end of the request */
         /* the turn's end signal: the bell rings and the command runs on
            every end - a completed response, but an interrupted or failed
@@ -1840,7 +1941,8 @@ int cmd_agent_repl(int argc, char **argv) {
             if (t < 0)
                 n = -1;
             else {
-            n -= t; /* the bell/end-turn flags compacted away */
+            n = t; /* the compacted count, like store_extract (not a
+                      0/1 like the boolean flag extracts above) */
                 n = call_parse_ex(n, argv + 2, &c, err, sizeof err,
                                   false);
                 if (n == 0) {

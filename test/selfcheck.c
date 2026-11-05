@@ -7156,11 +7156,114 @@ static void test_html(void) {
     free(res);
 }
 
+/* ---- jstream: the live preview's incremental arguments decoder ---- */
+
+static buf_t js_out;
+static void js_out_cb(void *ctx, const char *b, size_t n) {
+    (void)ctx;
+    buf_append(&js_out, b, n);
+}
+
+static void test_jstream(void) {
+    /* whole object, one feed */
+    {
+        jstream_t js;
+        buf_init(&js_out);
+        jstream_init(&js, js_out_cb, NULL, "content");
+        check(jstream_feed(&js, "{\"content\":\"hello\"}", 19),
+              "jstream: plain object feeds");
+        jstream_free(&js);
+        check_str(js_out.data, "hello", "jstream: wanted field decodes");
+        buf_free(&js_out);
+    }
+    /* byte-at-a-time feed: every boundary is a split point */
+    {
+        const char *src = "{\"path\":\"f.c\",\"content\":\"a\\nb\\u00e9\"}";
+        jstream_t js;
+        buf_init(&js_out);
+        jstream_init(&js, js_out_cb, NULL, "content");
+        bool ok = true;
+        for (size_t i = 0; i < strlen(src) && ok; i++)
+            ok = jstream_feed(&js, src + i, 1);
+        check(ok, "jstream: byte-at-a-time feeds");
+        jstream_free(&js);
+        check_str(js_out.data, "a\nb\xc3\xa9", "jstream: escapes across splits");
+        buf_free(&js_out);
+    }
+    /* surrogate pair: \ud83d\ude00 -> U+1F600 */
+    {
+        jstream_t js;
+        buf_init(&js_out);
+        jstream_init(&js, js_out_cb, NULL, "content");
+        check(jstream_feed(&js, "{\"content\":\"\\ud83d\\ude00\"}",
+                           strlen("{\"content\":\"\\ud83d\\ude00\"}")),
+              "jstream: surrogate pair feeds");
+        jstream_free(&js);
+        check_str(js_out.data, "\xf0\x9f\x98\x80", "jstream: pair combines");
+        buf_free(&js_out);
+    }
+    /* non-string and nested values skipped, keys after them still match */
+    {
+        jstream_t js;
+        buf_init(&js_out);
+        jstream_init(&js, js_out_cb, NULL, "content");
+        check(jstream_feed(
+                  &js,
+                  "{\"n\":42,\"flag\":true,\"nest\":{\"a\":[1,2]},"
+                  "\"content\":\"X\",\"z\":\"tail\"}",
+                  62),
+              "jstream: nested skip feeds");
+        jstream_free(&js);
+        check_str(js_out.data, "X", "jstream: keys after skips match");
+        buf_free(&js_out);
+    }
+    /* braces inside skipped strings do not unbalance the walk */
+    {
+        jstream_t js;
+        buf_init(&js_out);
+        jstream_init(&js, js_out_cb, NULL, "content");
+        check(jstream_feed(&js,
+                           "{\"x\":\"}{[\",\"content\":\"ok\",\"y\":\"[}]\"}",
+                           35),
+              "jstream: brace-in-string feeds");
+        jstream_free(&js);
+        check_str(js_out.data, "ok", "jstream: braces in strings skip");
+        buf_free(&js_out);
+    }
+    /* syntax break: the stream dies, the caller drops the preview */
+    {
+        jstream_t js;
+        buf_init(&js_out);
+        jstream_init(&js, js_out_cb, NULL, "content");
+        check(jstream_feed(&js, "{\"content\":\"a\",}",
+                           strlen("{\"content\":\"a\",}")),
+              "jstream: trailing comma tolerated by the walk");
+        check(!jstream_feed(&js, "zz", 2),
+              "jstream: garbage after break rejects");
+        jstream_free(&js);
+        buf_free(&js_out);
+    }
+    /* no wanted field: nothing decodes, object still walks */
+    {
+        jstream_t js;
+        buf_init(&js_out);
+        jstream_init(&js, js_out_cb, NULL, "content");
+        check(jstream_feed(&js, "{\"path\":\"f.c\",\"n\":1}",
+                           strlen("{\"path\":\"f.c\",\"n\":1}")),
+              "jstream: absent field feeds");
+        jstream_free(&js);
+        check(js_out.len == 0, "jstream: absent field renders nothing");
+        buf_free(&js_out);
+    }
+}
+
 int main(void) {
     signals_init();
     http_global_init();
     fprintf(stderr, "selfcheck: prefix invariant\n");
     test_prefix_invariant();
+    fprintf(stderr, "selfcheck: jstream\n");
+    test_jstream();
     fprintf(stderr, "selfcheck: sse parser\n");
     test_sse_parser();
     fprintf(stderr, "selfcheck: validation\n");

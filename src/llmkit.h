@@ -112,6 +112,33 @@ void buf_append_tree_trim(buf_t *b, const cJSON *t);
 /* append a JSON number from a double, cJSON-style (deterministic) */
 void buf_append_jnum(buf_t *b, double d);
 
+/* ================= jstream.c ================= */
+
+/* incremental decoder over a streaming JSON object (tool arguments):
+   the wanted string field's decoded bytes leave through cb as they
+   become known. jstream.c holds the state machine (repl/agent live
+   file preview: file_create's `content` streams to the screen while
+   the wire still delivers it) */
+typedef void (*jstream_cb)(void *ctx, const char *bytes, size_t n);
+typedef struct jstream {
+    jstream_cb cb;
+    void *ctx;
+    const char *field;  /* the wanted key; entries after the first do
+                           not re-match (the state machine resets it) */
+    int state;
+    bool wanting;       /* inside the wanted string */
+    bool done;          /* the top object closed */
+    unsigned surrogate; /* a held \uD800..DBFF lead */
+    buf_t key;          /* the key being collected */
+    buf_t hex;          /* the \uXXXX digits being collected */
+    int skip_depth;     /* nesting inside a skipped container value */
+} jstream_t;
+void jstream_init(jstream_t *js, jstream_cb cb, void *ctx,
+                  const char *field);
+void jstream_free(jstream_t *js);
+/* feed raw JSON bytes; false = syntax break, the stream is dead */
+bool jstream_feed(jstream_t *js, const char *p, size_t n);
+
 bool utf8_valid(const uint8_t *p, size_t n);
 /* the same, but a final sequence cut short by the buffer end is a
    prefix, not an error (stream feed re-checks the split character) */
@@ -519,6 +546,14 @@ struct engine {
     emit_fn emit;
     void *emit_ctx;
 
+    /* live tool-args preview (repl/agent display): the wires call it as
+       a streaming tool call's arguments accumulate; NULL = no preview
+       (runner, agent-as-tool, tests). never a record - display only,
+       so the runner's stdout and every store stay clean */
+    void (*tool_preview)(void *ctx, const char *tool, const char *id,
+                         const char *args, size_t n, bool done);
+    void *tool_preview_ctx;
+
     /* wire */
     wire_t *wire;
 
@@ -560,6 +595,10 @@ struct engine {
 engine_t *engine_new(emit_fn emit, void *ctx);
 void engine_free(engine_t *e);
 void engine_emit_record(engine_t *e, cJSON *rec); /* sink + ingest */
+/* forward one tool-args accumulation state to the preview hook; a NULL
+   hook (or empty args) is a no-op, so the wires call it freely */
+void engine_tool_preview(engine_t *e, const char *tool, const char *id,
+                         const char *args, size_t n, bool done);
 void engine_apply_config_record(engine_t *e, cJSON *tree); /* llm/options/system/tools snapshot */
 int engine_input_record(engine_t *e, cJSON *tree); /* reading-state dispatch:
                                                       0 ok, 1 start now, 2 fatal(rec emitted) */

@@ -434,7 +434,11 @@ static void ant_event(void *ctx, const char *event, const char *data,
             }
         } else if (ty && !strcmp(ty, "input_json_delta")) {
             const char *pj = rec_str(delta, "partial_json");
-            if (pj) buf_append_str(&bl->args, pj);
+            if (pj) {
+                buf_append_str(&bl->args, pj);
+                engine_tool_preview(c->e, bl->type == 2 ? bl->name : NULL,
+                                    bl->id, pj, strlen(pj), false);
+            }
         }
     } else if (!strcmp(event, "content_block_stop")) {
         sse_block_t *bl = sse_block_at(w->blocks, &w->nblocks, (int)rec_num(d, "index", 0));
