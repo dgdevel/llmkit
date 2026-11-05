@@ -80,6 +80,16 @@ typedef struct repl_sink {
     char pv_tool[64]; /* the call's exposed tool name */
     char pv_id[128];  /* and its id, for the pairing */
     size_t pv_bytes;  /* content bytes shown so far */
+    /* the file_edit twin: oldString and newString collect whole (two
+       decoders, two buffers) and render as one side-by-side split at
+       the call's request record - a line-by-line old|new table, the
+       terminal's width halved, lines truncated at their half */
+    jstream_t pe_old; /* oldString decoder */
+    jstream_t pe_new; /* newString decoder */
+    buf_t pe_old_buf; /* its decoded bytes */
+    buf_t pe_new_buf; /* and newString's */
+    bool pe_active;   /* a file_edit call is collecting */
+    bool pe_dead;     /* a syntax break: no split renders */
 } repl_sink_t;
 
 /* the store's write side: called from the sink for every emitted record
@@ -168,6 +178,76 @@ static bool preview_wanted(const char *tool) {
 }
 
 /* the content decoder's sink: decoded bytes go to the display */
+/* the file_edit collectors' sink: decoded bytes append to a buffer */
+static void pv_buf_cb(void *ctx, const char *bytes, size_t n) {
+    buf_t *b = ctx;
+    buf_append(b, bytes, n);
+}
+
+/* the split renderer: one row per line, old left and new right, the
+   terminal's width halved (80 when not a tty - pipes keep a shape),
+   each side truncated at its half minus the ellipsis. the row count is
+   the longer side's; a missing side renders empty cells */
+static void preview_edit_render(repl_sink_t *s) {
+    dspy_ensure_nl(&s->d);
+    dspy_write_str(&s->d, "file_edit (old | new)\n");
+    dspy_rule(&s->d, '-');
+    int cols = tty_cols(s->d.out);
+    if (cols <= 0 || cols > 512) cols = 80;
+    int half = (cols - 3) / 2; /* the ` | ` divider costs three */
+    if (half < 8) half = 8;
+    /* line cursors over both buffers; a buffer without a trailing
+   newline still yields its last line */
+    const char *op = s->pe_old_buf.data ? s->pe_old_buf.data : "";
+    const char *oe = op + s->pe_old_buf.len;
+    const char *np = s->pe_new_buf.data ? s->pe_new_buf.data : "";
+    const char *ne = np + s->pe_new_buf.len;
+    for (;;) {
+        const char *ol = memchr(op, '\n', (size_t)(oe - op));
+        const char *nl = memchr(np, '\n', (size_t)(ne - np));
+        if (!ol && !nl && op == oe && np == ne) break; /* both spent */
+        size_t on = ol ? (size_t)(ol - op) : (size_t)(oe - op);
+        size_t nn = nl ? (size_t)(nl - np) : (size_t)(ne - np);
+        /* old cell: padded to half, truncated with `...` */
+        size_t show = on < (size_t)half ? on : (size_t)half - 3;
+        if (on > show) {
+            dspy_write(&s->d, op, show);
+            dspy_write_str(&s->d, "...");
+        } else {
+            dspy_write(&s->d, op, on);
+            for (size_t k = on; k < (size_t)half; k++)
+                dspy_write_str(&s->d, " ");
+        }
+        dspy_write_str(&s->d, " | ");
+        show = nn < (size_t)half ? nn : (size_t)half - 3;
+        if (nn > show) {
+            dspy_write(&s->d, np, show);
+            dspy_write_str(&s->d, "...");
+        } else {
+            dspy_write(&s->d, np, nn);
+        }
+        dspy_write_str(&s->d, "\n");
+        op = ol ? ol + 1 : oe;
+        np = nl ? nl + 1 : ne;
+    }
+    dspy_write_str(&s->d, "\n");
+}
+
+/* close the file_edit twin: the split renders (unless a syntax break
+   killed it), then the state resets */
+static void preview_edit_close(repl_sink_t *s) {
+    if (!s->pe_active) return;
+    if (!s->pe_dead) preview_edit_render(s);
+    jstream_free(&s->pe_old);
+    jstream_free(&s->pe_new);
+    buf_free(&s->pe_old_buf);
+    buf_free(&s->pe_new_buf);
+    memset(&s->pe_old, 0, sizeof s->pe_old);
+    memset(&s->pe_new, 0, sizeof s->pe_new);
+    s->pe_active = false;
+    s->pe_dead = false;
+}
+
 static void pv_content(void *ctx, const char *bytes, size_t n) {
     repl_sink_t *s = ctx;
     if (!s->pv_open) {
@@ -206,12 +286,38 @@ static void repl_tool_preview(void *ctx, const char *tool, const char *id,
     repl_sink_t *s = ctx;
     /* done carries the closing flush (whole args): the decoder already
        consumed every byte incrementally, nothing feeds - the frame
-       closes at the record or the turn end */
-    /* done carries the closing flush (whole args): the decoder already
-       consumed every byte incrementally, nothing feeds - the frame
        closes at the record or the turn end. disabled sessions (no
        bundled server) never preview */
-    if (done || !s->pv_enabled || !preview_wanted(tool)) return;
+    if (done || !s->pv_enabled) return;
+    if (!strcmp(tool ? tool : "", "file_edit")) {
+        /* the file_edit twin: both strings collect whole; the split
+           renders at the request record (preview_edit_close below) */
+        if (!s->pe_active || (id && *id && s->pv_id[0] &&
+                              strcmp(id, s->pv_id))) {
+            /* fresh state (first call, or a second call before its
+               record: the id changed - chat slots may reuse a pair) */
+            if (s->pe_active) {
+                jstream_free(&s->pe_old);
+                jstream_free(&s->pe_new);
+                buf_free(&s->pe_old_buf);
+                buf_free(&s->pe_new_buf);
+            }
+            jstream_init(&s->pe_old, pv_buf_cb, &s->pe_old_buf, "oldString");
+            jstream_init(&s->pe_new, pv_buf_cb, &s->pe_new_buf, "newString");
+            buf_init(&s->pe_old_buf);
+            buf_init(&s->pe_new_buf);
+            s->pe_active = true;
+            s->pe_dead = false;
+            snprintf(s->pv_id, sizeof s->pv_id, "%s", id ? id : "");
+        }
+        if (!s->pe_dead) {
+            if (!jstream_feed(&s->pe_old, args, n) ||
+                !jstream_feed(&s->pe_new, args, n))
+                s->pe_dead = true;
+        }
+        return;
+    }
+    if (!preview_wanted(tool)) return;
     /* a new call: a fresh id (or none, chat slots stream name-less
        until their first delta) starts a fresh decoder */
     if (!s->pv_active || (id && *id && s->pv_id[0] && strcmp(id, s->pv_id))) {
@@ -329,6 +435,7 @@ static void repl_sink_fn(void *ctx, cJSON *rec) {
         /* a tool call completed: the streaming preview's frame closes
            here - the request line below is the storage moment */
         preview_close(s);
+        preview_edit_close(s); /* the file_edit split, same moment */
         dspy_tool_request(&s->d, rec);
     } else if (k == R_TOOL_RESPONSE) {
         dspy_brief_count(&s->d, rec);
@@ -1665,6 +1772,7 @@ int repl_run_ex(const call_cfg_t *c, const repl_opts_t *o, int in_fd,
         rc = engine_start(e);
         if (rc == 0) rc = engine_run(e);
         preview_close(&sink); /* a frame the record never closed */
+        preview_edit_close(&sink); /* a split the record never drew */
         render_stats_exit(&sink, rc); /* every end of the request */
         /* the turn's end signal: the bell rings and the command runs on
            every end - a completed response, but an interrupted or failed
