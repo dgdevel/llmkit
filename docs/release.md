@@ -60,7 +60,7 @@ make packages TAG=v1.2.3           # same, via make
 |---|---|---|---|
 | `deb` | `ubuntu:22.04` | `llmkit_1.2.3-1_amd64.deb` | ubuntu 22.04/24.04+, debian 12+ |
 | `rpm-fc` | `fedora:41` | `llmkit-1.2.3-1.fc41.x86_64.rpm` | fedora 41+ |
-| `rpm-el9` | `rockylinux:9` | `llmkit-1.2.3-1.el9.x86_64.rpm` | rhel / alma / rocky 9+ |
+| `rpm-el9` | `rockylinux/rockylinux:9` | `llmkit-1.2.3-1.el9.x86_64.rpm` | rhel / alma / rocky 9+ |
 | `arch` | `archlinux:base-devel` | `llmkit-1.2.3-1-x86_64.pkg.tar.zst` | arch, via `pacman -U` |
 | `win` | `africanfuture/msys2-base:linux-latest` | `llmkit-1.2.3-windows-x86_64.zip` | windows 10+ 64-bit |
 | `mac` | `llmkit-osxcross:11.3` (local build) | `llmkit-1.2.3-macos-x86_64.zip` | macOS 10.13+, rosetta 2 on apple silicon |

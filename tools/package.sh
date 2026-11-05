@@ -15,7 +15,10 @@
 # newer, so each target builds on the oldest distro it should support:
 #   deb      ubuntu:22.04          glibc 2.35 -> ubuntu 22.04/24.04+, debian 12+
 #   rpm-fc   fedora:41             -> fedora 41+
-#   rpm-el9  rockylinux:9          -> rhel/alma/rocky 9+
+#   rpm-el9  rockylinux/rockylinux:9 -> rhel/alma/rocky 9+
+#            (the docker hub library rockylinux:9 tag is stale - nov 2023,
+#            9.3; its old mirrorlist names are dead. the rockylinux/
+#            namespace tracks current point releases)
 #   arch     archlinux:base-devel  -> rolling, always current
 #   win      africanfuture/msys2-base:linux-latest
 #                                  arch linux + mingw-w64 cross toolchain;
@@ -62,7 +65,7 @@ for t in $targets; do
     case "$t" in
         deb)     image=ubuntu:22.04;         script=deb.sh  ;;
         rpm-fc)  image=fedora:41;            script=rpm.sh  ;;
-        rpm-el9) image=rockylinux:9;         script=rpm.sh  ;;
+        rpm-el9) image=rockylinux/rockylinux:9;   script=rpm.sh  ;;
         arch)    image=archlinux:base-devel; script=arch.sh ;;
         win)     image=africanfuture/msys2-base:linux-latest; script=win.sh
                  cache=${XDG_CACHE_HOME:-$HOME/.cache}/llmkit-pkg/win

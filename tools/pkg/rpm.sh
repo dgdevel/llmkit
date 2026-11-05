@@ -13,7 +13,19 @@ if [ "$(id -u)" = 0 ]; then
     # --allowerasing: el9 images ship curl-minimal, which conflicts with the
     # full curl package; this lets dnf swap it (no-op on plain fedora)
     dnf install -y -q --allowerasing \
-        gcc make curl ca-certificates libcurl-devel rpm-build >/dev/null
+        gcc make curl ca-certificates libcurl-devel rpm-build >/dev/null || {
+        # rocky mirrors periodically desync from the origin during a
+        # repodata rollout (404 on the hashes the mirrorlist still
+        # advertises). pin the rocky repos to the origin baseurl and
+        # retry once; fedora never enters this branch.
+        for f in /etc/yum.repos.d/rocky*.repo; do
+            grep -q '^mirrorlist=' "$f" || continue
+            sed -i -e 's/^mirrorlist=/#mirrorlist=/' \
+                   -e 's|^#baseurl=http://dl.rockylinux.org|baseurl=https://dl.rockylinux.org|' "$f"
+        done
+        dnf install -y -q --allowerasing \
+            gcc make curl ca-certificates libcurl-devel rpm-build >/dev/null
+    }
 fi
 
 sh tools/pkg/cjson.sh
