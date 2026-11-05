@@ -25,6 +25,7 @@ $ llmkit agent --openai http://localhost:9931/v1 --model llama3.1 \
 
 - **Persistence**: Use `--conversation-store <file>` to save your chat history and resume it later.
 - **Safety**: Use `--read-only` to hide the file-writing built-in tools (`file_create`, `file_edit`, `file_delete`, `file_copy`, `file_move`, `download`). Search and read tools stay; the helper subagent inherits the restriction.
+- **Notifications**: `--bell` rings the terminal bell when the llm ends a turn (both `repl` and `agent`); `--end-turn-command '<command>'` runs a shell command instead, e.g. `--end-turn-command 'notify-send llmkit done'`. They fire on every turn end - success, interruption, or failure.
 
 ### One-off Calls
 For scripts or simple questions, use the `call` command. It takes one prompt and returns one answer.

@@ -953,6 +953,10 @@ typedef struct repl_opts {
     bool read_only;            /* agent --read-only: spawn the built-in
                                    server with its file-writing tools
                                    hidden */
+    bool end_turn_bell;        /* ring the terminal bell when the llm
+                                   ends a turn */
+    const char *end_turn_command; /* shell command run when the llm ends
+                                   a turn; NULL = none */
 } repl_opts_t;
 
 /* run the chat session: records compiled from c, input lines from in_fd,
@@ -975,6 +979,11 @@ int repl_verbose_extract(int argc, char **argv, char *err, size_t errsz);
 int repl_nohelper_extract(int argc, char **argv, char *err, size_t errsz);
 /* the same for --read-only */
 int repl_readonly_extract(int argc, char **argv, char *err, size_t errsz);
+/* pull --bell (seen when *bell_out) and --end-turn-command <cmd>
+   (NULL when absent; owned by argv) out of the repl/agent flag range,
+   in place; returns the compacted flag count, or -1 with err filled */
+int repl_endturn_extract(int argc, char **argv, bool *bell_out,
+                         const char **cmd_out, char *err, size_t errsz);
 /* build the helper's two config files (a jsonl seed for agent-as-tool,
    a jsonl mcp-proxy config renaming its `invoke` to `helper`) plus the
    helper server entry for the session's tools record; the seed carries

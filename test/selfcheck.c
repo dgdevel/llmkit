@@ -5177,6 +5177,53 @@ static void test_agent(void) {
               "agent: --no-helper is agent-only");
     }
 
+    /* ---- --bell / --end-turn-command: extraction, compaction, errors -- */
+    {
+        char err2[256] = "";
+        bool bell = true;
+        const char *cmd = NULL;
+        char *av[] = {"--openai", "http://x", "--bell",
+                      "--end-turn-command", "notify-send hi", "--model",
+                      "m"};
+        int n = repl_endturn_extract(7, av, &bell, &cmd, err2,
+                                     sizeof err2);
+        check(n == 4, "bell: both flags extracted, range compacted");
+        check(bell, "bell: seen");
+        check_str(cmd, "notify-send hi", "bell: command value kept");
+        check_str(av[0], "--openai", "bell: compaction keeps argv order");
+        check_str(av[3], "m", "bell: compaction drops only the flag pair");
+        /* defaults when absent */
+        bell = true;
+        cmd = (const char *)1;
+        char *av2[] = {"--openai", "http://x"};
+        check(repl_endturn_extract(2, av2, &bell, &cmd, err2,
+                                   sizeof err2) == 2 &&
+                  !bell && cmd == NULL,
+              "bell: absent flags report defaults");
+        /* each flag twice is an error */
+        char *av3[] = {"--bell", "--bell"};
+        check(repl_endturn_extract(2, av3, &bell, &cmd, err2,
+                                   sizeof err2) == -1 &&
+                  strstr(err2, "--bell given twice") != NULL,
+              "bell: --bell twice is a usage error");
+        char *av4[] = {"--end-turn-command", "a", "--end-turn-command",
+                       "b"};
+        check(repl_endturn_extract(4, av4, &bell, &cmd, err2,
+                                   sizeof err2) == -1 &&
+                  strstr(err2, "given twice") != NULL,
+              "bell: command flag twice is a usage error");
+        char *av5[] = {"--openai", "--end-turn-command"};
+        check(repl_endturn_extract(2, av5, &bell, &cmd, err2,
+                                   sizeof err2) == -1 &&
+                  strstr(err2, "missing value") != NULL,
+              "bell: missing command value is a usage error");
+        /* the call parser does not know them: extraction owns the flags */
+        char *av6[] = {"--openai", "http://x", "--bell"};
+        check(call_parse_ex(3, av6, &c, err, sizeof err, false) == 1 &&
+                  strstr(err, "unknown flag '--bell'") != NULL,
+              "bell: extraction owns both flags");
+    }
+
     /* ---- the helper subagent: builder shapes ---- */
     {
         char *av[] = {"--openai", "http://x", "--mcp-proxy", "/tmp/fs.jsonl"};

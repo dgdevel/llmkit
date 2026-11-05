@@ -2,8 +2,8 @@
 
 This page explains how a version gets staged, then tagged and published. The scripts are the source of truth. This page is the map. The work is split in two halves that run on two different machines:
 
-- **stage** — inside the build container (docker available, no github access needed): tests, version-stamped build, tarball, distro packages, checksums. Everything lands in `dist/`.
-- **publish** — outside the container, on a machine with `gh` (installed and authenticated with `gh auth login`): verify `dist/`, tag, push, create the GitHub release and upload.
+- **stage** - inside the build container (docker available, no github access needed): tests, version-stamped build, tarball, distro packages, checksums. Everything lands in `dist/`.
+- **publish** - outside the container, on a machine with `gh` (installed and authenticated with `gh auth login`): verify `dist/`, tag, push, create the GitHub release and upload.
 
 The split exists because the build container has docker but no `gh` credentials, and leaking those into the container is not wanted.
 
@@ -17,7 +17,7 @@ tools/publish.sh v1.2.3      # or: make publish TAG=v1.2.3 (outside, needs gh)
 
 `dist/` is the handoff between the two. It must arrive in a checkout of the same commit: stage.sh records the commit in `dist/.staged-commit` and publish.sh refuses to run when it does not match `HEAD`.
 
-### stage — tools/stage.sh
+### stage - tools/stage.sh
 
 [tools/stage.sh](../tools/stage.sh) runs these steps in order:
 
@@ -29,7 +29,7 @@ tools/publish.sh v1.2.3      # or: make publish TAG=v1.2.3 (outside, needs gh)
 6. Checksums. One `dist/checksums-v1.2.3.txt` covers every artifact.
 7. Stamp. The commit is recorded in `dist/.staged-commit`.
 
-### publish — tools/publish.sh
+### publish - tools/publish.sh
 
 [tools/publish.sh](../tools/publish.sh) runs these steps in order:
 

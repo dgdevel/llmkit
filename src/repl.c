@@ -1554,6 +1554,26 @@ int repl_run_ex(const call_cfg_t *c, const repl_opts_t *o, int in_fd,
         rc = engine_start(e);
         if (rc == 0) rc = engine_run(e);
         render_stats_exit(&sink, rc); /* every end of the request */
+        /* the turn's end signal: the bell rings and the command runs on
+           every end - a completed response, but an interrupted or failed
+           turn too (the user's attention was the point) */
+        if (o->end_turn_bell) {
+            dspy_ensure_nl(&sink.d);
+            dspy_write(&sink.d, "\a", 1);
+        }
+        if (o->end_turn_command && *o->end_turn_command) {
+            /* spawn + wait: the command's stdin/stdout are pipes the
+               parent holds closed right away (its output is not the
+               transcript's), stderr passes through as the log channel.
+               blocking by design - a slow notifier would race the next
+               prompt's redraw otherwise */
+            spawn_t sp;
+            if (spawn_shell(o->end_turn_command, &sp) == 0) {
+                if (sp.to_fd >= 0) close(sp.to_fd);
+                if (sp.from_fd >= 0) close(sp.from_fd);
+                spawn_wait(&sp);
+            }
+        }
         last_ending = rc;
         if (rc == EXIT_INTERRUPTED) {
             g_stop_flag = 0; /* consumed: the session continues */
@@ -1599,7 +1619,8 @@ static void repl_usage(FILE *out) {
           "[--system-prompt <text>]\n"
           "                [--header <name=value>]...\n"
           "                [--mcp-proxy <config>]... "
-          "[--terminal-tool <name.tool>]...\n",
+          "[--terminal-tool <name.tool>]...\n"
+          "                [--bell] [--end-turn-command <command>]\n",
           out);
 }
 
@@ -1608,14 +1629,22 @@ int cmd_repl(int argc, char **argv) {
                        the prompt, the orderly stop in a turn */
     call_cfg_t c;
     char err[256] = "";
-    if (call_parse_ex(argc - 2, argv + 2, &c, err, sizeof err, false) != 0) {
+    bool bell = false;
+    const char *endcmd = NULL;
+    int n = repl_endturn_extract(argc - 2, argv + 2, &bell, &endcmd,
+                                 err, sizeof err);
+    if (n < 0 ||
+        call_parse_ex(n, argv + 2, &c, err, sizeof err, false) != 0) {
         fprintf(stderr, "llmkit repl: %s\n", err);
         repl_usage(stderr);
         return EXIT_OUT_OF_CHANNEL;
     }
     char exe[4096];
     self_exe(exe, sizeof exe, argv ? argv[0] : NULL);
-    int rc = repl_run(&c, STDIN_FILENO, stdout, exe, NULL);
+    repl_opts_t o = { .default_prompt = prompt_system_prompts_repl,
+                      .end_turn_bell = bell,
+                      .end_turn_command = endcmd };
+    int rc = repl_run_ex(&c, &o, STDIN_FILENO, stdout, exe, NULL);
     call_cfg_free(&c);
     return rc;
 }
@@ -1722,6 +1751,41 @@ int repl_readonly_extract(int argc, char **argv, char *err, size_t errsz) {
     return seen ? 1 : 0;
 }
 
+/* pull --bell and --end-turn-command <cmd> out of the repl/agent flag
+   range, in place; both share the one pass (a range holds both at most
+   once each). returns the compacted count, or -1 with err filled */
+int repl_endturn_extract(int argc, char **argv, bool *bell_out,
+                         const char **cmd_out, char *err, size_t errsz) {
+    int n = 0;
+    *bell_out = false;
+    *cmd_out = NULL;
+    for (int i = 0; i < argc; i++) {
+        if (!strcmp(argv[i], "--bell")) {
+            if (*bell_out) {
+                snprintf(err, errsz, "--bell given twice");
+                return -1;
+            }
+            *bell_out = true;
+            continue;
+        }
+        if (!strcmp(argv[i], "--end-turn-command")) {
+            if (*cmd_out) {
+                snprintf(err, errsz, "--end-turn-command given twice");
+                return -1;
+            }
+            if (i + 1 >= argc) {
+                snprintf(err, errsz, "missing value for --end-turn-command");
+                return -1;
+            }
+            *cmd_out = argv[i + 1];
+            i++;
+            continue;
+        }
+        argv[n++] = argv[i];
+    }
+    return n;
+}
+
 static void agent_usage(FILE *out) {
     fputs("usage: llmkit agent (--anthropic|--openai|--openai-responses) "
           "<api_base>\n"
@@ -1734,7 +1798,8 @@ static void agent_usage(FILE *out) {
           "[--terminal-tool <name.tool>]...\n"
           "                [--conversation-store <file>] [--verbose] "
           "[--no-helper]\n"
-          "                [--no-deepwiki] [--read-only]\n",
+          "                [--no-deepwiki] [--read-only] [--bell]\n"
+          "                [--end-turn-command <command>]\n",
           out);
 }
 
@@ -1745,6 +1810,8 @@ int cmd_agent_repl(int argc, char **argv) {
     signals_init(); /* SIGINT is an input control here, as in repl */
     char err[256] = "";
     const char *store = NULL;
+    const char *endcmd = NULL;
+    bool bell = false;
     call_cfg_t c;
     int n = repl_store_extract(argc - 2, argv + 2, &store, err, sizeof err);
     if (n >= 0) {
@@ -1767,7 +1834,13 @@ int cmd_agent_repl(int argc, char **argv) {
             if (v < 0)
                 n = -1;
             else {
-                n -= v; /* the verbose flag compacted away */
+            n -= v; /* the verbose flag compacted away */
+            int t = repl_endturn_extract(n, argv + 2, &bell, &endcmd,
+                                         err, sizeof err);
+            if (t < 0)
+                n = -1;
+            else {
+            n -= t; /* the bell/end-turn flags compacted away */
                 n = call_parse_ex(n, argv + 2, &c, err, sizeof err,
                                   false);
                 if (n == 0) {
@@ -1795,13 +1868,17 @@ int cmd_agent_repl(int argc, char **argv) {
                                       /* the built-in server hides its
                                          file-writing tools with
                                          --read-only */
-                                      .read_only = r == 1 };
+                                      .read_only = r == 1,
+                                      /* the turn-end signal flags */
+                                      .end_turn_bell = bell,
+                                      .end_turn_command = endcmd };
                     int rc = repl_run_ex(&c, &o, STDIN_FILENO, stdout, exe,
                                          NULL);
                     call_cfg_free(&c);
                     return rc;
                 }
             }
+        }
         }
         }
         }
