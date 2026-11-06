@@ -176,6 +176,18 @@ static bool tool_is_write(const char *name) {
 
 void builtin_set_read_only(bool ro) { g_builtin_read_only = ro; }
 
+/* --cwd <path>: the directory the tool calls resolve relative paths
+   against. set by the acp server's spawn line (one builtin child per
+   acp session, each with its own workspace); NULL/empty = inherit the
+   spawner's cwd. like --read-only: process-local, applied once before
+   serving, no reset path */
+static char *g_builtin_cwd;
+
+void builtin_set_cwd(const char *cwd) {
+    free(g_builtin_cwd);
+    g_builtin_cwd = cwd && *cwd ? strdup(cwd) : NULL;
+}
+
 /* ================= small utilities ================= */
 
 /* ---- tool entry points (the .c files under src/builtin) ---- */
@@ -315,8 +327,29 @@ int cmd_builtin(int argc, char **argv) {
     for (int i = 2; i < argc; i++) {
         if (!strcmp(argv[i], "--read-only"))
             builtin_set_read_only(true);
-        else {
-            fprintf(stderr, "usage: llmkit builtin-mcp [--read-only]\n");
+        else if (!strcmp(argv[i], "--cwd")) {
+            if (i + 1 >= argc) {
+                fprintf(stderr,
+                        "usage: llmkit builtin-mcp [--read-only] "
+                        "[--cwd <path>]\n");
+                return 1;
+            }
+            builtin_set_cwd(argv[++i]);
+        } else {
+            fprintf(stderr,
+                    "usage: llmkit builtin-mcp [--read-only] "
+                    "[--cwd <path>]\n");
+            return 1;
+        }
+    }
+    if (g_builtin_cwd) {
+        char dir[4096];
+        snprintf(dir, sizeof dir, "%s", g_builtin_cwd);
+        path_slashes(dir); /* windows '\' folds, the path never sees a shell */
+        int rc = path_chdir(dir);
+        if (rc) {
+            fprintf(stderr, "llmkit builtin-mcp: cannot chdir to '%s'\n",
+                    dir);
             return 1;
         }
     }

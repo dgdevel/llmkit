@@ -601,9 +601,19 @@ static int system_append_block(engine_t *e, const char *prompt_text,
 }
 
 /* the prompt's own content block stays first; the file's content rides
-   in its own block after it, prefixed with the content line */
-static int inject_agents_md(engine_t *e, const char *prompt_text) {
-    FILE *f = fopen("AGENTS.md", "r");
+   in its own block after it, prefixed with the content line. shared
+   with the acp server (one engine session per acp session). dir: the
+   workspace to read AGENTS.md from (NULL/empty = the cwd, the repl's
+   own single-session world) */
+int inject_agents_md(engine_t *e, const char *dir, const char *prompt_text) {
+    char path[4096];
+    if (dir && *dir) {
+        snprintf(path, sizeof path, "%s/AGENTS.md", dir);
+        path_slashes(path); /* windows '\' folds like the /cd path */
+    } else {
+        snprintf(path, sizeof path, "AGENTS.md");
+    }
+    FILE *f = fopen(path, "r");
     if (!f) return 0; /* absent: nothing to inject */
     buf_t b;
     buf_init(&b);
@@ -1354,7 +1364,7 @@ static int slash_new(slash_state_t *sl, engine_t *e) {
         }
     }
     if (sl->o->agents_md) {
-        int rc = inject_agents_md(e, NULL);
+        int rc = inject_agents_md(e, NULL, NULL);
         if (rc) return 1;
     }
     dspy_ensure_nl(d);
@@ -1543,14 +1553,14 @@ int repl_run_ex(const call_cfg_t *c, const repl_opts_t *o, int in_fd,
         }
     }
     if (o->agents_md) {
-        rc = inject_agents_md(e, cfg.system);
+        rc = inject_agents_md(e, NULL, cfg.system);
         if (rc) goto done;
     }
     if (o->builtin_mcp) {
         /* the built-in server rides the proxies' tools record: one
            record owns the whole server set (engine_apply replaces) */
         cJSON *tools = call_build_agent_tools(&cfg, exe_path,
-                                              o->read_only);
+                                              o->read_only, NULL);
         char *m = validate_tools(tools);
         if (m) {
             engine_emit_record(e, rec_error(EC_INVALID_RECORD, m, true));

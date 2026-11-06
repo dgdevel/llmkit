@@ -384,9 +384,11 @@ cJSON *call_build_tools(const call_cfg_t *c, const char *exe_path) {
 
 /* the agent surface's tools record: the proxies' record plus the
    built-in generic-use server (`llmkit builtin-mcp` on stdio), one
-   record owning the whole server set */
+   record owning the whole server set. cwd: the child's own workspace
+   (the acp server's per-session spawn, so no parent chdir survives
+   to race a second session); NULL = inherit the spawner's cwd */
 cJSON *call_build_agent_tools(const call_cfg_t *c, const char *exe_path,
-                              bool read_only) {
+                              bool read_only, const char *cwd) {
     cJSON *t = call_build_tools(c, exe_path);
     if (!t) {
         t = cJSON_CreateObject();
@@ -399,6 +401,10 @@ cJSON *call_build_agent_tools(const call_cfg_t *c, const char *exe_path,
     call_shell_quote(&cl, exe_path);
     buf_append_str(&cl, " builtin-mcp");
     if (read_only) buf_append_str(&cl, " --read-only");
+    if (cwd && *cwd) {
+        buf_append_str(&cl, " --cwd ");
+        call_shell_quote(&cl, cwd);
+    }
     cJSON *srv = cJSON_CreateObject();
     cJSON_AddStringToObject(srv, "type", "stdio");
     cJSON_AddStringToObject(srv, "name", "builtin");

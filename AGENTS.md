@@ -18,6 +18,7 @@ This document gives context and instructions for agents that work on the `llmkit
     - `agent.c`: the agent-as-tool runner (`llmkit agent-as-tool`). The `llmkit agent` chat lives in `repl.c`.
     - `wire_openai.c`, `wire_anthropic.c`: the LLM provider wire clients (chat completions, responses, anthropic).
     - `llmproxy.c`: `llmkit proxy`, a plain-http endpoint that forwards to one upstream LLM.
+    - `acp.c`: `llmkit acp`, the agent client protocol server on stdio (Zed et al): ndjson json-rpc, one engine per session, the `--bundle` agent package.
     - `mcp.c`: the MCP client protocol implementation.
     - `proxy.c`: the `llmkit mcp-proxy` configuration pipeline and the stdio server.
     - `builtin.c` + `builtin/`: the `llmkit builtin-mcp` server. `builtin.c`

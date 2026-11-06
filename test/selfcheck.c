@@ -124,6 +124,9 @@ typedef struct fwire {
    fwire_turn (one buffer, read right after the session under test);
    multi-block system records join with \n - the openai wire's join */
 static char g_seen_system[4096];
+/* the last user record's joined text, captured by fwire_turn the same
+   way: the acp prompt-blocks join surfaces here, no real body build */
+static char g_seen_user[4096];
 /* the transcript length at each fake turn: /new drops it to 0 */
 static size_t g_seen_trn;
 
@@ -150,6 +153,22 @@ static int fwire_turn(wire_t *base, engine_t *e, turn_out_t *out) {
     fwire_t *f = (fwire_t *)base;
     capture_system(e); /* per-turn: the /cd system block lands between */
     g_seen_trn = e->tr.n;
+    /* the last user record's text: the acp prompt-blocks join and the
+       steering records surface here (tlist tail walk, user_text_join) */
+    {
+        buf_t ub;
+        buf_init(&ub);
+        g_seen_user[0] = '\0';
+        for (size_t i = e->tr.n; i > 0; i--) {
+            if (e->tr.v[i - 1]->kind == T_USER) {
+                if (user_text_join(e->tr.v[i - 1], &ub) && ub.len > 0)
+                    snprintf(g_seen_user, sizeof g_seen_user, "%s",
+                             ub.data);
+                break;
+            }
+        }
+        buf_free(&ub);
+    }
     memset(out, 0, sizeof *out);
     fturn_t *t = &f->turns[f->pos < f->nturns ? f->pos++ : f->nturns - 1];
     if (t->kind == TURN_FATAL) {
@@ -4975,7 +4994,7 @@ static void test_agent(void) {
         char *av[] = {"--openai", "http://x", "--mcp-proxy", "/tmp/fs.jsonl"};
         check(call_parse_ex(4, av, &c, err, sizeof err, false) == 0,
               "agent: proxy vector parses");
-        cJSON *t = call_build_agent_tools(&c, "/bin", false);
+        cJSON *t = call_build_agent_tools(&c, "/bin", false, NULL);
         buf_t b;
         buf_init(&b);
         buf_append_tree(&b, t);
@@ -4992,7 +5011,7 @@ static void test_agent(void) {
         char *av2[] = {"--openai", "http://x"};
         check(call_parse_ex(2, av2, &c, err, sizeof err, false) == 0,
               "agent: bare vector parses");
-        t = call_build_agent_tools(&c, "/bin", false);
+        t = call_build_agent_tools(&c, "/bin", false, NULL);
         buf_init(&b);
         buf_append_tree(&b, t);
         cJSON_Delete(t);
@@ -5008,7 +5027,7 @@ static void test_agent(void) {
         char *av3[] = {"--openai", "http://x"};
         check(call_parse_ex(2, av3, &c, err, sizeof err, false) == 0,
               "agent: read-only vector parses");
-        t = call_build_agent_tools(&c, "/bin", true);
+        t = call_build_agent_tools(&c, "/bin", true, NULL);
         buf_init(&b);
         buf_append_tree(&b, t);
         cJSON_Delete(t);
@@ -5017,6 +5036,26 @@ static void test_agent(void) {
                   "\"name\":\"builtin\",\"command_line\":\"'/bin' "
                   "builtin-mcp --read-only\"}]}",
                   "agent: read-only rides the built-in command line");
+        buf_free(&b);
+        call_cfg_free(&c);
+    }
+
+    /* ---- the cwd rides the built-in command line (acp sessions) ---- */
+    {
+        call_cfg_t c;
+        memset(&c, 0, sizeof c);
+        c.protocol = PROTO_OPENAI;
+        cJSON *t = call_build_agent_tools(&c, "/bin", false,
+                                          "/tmp/ws one");
+        buf_t b;
+        buf_init(&b);
+        buf_append_tree(&b, t);
+        cJSON_Delete(t);
+        check_str(b.data,
+                  "{\"type\":\"tools\",\"tools\":[{\"type\":\"stdio\","
+                  "\"name\":\"builtin\",\"command_line\":\"'/bin' "
+                  "builtin-mcp --cwd '/tmp/ws one'\"}]}",
+                  "agent: the cwd rides the built-in command line quoted");
         buf_free(&b);
         call_cfg_free(&c);
     }
@@ -5229,7 +5268,7 @@ static void test_agent(void) {
         char *av[] = {"--openai", "http://x", "--mcp-proxy", "/tmp/fs.jsonl"};
         check(call_parse_ex(4, av, &c, err, sizeof err, false) == 0,
               "helper: proxy vector parses");
-        cJSON *base = call_build_agent_tools(&c, "/bin", false);
+        cJSON *base = call_build_agent_tools(&c, "/bin", false, NULL);
 
         engine_t *e = engine_new(NULL, NULL);
         char seedp[512] = "", cfgp[512] = "";
@@ -7257,6 +7296,348 @@ static void test_jstream(void) {
     }
 }
 
+/* ================= acp server (docs/plan-acp.md) ================= */
+
+/* one field of the update object inside a notification tree */
+static const char *acp_up_field(const cJSON *n, const char *f) {
+    const cJSON *u = n ? cJSON_GetObjectItemCaseSensitive(n, "params") : NULL;
+    u = u ? cJSON_GetObjectItemCaseSensitive(u, "update") : NULL;
+    u = u ? cJSON_GetObjectItemCaseSensitive(u, f) : NULL;
+    return cJSON_IsString(u) && u->valuestring ? u->valuestring : NULL;
+}
+
+static void test_acp_translation(void) {
+    cJSON *n, *r;
+
+    /* response partial -> agent_message_chunk */
+    r = cJSON_Parse(
+        "{\"type\":\"response\",\"text\":\"Hel\",\"partial\":true}");
+    n = acp_record_to_update("s1", r);
+    cJSON_Delete(r);
+    check(n != NULL, "acp: partial response translates");
+    check_str(acp_up_field(n, "sessionUpdate"), "agent_message_chunk",
+              "acp: partial response is an agent_message_chunk");
+    cJSON *content = n ? cJSON_GetObjectItemCaseSensitive(
+                             cJSON_GetObjectItemCaseSensitive(n, "params"),
+                             "update")
+                       : NULL;
+    content = content ? cJSON_GetObjectItemCaseSensitive(content, "content")
+                      : NULL;
+    check_str(rec_str(content, "text"), "Hel",
+              "acp: chunk carries the record text");
+    cJSON_Delete(n);
+
+    /* response final (with usage/finish) -> agent_message_chunk too */
+    r = cJSON_Parse(
+        "{\"type\":\"response\",\"text\":\"lo\",\"partial\":false,"
+        "\"usage\":{\"input_tokens\":1,\"output_tokens\":2},"
+        "\"finish_reason\":\"stop\"}");
+    n = acp_record_to_update("s1", r);
+    cJSON_Delete(r);
+    check(n != NULL &&
+              acp_up_field(n, "sessionUpdate") &&
+              !strcmp(acp_up_field(n, "sessionUpdate"), "agent_message_chunk"),
+          "acp: final response is an agent_message_chunk");
+    cJSON_Delete(n);
+
+    /* thinking -> agent_thought_chunk */
+    r = cJSON_Parse(
+        "{\"type\":\"thinking\",\"text\":\"pondering\",\"partial\":false,"
+        "\"signature\":\"sig\"}");
+    n = acp_record_to_update("s1", r);
+    cJSON_Delete(r);
+    check_str(acp_up_field(n, "sessionUpdate"), "agent_thought_chunk",
+              "acp: thinking is an agent_thought_chunk");
+    cJSON_Delete(n);
+
+    /* tool_request -> tool_call with kind, title, id */
+    r = cJSON_Parse(
+        "{\"type\":\"tool_request\",\"tool\":\"file_edit\","
+        "\"arguments\":{\"path\":\"/tmp/x.txt\"},\"id\":\"call_1\","
+        "\"finish_reason\":\"tool_use\"}");
+    n = acp_record_to_update("s1", r);
+    cJSON_Delete(r);
+    check_str(acp_up_field(n, "sessionUpdate"), "tool_call",
+              "acp: tool_request is a tool_call");
+    check_str(acp_up_field(n, "toolCallId"), "call_1",
+              "acp: tool_call id is the record id");
+    check_str(acp_up_field(n, "kind"), "edit",
+              "acp: file_edit kind is edit");
+    check_str(acp_up_field(n, "title"), "file_edit /tmp/x.txt",
+              "acp: title is tool + first string arg");
+    cJSON_Delete(n);
+
+    /* kind table spot checks */
+    struct { const char *tool, *kind; } kinds[] = {
+        { "file_read", "read" },   { "files_search", "read" },
+        { "process_exec", "execute" }, { "web_fetch", "fetch" },
+        { "repo_info", "read" },   { "helper", "think" },
+        { "other_tool", "other" },
+    };
+    for (size_t i = 0; i < sizeof kinds / sizeof kinds[0]; i++) {
+        char j[256];
+        snprintf(j, sizeof j,
+                 "{\"type\":\"tool_request\",\"tool\":\"%s\","
+                 "\"arguments\":{},\"id\":\"c\"}",
+                 kinds[i].tool);
+        r = cJSON_Parse(j);
+        n = acp_record_to_update("s1", r);
+        cJSON_Delete(r);
+        char name[96];
+        snprintf(name, sizeof name, "acp: %s kind is %s", kinds[i].tool,
+                 kinds[i].kind);
+        check(n && acp_up_field(n, "kind") &&
+                  !strcmp(acp_up_field(n, "kind"), kinds[i].kind),
+              name);
+        cJSON_Delete(n);
+    }
+
+    /* long first arg elides in the title (the first string field in
+       argument order, whatever its name) */
+    {
+        char j[512];
+        snprintf(j, sizeof j,
+                 "{\"type\":\"tool_request\",\"tool\":\"file_create\","
+                 "\"arguments\":{\"content\":\"%s\",\"path\":\"p\"},"
+                 "\"id\":\"c\"}",
+                 "01234567890123456789012345678901234567890123456789"
+                 "012345678901234567890123456789ABCDEFGH");
+        r = cJSON_Parse(j);
+        n = acp_record_to_update("s1", r);
+        cJSON_Delete(r);
+        const char *t = acp_up_field(n, "title");
+        check(t && strlen(t) == strlen("file_create ") + 40 + 3 + 15,
+              "acp: long arg title elides to 40+3+15");
+        cJSON_Delete(n);
+    }
+
+    /* tool_response ok -> tool_call_update completed with content */
+    r = cJSON_Parse(
+        "{\"type\":\"tool_response\",\"id\":\"call_1\",\"text\":\"done\"}");
+    n = acp_record_to_update("s1", r);
+    cJSON_Delete(r);
+    check_str(acp_up_field(n, "sessionUpdate"), "tool_call_update",
+              "acp: tool_response is a tool_call_update");
+    check_str(acp_up_field(n, "status"), "completed",
+              "acp: ok response completes");
+    content = n ? cJSON_GetObjectItemCaseSensitive(
+                      cJSON_GetObjectItemCaseSensitive(n, "params"), "update")
+                : NULL;
+    content = content ? cJSON_GetObjectItemCaseSensitive(content, "content")
+                      : NULL;
+    check_str(rec_str(content, "text"), "done",
+              "acp: update content is the response text");
+    cJSON_Delete(n);
+
+    /* tool_response error -> failed with the message */
+    r = cJSON_Parse(
+        "{\"type\":\"tool_response\",\"id\":\"call_2\","
+        "\"text\":\"boom\",\"is_error\":true}");
+    n = acp_record_to_update("s1", r);
+    cJSON_Delete(r);
+    check_str(acp_up_field(n, "status"), "failed",
+              "acp: error response fails");
+    cJSON *err = n ? cJSON_GetObjectItemCaseSensitive(
+                         cJSON_GetObjectItemCaseSensitive(n, "params"),
+                         "update")
+                   : NULL;
+    err = err ? cJSON_GetObjectItemCaseSensitive(err, "error") : NULL;
+    check_str(rec_str(err, "message"), "boom",
+              "acp: failure message is the response text");
+    cJSON_Delete(n);
+
+    /* non-translatable records return NULL */
+    const char *skip[] = {
+        "{\"type\":\"llm\",\"endpoint_protocol\":\"openai\","
+        "\"api_base\":\"http://x\"}",
+        "{\"type\":\"system\",\"content\":[{\"type\":\"text\",\"text\":\"s\"}]}",
+        "{\"type\":\"start\"}",
+        "{\"type\":\"error\",\"code\":\"io_error\",\"message\":\"m\","
+        "\"fatal\":true}",
+    };
+    for (size_t i = 0; i < sizeof skip / sizeof skip[0]; i++) {
+        r = cJSON_Parse(skip[i]);
+        n = acp_record_to_update("s1", r);
+        cJSON_Delete(r);
+        check(n == NULL, "acp: config/control records translate to nothing");
+        cJSON_Delete(n);
+    }
+}
+/* one served line, captured: a fresh memstream per message keeps the
+   checks independent (an open_memstream cannot truncate) */
+static char *acp_serve_one(void *st, const char *line) {
+    char *ob = NULL;
+    size_t on = 0;
+    FILE *out = open_memstream(&ob, &on);
+    g_acp_out = out;
+    acp_test_serve(st, line);
+    fclose(out);
+    g_acp_out = NULL;
+    return ob; /* malloc'd, caller frees; "" when nothing answered */
+}
+
+/* the framing/dispatch surface: initialize, session/new, session/prompt
+   errors, malformed lines, unknown methods, batches */
+static void test_acp_dispatch(void) {
+    void *st = acp_test_state_new("--openai http://x --max-tokens 512");
+    check(st != NULL, "acp: test state builds");
+    char *ob;
+
+    ob = acp_serve_one(st, "garbage");
+    check(ob && strstr(ob, "-32700") != NULL,
+          "acp: malformed line is -32700");
+    free(ob);
+
+    ob = acp_serve_one(
+        st, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\","
+            "\"params\":{\"protocolVersion\":1}}");
+    check(ob && strstr(ob, "\"protocolVersion\":1") != NULL &&
+              strstr(ob, "\"loadSession\":false") != NULL,
+          "acp: initialize banner");
+    free(ob);
+
+    ob = acp_serve_one(
+        st, "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"no/such\"}");
+    check(ob && strstr(ob, "-32601") != NULL,
+          "acp: unknown method is -32601");
+    free(ob);
+
+    ob = acp_serve_one(
+        st, "[{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"x\"}]");
+    check(ob && strstr(ob, "-32600") != NULL,
+          "acp: a batch is rejected as invalid request");
+    free(ob);
+
+    /* a prompt before any session: -32602 */
+    ob = acp_serve_one(
+        st, "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"session/prompt\","
+            "\"params\":{\"sessionId\":\"none\",\"prompt\":"
+            "[{\"type\":\"text\",\"text\":\"hi\"}]}}");
+    check(ob && strstr(ob, "-32602") != NULL,
+          "acp: prompt on an unknown session is -32602");
+    free(ob);
+
+    /* session/new: an engine per session, the id is opaque */
+    ob = acp_serve_one(
+        st, "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"session/new\","
+            "\"params\":{\"cwd\":\".\",\"mcpServers\":[]}}");
+    char sid[80] = "";
+    {
+        const char *q = ob ? strstr(ob, "\"sessionId\":\"") : NULL;
+        if (q) {
+            q += strlen("\"sessionId\":\"");
+            size_t i = 0;
+            while (q[i] && q[i] != '"' && i + 1 < sizeof sid) {
+                sid[i] = q[i];
+                i++;
+            }
+            sid[i] = '\0';
+        }
+    }
+    check(sid[0] != '\0', "acp: session/new answers a session id");
+    free(ob);
+
+    /* a non-text prompt block: -32602, we advertised text only */
+    char line[512];
+    snprintf(line, sizeof line,
+             "{\"jsonrpc\":\"2.0\",\"id\":6,\"method\":\"session/prompt\","
+             "\"params\":{\"sessionId\":\"%s\",\"prompt\":"
+             "[{\"type\":\"image\",\"data\":\"x\"}]}}",
+             sid);
+    ob = acp_serve_one(st, line);
+    check(ob && strstr(ob, "-32602") != NULL,
+          "acp: a non-text prompt block is -32602");
+    free(ob);
+
+    /* cancel with no turn running: the plain {} result */
+    snprintf(line, sizeof line,
+             "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"session/cancel\","
+             "\"params\":{\"sessionId\":\"%s\"}}",
+             sid);
+    ob = acp_serve_one(st, line);
+    check(ob && strstr(ob, "\"id\":7") != NULL &&
+              strstr(ob, "\"result\":{}"),
+          "acp: cancel with no turn answers {}");
+    free(ob);
+
+    /* a notification is never answered */
+    ob = acp_serve_one(
+        st, "{\"jsonrpc\":\"2.0\",\"method\":\"initialized\"}");
+    check(ob && ob[0] == '\0', "acp: notifications get no reply");
+    free(ob);
+
+    acp_test_state_free(st);
+}
+
+/* one full turn through the fake wire: the streamed records reach the
+   protocol as session/update notifications, the prompt answers the
+   mapped stopReason (no network anywhere) */
+static wire_t *acp_ftool_factory(engine_t *e) {
+    (void)e;
+    return g_factory_wire;
+}
+
+static void test_acp_turn(void) {
+    fturn_t turns[] = {
+        { .recs = (const char *[]){
+              "{\"type\":\"response\",\"text\":\"the answer\",\"partial\":false}" },
+          .nrecs = 1, .kind = TURN_FINAL, .abort_after = -1 },
+    };
+    g_factory_wire = fwire_new(turns, 1);
+    g_acp_wire_factory = acp_ftool_factory;
+
+    void *st = acp_test_state_new("--openai http://x");
+    check(st != NULL, "acp: turn test state builds");
+
+    char *ob = acp_serve_one(
+        st, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"session/new\","
+            "\"params\":{\"cwd\":\".\",\"mcpServers\":[]}}");
+    char sid[80] = "";
+    {
+        const char *q = ob ? strstr(ob, "\"sessionId\":\"") : NULL;
+        if (q) {
+            q += strlen("\"sessionId\":\"");
+            size_t i = 0;
+            while (q[i] && q[i] != '"' && i + 1 < sizeof sid) {
+                sid[i] = q[i];
+                i++;
+            }
+            sid[i] = '\0';
+        }
+    }
+    free(ob);
+    check(sid[0] != '\0', "acp: turn session id");
+
+    char line[512];
+    snprintf(line, sizeof line,
+             "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"session/prompt\","
+             "\"params\":{\"sessionId\":\"%s\",\"prompt\":"
+             "[{\"type\":\"text\",\"text\":\"hi\"},{\"type\":\"text\","
+             "\"text\":\"there\"}]}}",
+             sid);
+    ob = acp_serve_one(st, line);
+    /* the streamed text reached the protocol as a chunk */
+    check(ob && strstr(ob, "agent_message_chunk") != NULL &&
+              strstr(ob, "the answer") != NULL,
+          "acp: turn streams an agent_message_chunk");
+    check(ob && strstr(ob, "\"stopReason\":\"end_turn\"") != NULL,
+          "acp: turn answers end_turn");
+    free(ob);
+    /* the prompt blocks joined with \n (two text blocks, one user
+       record): asserted through the fake wire's captured user text */
+    check(strstr(g_seen_user, "hi\nthere") != NULL,
+          "acp: prompt text blocks join with a newline");
+
+    acp_test_state_free(st);
+    g_acp_wire_factory = NULL;
+}
+
+static void test_acp(void) {
+    test_acp_translation();
+    test_acp_dispatch();
+    test_acp_turn();
+}
+
 int main(void) {
     signals_init();
     http_global_init();
@@ -7303,6 +7684,8 @@ int main(void) {
     test_llm_proxy();
     fprintf(stderr, "selfcheck: html tools\n");
     test_html();
+    fprintf(stderr, "selfcheck: acp\n");
+    test_acp();
     fprintf(stderr, "%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
 }

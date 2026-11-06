@@ -34,6 +34,9 @@ static int usage(FILE *out) {
           "  proxy <flags>          plain-http llm endpoint that forwards\n"
           "                         to one upstream and prints the passing\n"
           "                         conversation prettyprint-style\n"
+          "  acp <flags>            agent client protocol server on stdio\n"
+          "                         (ndjson json-rpc): editors like zed\n"
+          "                         drive llmkit as a coding agent\n"
           "  models <flags>         list the models of one endpoint:\n"
           "                         aligned columns, or --json for a\n"
           "                         normalized record per model\n"
@@ -91,6 +94,7 @@ int main(int argc, char **argv) {
         return cmd_prettyprint(argc == 3 ? argv[2] : NULL);
     }
     if (!strcmp(cmd, "proxy")) return cmd_llmproxy(argc, argv);
+    if (!strcmp(cmd, "acp")) return cmd_acp(argc, argv);
     if (!strcmp(cmd, "models")) return cmd_models(argc, argv);
     if (!strcmp(cmd, "update")) return cmd_update(argc, argv);
     if (!strcmp(cmd, "help")) return cmd_help();

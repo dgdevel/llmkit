@@ -18,7 +18,7 @@ SRC  = src/buf.c src/sse.c src/platform.c src/jsonl.c src/jstream.c src/wire_ope
        src/builtin/web.c src/builtin/analyze.c src/builtin/process.c \
        src/builtin/skills.c src/builtin/now.c \
        src/crash_report.c \
-       src/call.c src/models.c src/editor.c src/repl.c src/mcprepl.c \
+       src/call.c src/models.c src/editor.c src/repl.c src/acp.c src/mcprepl.c \
        src/update.c \
        src/pretty.c src/llmproxy.c src/prompts.gen.c \
        src/vendor/linenoise/linenoise.c

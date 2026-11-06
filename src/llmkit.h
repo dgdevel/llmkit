@@ -812,6 +812,9 @@ int builtin_handle(void *ctx, const char *method, cJSON *params, cJSON *id,
 /* flip the server into --read-only (the hidden file-writing tools;
    process-local, no lock - one flag setter before serving or testing) */
 void builtin_set_read_only(bool ro);
+/* the directory the tool calls resolve relative paths against (the
+   acp server's per-session children); NULL = inherit the spawner's */
+void builtin_set_cwd(const char *cwd);
 
 /* ================= call.c ================= */
 
@@ -849,7 +852,7 @@ cJSON *call_build_tools(const call_cfg_t *c, const char *exe_path); /* NULL */
 /* call_build_tools plus the built-in server (`llmkit builtin-mcp` on
    stdio, name "builtin") appended - the agent surface's one record */
 cJSON *call_build_agent_tools(const call_cfg_t *c, const char *exe_path,
-                              bool read_only);
+                              bool read_only, const char *cwd);
 cJSON *call_build_user(const char *prompt);
 /* quote for the shell spawn_shell uses (posix sh / windows cmd.exe) */
 void call_shell_quote(buf_t *b, const char *s);
@@ -1002,6 +1005,10 @@ typedef struct repl_opts {
    rendered transcript on out. Returns the exit code (design sec.12). */
 int repl_run(const call_cfg_t *c, int in_fd, FILE *out, const char *exe_path,
              wire_t *(*factory)(engine_t *));
+/* inject ./AGENTS.md of the current working directory as one more text
+   block after prompt_text (NULL = no leading block); returns the exit
+   code on a read/validation failure, 0 otherwise (shared with acp.c) */
+int inject_agents_md(engine_t *e, const char *dir, const char *prompt_text);
 /* repl_run with the agent extras: the default prompt, the built-in mcp
    server, AGENTS.md injection, conversation store load/persist */
 int repl_run_ex(const call_cfg_t *c, const repl_opts_t *o, int in_fd,
@@ -1181,6 +1188,18 @@ int cmd_call(int argc, char **argv);
 int cmd_repl(int argc, char **argv);
 int cmd_agent_repl(int argc, char **argv); /* llmkit agent */
 int cmd_mcp_repl(int argc, char **argv);
+int cmd_acp(int argc, char **argv); /* llmkit acp: ACP agent on stdio */
+/* the pure record -> session/update translation (selfcheck): returns the
+   notification tree (caller deletes) or NULL when the record carries no
+   acp update (config, control, error records) */
+cJSON *acp_record_to_update(const char *session_id, const cJSON *record);
+/* test hooks (selfcheck): the protocol output channel (stdout in
+   production), and one message served against a test-built state */
+extern FILE *g_acp_out;
+extern wire_t *(*g_acp_wire_factory)(struct engine *);
+void *acp_test_state_new(const char *flag_line); /* NULL on a bad line */
+void acp_test_serve(void *st, const char *line); /* one ndjson line */
+void acp_test_state_free(void *st);
 int cmd_prettyprint(const char *path); /* NULL or "-": stdin */
 int cmd_llmproxy(int argc, char **argv);
 int cmd_models(int argc, char **argv); /* llmkit models: GET /models */
