@@ -475,6 +475,10 @@ static const char *base_ptr(const char *path) {
 }
 
 #ifndef _WIN32 /* xdg trash is a freedesktop thing; windows recycles via shell */
+#if defined(__APPLE__)
+/* macos: ~/.Trash holds plain names, no freedesktop files/info layout */
+#define BM_NO_XDG_TRASH 1
+#endif
 /* is p a directory on the same filesystem as top */
 static bool same_fs_mount(const char *top, const char *p) {
     struct stat a, b;
@@ -502,6 +506,7 @@ static bool trash_name_taken(const char *trash_dir, const char *name) {
    .Trash admin dir without the sticky bit is never touched, and nothing
    is created when the mount is read-only (that caller falls back to a
    real delete). */
+#ifndef BM_NO_XDG_TRASH
 static const char *xdg_trash_layout(const char *src) {
     struct stat st;
     if (BM_LSTAT(src, &st)) return NULL;
@@ -576,6 +581,7 @@ static const char *xdg_trash_layout(const char *src) {
     }
     return NULL;
 }
+#endif /* !BM_NO_XDG_TRASH */
 #endif /* !_WIN32 */
 
 #ifdef _WIN32
@@ -616,7 +622,6 @@ static int trash_move(const char *src, buf_t *into) {
 #if defined(__APPLE__)
     const char *home = getenv("HOME");
     char trash_dir[BM_PATH_MAX], files_dir[BM_PATH_MAX];
-    char *info_dir = NULL;
     bool have_trash = false;
     (void)src;
     if (home && *home &&

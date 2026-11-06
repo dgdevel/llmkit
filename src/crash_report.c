@@ -94,7 +94,12 @@ static char *put_s(char *p, const char *s, size_t n) {
 
 #ifdef __linux__
 /* used only by the optional backtrace path */
-static void write_str(int fd, const char *s, size_t n) { (void)write(fd, s, n); }
+static void write_str(int fd, const char *s, size_t n) {
+    /* warn_unused_result ignores a (void) cast; sink the count instead -
+       nothing can be done with it mid-crash anyway */
+    ssize_t w = write(fd, s, n);
+    (void)w;
+}
 #endif
 
 /* ---- the handler ---- */

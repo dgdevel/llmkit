@@ -26,6 +26,7 @@
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>  /* strncasecmp: POSIX strings.h, darwin libc does not leak it via string.h */
 #include <unistd.h>
 
 /* ================= parsed command line ================= */

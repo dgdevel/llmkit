@@ -1244,6 +1244,7 @@ static const analyzer_t *analyzer_for_ext(const char *path) {
     return NULL;
 }
 
+#ifndef _WIN32 /* the posix mime_of quotes paths; windows never shells out */
 /* single-quote a path for /bin/sh: '...' with each embedded ' closed,
    escaped, reopened ('\'' - nothing inside single quotes is special
    to the shell) */
@@ -1255,6 +1256,7 @@ static void esc_sq(buf_t *out, const char *path) {
     }
     buf_append_byte(out, '\'');
 }
+#endif /* !_WIN32 */
 
 /* malloc'd content type of path, NULL when the os cannot name one.
    posix asks the file(1) utility; windows sniffs the head bytes with

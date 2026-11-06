@@ -564,7 +564,9 @@ int spawn_shell(const char *command_line, spawn_t *out) {
        arms PR_SET_PDEATHSIG: a shell may have forked this process after
        our spawn was already reparented (to init), in which case arming
        the signal would kill the freshly execed helper at once */
+#if defined(__linux__)
     const pid_t spawn_ppid = getppid();
+#endif
     int in_pipe[2], out_pipe[2];
     if (pipe(in_pipe)) return -1;
     if (pipe(out_pipe)) { close(in_pipe[0]); close(in_pipe[1]); return -1; }
