@@ -2664,14 +2664,14 @@ static void test_builtin(void) {
           "builtin: process_status of pid 0 is an error");
     free(t);
 
-    /* the 10s wait ends with the running reply; process_status then
-       follows the same pid to completion */
-    t = bc_call("process_exec", "{\"cmdline\":\"echo started; sleep 11\"}",
+    /* the exec wait (LLMKIT_EXEC_WAIT_MS=2s in the tests) ends with the
+       running reply; process_status then follows the same pid to completion */
+    t = bc_call("process_exec", "{\"cmdline\":\"echo started; sleep 3\"}",
                 &ie);
     check(!ie && t && strstr(t, "is still running") &&
               strstr(t, "Use process_status or process_wait.") &&
               strstr(t, ": STDOUT: started\n"),
-          "builtin: process_exec 10s wait reports still running");
+          "builtin: process_exec wait reports still running");
     long pid = -1;
     if (t) {
         char *pp = strstr(t, "PID ");
@@ -2740,7 +2740,7 @@ static void test_builtin(void) {
         free(t);
     }
 
-    t = bc_call("process_exec", "{\"cmdline\":\"echo waiting; sleep 12\"}",
+    t = bc_call("process_exec", "{\"cmdline\":\"echo waiting; sleep 4\"}",
                 &ie);
     check(!ie && t && strstr(t, "is still running"),
           "builtin: process_wait setup: a pid left running");
@@ -7639,6 +7639,7 @@ static void test_acp(void) {
 }
 
 int main(void) {
+    setenv("LLMKIT_EXEC_WAIT_MS", "2000", 1); /* process_exec tests: fast */
     signals_init();
     http_global_init();
     fprintf(stderr, "selfcheck: prefix invariant\n");

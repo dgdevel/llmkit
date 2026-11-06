@@ -166,7 +166,7 @@ size 17b, type text/plain, 3 lines
 
 ### process_exec(cmdline)
 
-Runs `cmdline` through the shell (posix: `/bin/sh -c`, windows: `%ComSpec% /c`) with stdin connected to the null device, and waits up to 10 seconds for it to finish. stdout and stderr arrive on two separate pipes. Every line is stamped with a wall-clock timestamp and its stream, in the `annotate-output.sh` style with the stream named. A line is attributed when it is read. The order between the two streams at their boundary is therefore the reader's order, not a global one:
+Runs `cmdline` through the shell (posix: `/bin/sh -c`, windows: `%ComSpec% /c`) with stdin connected to the null device, and waits up to 120 seconds for it to finish. stdout and stderr arrive on two separate pipes. Every line is stamped with a wall-clock timestamp and its stream, in the `annotate-output.sh` style with the stream named. A line is attributed when it is read. The order between the two streams at their boundary is therefore the reader's order, not a global one:
 
 ```
 HH:MM:SS: STDOUT: the line

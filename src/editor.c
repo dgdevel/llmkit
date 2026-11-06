@@ -57,6 +57,11 @@ void editor_init(editor_t *ed, FILE *out, int in_fd, const char *prompt) {
     linenoiseSetMultiLine(1); /* long lines wrap across rows, not scroll */
     linenoiseSetCompletionCallback(ed_complete_bridge);
     ed_active = ed;
+    /* bracketed paste on for the session (linenoise parses the marked
+       paste as one block, the display folds it): the mode is the
+       terminal's own, the markers ride the cooked-queue type-ahead a
+       turn leaves queued, so a paste mid-turn still lands whole */
+    if (write(fileno(out), "\x1b[?2004h", 8) == -1) {}
 }
 
 void editor_hist_push(editor_t *ed, const char *line) {
@@ -113,6 +118,8 @@ void editor_free(editor_t *ed) {
     free(ed->lbuf);
     ed->lbuf = NULL;
     buf_free(&ed->line);
+    /* bracketed paste off: the terminal is cooked again for the exit */
+    if (write(fileno(ed->out), "\x1b[?2004l", 8) == -1) {}
 }
 
 /* ---- path completion (@ sigil) ---- */

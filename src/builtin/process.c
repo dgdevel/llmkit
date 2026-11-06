@@ -9,7 +9,7 @@
 #include <sys/types.h>
 #include <time.h>
 
-/* process_exec runs a command line through the shell and waits 10s;
+/* process_exec runs a command line through the shell and waits 2min;
    process_status reports on a pid it spawned - or, minus the output,
    on any other pid in the os; process_wait blocks on one until it
    exits or a timeout passes. Every process owns one
@@ -23,12 +23,25 @@
    a three-line tail. The reply quotes at most three leading and three
    trailing lines, each cut at 150 bytes (utf-8 safe) with a note. */
 
-#define BM_PROC_WAIT_MS 10000  /* process_exec completion wait */
+#define BM_PROC_WAIT_MS 120000 /* process_exec completion wait */
 #define BM_PROC_WAIT_MAX_S 600 /* process_wait timeout ceiling, seconds */
 #define BM_PROC_TAIL 3         /* lines quoted in the reply */
 #define BM_PROC_HEAD 3         /* leading lines quoted in the reply */
 #define BM_PROC_QUOTE 150      /* bytes of a quoted line before a cut */
 #define BM_PROC_LINE_CAP 65536 /* one line's byte cap (newline floods) */
+
+/* the process_exec completion wait in seconds: BM_PROC_WAIT_MS, or
+   LLMKIT_EXEC_WAIT_MS (milliseconds) when it parses in 100..600000 */
+static double exec_wait_s(void) {
+    const char *e = getenv("LLMKIT_EXEC_WAIT_MS");
+    if (e) {
+        char *end = NULL;
+        long v = strtol(e, &end, 10);
+        if (end && *end == '\0' && v >= 100 && v <= 600000)
+            return v / 1000.0;
+    }
+    return BM_PROC_WAIT_MS / 1000.0;
+}
 
 typedef struct proc_rec {
     struct proc_rec *next;
@@ -670,12 +683,14 @@ void tool_process_exec(const cJSON *args, buf_t *out, bool *is_error) {
     }
     p->next = g_procs;
     g_procs = p;
-    /* wait for completion, 10s, polled */
+    /* wait for completion, polled; LLMKIT_EXEC_WAIT_MS overrides the
+       default for the tests */
+    double wait_s = exec_wait_s();
     double t0 = mono_now();
     for (;;) {
         proc_reap(p);
         if (p->exited) break;
-        if (mono_now() - t0 >= BM_PROC_WAIT_MS / 1000.0) break;
+        if (mono_now() - t0 >= wait_s) break;
         msleep(50);
     }
     if (p->exited) {

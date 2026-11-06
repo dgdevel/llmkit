@@ -947,18 +947,30 @@ typedef struct slash_state {
     call_cfg_t cfg;           /* the helper seed's source (its own copy) */
 } slash_state_t;
 
+/* the session's command catalogue: one table for /help, the unknown-
+   command hint and tab completion */
+static const struct {
+    const char *name;
+    const char *desc;
+} slash_commands[] = {
+    { "/help", "this list" },
+    { "/models", "pick the model of the session" },
+    { "/cd", "change the working directory" },
+    { "/new", "start a fresh conversation" },
+};
+
 /* `/help`: the session's command catalogue */
 static void slash_help(dspy_t *d) {
-    const char *lines[] = {
-        "commands:",
-        "  /help          this list",
-        "  /models        pick the model of the session",
-        "  /cd <dir>      change the working directory",
-        "  /new           start a fresh conversation",
-    };
     dspy_ensure_nl(d);
-    for (size_t i = 0; i < sizeof lines / sizeof lines[0]; i++)
-        dspy_write_str(d, lines[i]), dspy_write_str(d, "\n");
+    dspy_write_str(d, "commands:\n");
+    for (size_t i = 0; i < sizeof slash_commands / sizeof slash_commands[0];
+         i++) {
+        char line[128];
+        snprintf(line, sizeof line, "  %-14s %s", slash_commands[i].name,
+                 slash_commands[i].desc);
+        dspy_write_str(d, line);
+        dspy_write_str(d, "\n");
+    }
 }
 
 /* errno text when the platform's codes are errno (posix); windows
@@ -1059,6 +1071,28 @@ static void complete_model(void *ctx, const char *line,
         if (cJSON_IsString(id) && id->valuestring &&
             strstr(id->valuestring, line) == id->valuestring)
             editor_add_candidate(c, id->valuestring);
+    }
+}
+
+/* tab completion on the slash commands: a line that starts with the
+   sigil and carries no blank yet offers the matching commands as
+   whole-line candidates - a unique match is taken as typed-for (then
+   /cd still wants its argument), several extend to the longest common
+   prefix, one that adds nothing lists the menu below the line
+   (the editor's contract, requirements sec.13). Any other line falls
+   through to the path completion of the @ sigil. */
+static void complete_slash(void *ctx, const char *line,
+                           editor_candidates_t *c) {
+    if (!line || line[0] != '/' || strpbrk(line, " \t")) {
+        editor_complete_path(ctx, line, c);
+        return;
+    }
+    size_t tlen = strlen(line);
+    for (size_t i = 0; i < sizeof slash_commands / sizeof slash_commands[0];
+         i++) {
+        const char *nm = slash_commands[i].name;
+        if (!strncmp(nm, line, tlen))
+            editor_add_candidate(c, nm);
     }
 }
 
@@ -1492,8 +1526,9 @@ int repl_run_ex(const call_cfg_t *c, const repl_opts_t *o, int in_fd,
         /* the typed line is the user block: the prompt carries the bold
            sequence, the editor counts its width past the escape */
         editor_init(&ed, out, in_fd, prompt);
-        /* tab completes the trailing @-sigiled path word */
-        ed.on_tab = editor_complete_path;
+        /* tab completes the slash commands on a sigil-led word, the
+           trailing @-sigiled path word on anything else */
+        ed.on_tab = complete_slash;
     } else
         plain_init(&pr, in_fd);
     int last_ending = EXIT_OK; /* EOF before any input exits 0 */

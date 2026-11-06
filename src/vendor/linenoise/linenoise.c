@@ -59,8 +59,9 @@
  *    of the two-stage rule), windows uses the byte-mode console with VT
  *    input, so the escape parsing below is shared verbatim.
  * 2. The tty layer never flushes the input queue, so pasted type-ahead
- *    survives the per-line raw cycle; bracketed paste is NOT armed
- *    (llmkit submits one input per line, requirements sec.12).
+ *    survives the per-line raw cycle; bracketed paste IS armed by the
+ *    editor wrapper (src/editor.c): a marked paste lands whole in the
+ *    buffer, one submit per paste (requirements sec.12).
  * 3. '\n' submits like '\r' (the platform reader normalizes CR to NL).
  * 4. Ctrl-C and an interrupted read (EINTR) both leave the buffer and
  *    the display untouched, pop the live history entry and return NULL
@@ -605,9 +606,9 @@ static int isUnsupportedTerm(void) {
  * never flushes the input queue (TCSANOW, no TCSAFLUSH), so pasted
  * type-ahead survives the per-line raw cycle.
  *
- * Bracketed paste is NOT armed (list item 2): llmkit submits one input
- * per line (requirements sec.12), a folded paste would swallow the
- * newlines. */
+ * Bracketed paste is armed by the editor wrapper (list item 2): the
+ * wrapper writes the mode on/off, the paste parser above does the rest
+ * (one submit per paste, requirements sec.12). */
 static int enableRawMode(int fd) {
     /* Test mode: when LINENOISE_ASSUME_TTY is set, skip terminal setup.
      * This allows testing via pipes without a real terminal. */
