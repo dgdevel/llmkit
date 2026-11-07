@@ -2569,7 +2569,8 @@ static void test_builtin(void) {
               strstr(t, ": STDOUT: 12\n") && !strstr(t, ": STDOUT: 4\n") &&
               !strstr(t, ": STDOUT: 5\n") && !strstr(t, ": STDOUT: 9\n") &&
               strstr(t, "Process output available in") &&
-              strstr(t, "(12 lines)") && !strstr(t, "currently 12 lines"),
+              strstr(t, "(12 lines, use file_read)") &&
+              !strstr(t, "currently 12 lines"),
           "builtin: process_exec quotes head, gap and tail");
     {   /* the temp file holds all twelve stamped lines */
         char path[512] = "";
@@ -2627,7 +2628,7 @@ static void test_builtin(void) {
     check(!ie && t && strstr(t, "Output was cut at 150 characters") &&
               strstr(t, "see full output file for full data") &&
               strstr(t, "Process output available in") &&
-              strstr(t, "(1 lines)"),
+              strstr(t, "(1 lines, use file_read)"),
           "builtin: process_exec long line is cut with a note");
     free(t);
 

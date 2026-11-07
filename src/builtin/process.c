@@ -575,7 +575,7 @@ static void proc_report(buf_t *out, proc_rec_t *p) {
                     "file for full data\n");
     if (cut || p->nlines > (unsigned)BM_PROC_HEAD + (unsigned)BM_PROC_TAIL) {
         /* "currently" only makes sense while output can still grow */
-        buf_appendf(out, "Process output available in %s (%s%llu lines)\n",
+        buf_appendf(out, "Process output available in %s (%s%llu lines, use file_read)\n",
                     p->out_path ? p->out_path : "?",
                     p->exited ? "" : "currently ", p->nlines);
     }
