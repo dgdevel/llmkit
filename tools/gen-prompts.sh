@@ -13,6 +13,10 @@
 # (symbol prompt_system_prompts_<name>) so the agent and helper prompts
 # share their whole tail; common.txt alone is never bundled.
 #
+# One file outside the tree: src/banner.txt, the repl/agent greeting
+# art, bundles as banner_txt (UTF-8 box characters - check-ascii.sh
+# exempts it like the prompts' prose).
+#
 # Symbol of src/prompts/a/b/c.txt: prompt_a_b_c (every non-alphanumeric
 # becomes _). Exactly one trailing newline of each file is stripped -
 # internal newlines stay. An empty file (or one holding nothing but the
@@ -30,6 +34,8 @@ if [ -z "$files" ]; then
     echo "gen-prompts: no .txt under $PROMPTS_DIR" >&2
     exit 1
 fi
+files="$files
+src/banner.txt"
 
 TMP_C="$OUT_C.tmp"
 TMP_H="$OUT_H.tmp"
@@ -56,6 +62,8 @@ while IFS= read -r f; do
     case $rel in
         system_prompts/common)
             continue ;; # bundled only inside the composed texts below
+        src/banner)
+            sym="banner_txt" ;; # the one file outside the prompts tree
         system_prompts/*_header)
             # the agent and helper prompts share their whole tail (rules,
             # tools, output style): <name>_header.txt + common.txt are

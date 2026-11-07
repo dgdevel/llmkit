@@ -65,7 +65,7 @@ fuzz/fuzz_%: fuzz/fuzz_%.c $(SRC) src/llmkit.h src/prompts.gen.h | check-ascii
 # src/prompts/**/*.txt into src/prompts.gen.{c,h} (a changed txt or script
 # regenerates them before the next compilation). both targets share the
 # one recipe run: gen-prompts.sh writes the pair together.
-src/prompts.gen.c src/prompts.gen.h: $(PROMPTS_TXT) tools/gen-prompts.sh
+src/prompts.gen.c src/prompts.gen.h: $(PROMPTS_TXT) src/banner.txt tools/gen-prompts.sh
 	tools/gen-prompts.sh
 
 # runs before every compilation (order-only: gates the build without

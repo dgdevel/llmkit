@@ -1572,6 +1572,12 @@ int repl_run_ex(const call_cfg_t *c, const repl_opts_t *o, int in_fd,
         engine_apply_config_record(e, opts);
         cJSON_Delete(opts);
     }
+    /* the greeting banner: the interactive shell's first sight, ahead
+       of every block the session opens (the agent's headstart listing,
+       a store replay). tty only - a piped session's stdout stays the
+       clean transcript; an empty banner.txt bundles as "" and shows
+       nothing */
+    if (tty && *banner_txt) dspy_write_str(&sink.d, banner_txt);
     if (o->headstart) {
         /* the agent's head start: the working directory's listing as
            the session's first extra system block, ahead of AGENTS.md -

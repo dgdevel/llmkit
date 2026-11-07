@@ -4,7 +4,8 @@
 # Scope: every file git knows about plus untracked files, minus gitignored
 # ones (git ls-files --cached --others --exclude-standard) - exactly the set
 # of files that would enter a commit - except src/prompts (the prompt texts
-# are prose the owner may shape freely, non-ASCII included).
+# are prose the owner may shape freely, non-ASCII included) and
+# src/banner.txt (the greeting art's UTF-8 box characters).
 #
 # Detection: with LC_ALL=C, grep works on raw bytes, and any byte outside
 # ASCII is neither [:print:] nor [:space:], so one bracket class flags them
@@ -17,6 +18,7 @@ cd "$(dirname "$0")/.." || exit 2
 
 hits=$(git ls-files --cached --others --exclude-standard |
     grep -v '^src/prompts/' |
+    grep -v '^src/banner\.txt$' | # the greeting art: UTF-8 box characters
     grep -v -E '^fuzz/(fuzz_[a-z_]+|out/|seeds/mcp_tools/.*\.bin|seeds/regex/.*\.bin)$' |
     while IFS= read -r f; do
         LC_ALL=C grep -Hn '[^[:print:][:space:]]' "$f" || true
