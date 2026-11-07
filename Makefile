@@ -5,7 +5,7 @@ CFLAGS  ?= -O2
 # -rdynamic exports function names into the dynsym so the crash file
 # itself names frames (+~25KB, no runtime cost). the packages build
 # unstripped through here alike (tools/pkg/*.sh).
-CFLAGS  += -std=c11 -Wall -Wextra -pthread -g -rdynamic -Isrc
+CFLAGS  += -std=c11 -Wall -Wextra -pthread -g -Isrc
 CFLAGS  += $(EXTRA_CFLAGS)
 # json parser: system libcjson by default; distro packaging links a pinned
 # static build instead (make CJSON=/tmp/cj/libcjson.a EXTRA_CFLAGS=-I/tmp/cj/include)
@@ -47,6 +47,12 @@ SRC += src/vendor/regex/regcomp.c src/vendor/regex/regexec.c \
 CFLAGS += -Isrc/vendor/regex -include src/win_regex_glue.h
 # FindMimeFromData (builtin/analyze.c content-type sniff)
 LDLIBS += -lurlmon -lole32
+else
+# -rdynamic exports function names into the dynsym so the crash file
+# itself names frames (+~25KB, no runtime cost). elf only: mingw's
+# linker rejects the flag outright (mac crosses fine - mach-o takes it
+# as --export-dynamic). see the crash report docs (docs/crash-report.md).
+CFLAGS += -rdynamic
 endif
 
 all: llmkit
