@@ -1,6 +1,11 @@
 CC      ?= cc
 CFLAGS  ?= -O2
-CFLAGS  += -std=c11 -Wall -Wextra -pthread -Isrc
+# symbols for the crash report's default-on backtrace (crash_report.c):
+# -g keeps the symtab (offline symbolization with addr2line), and
+# -rdynamic exports function names into the dynsym so the crash file
+# itself names frames (+~25KB, no runtime cost). the packages build
+# unstripped through here alike (tools/pkg/*.sh).
+CFLAGS  += -std=c11 -Wall -Wextra -pthread -g -rdynamic -Isrc
 CFLAGS  += $(EXTRA_CFLAGS)
 # json parser: system libcjson by default; distro packaging links a pinned
 # static build instead (make CJSON=/tmp/cj/libcjson.a EXTRA_CFLAGS=-I/tmp/cj/include)

@@ -242,8 +242,11 @@ void crash_report_init(const char *path_env) {
         g_hdr_argv_len = (size_t)snprintf(g_hdr_argv, sizeof g_hdr_argv,
                                           "argv0: %s\n", g_argv0);
 
+    /* default on (symbols kept in release builds): the crash file names
+       frames. LLMKIT_CRASH_BACKTRACE=0 restores the strictly-safe path
+       (see docs/crash-report.md caveats). */
     const char *bt = getenv("LLMKIT_CRASH_BACKTRACE");
-    g_want_bt = (bt && !strcmp(bt, "1"));
+    g_want_bt = !(bt && !strcmp(bt, "0"));
 
 #ifdef _WIN32
     signal(SIGSEGV, crash_handler);

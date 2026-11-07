@@ -35,7 +35,7 @@ subcommand is recorded the same way.
 | variable | default | effect |
 | --- | --- | --- |
 | `LLMKIT_CRASH_FILE` | unset | report file path override (single append-only file instead of one file per crash) |
-| `LLMKIT_CRASH_BACKTRACE` | unset | `1` appends a `backtrace_symbols_fd` dump (Linux only, see caveat below) |
+| `LLMKIT_CRASH_BACKTRACE` | unset = on | `0` turns the backtrace off (Linux only; see caveat below) |
 
 ## What one record says
 
@@ -63,9 +63,14 @@ breadcrumb is set there).
 
 - **backtrace is not guaranteed safe**: `backtrace()` /
   `backtrace_symbols_fd` are not on the POSIX async-signal-safe list;
-  libgcc documents them as *usually* safe. That is why the feature is
-  off by default and gated behind `LLMKIT_CRASH_BACKTRACE=1` - the
-  default path stays strictly safe.
+  libgcc documents them as *usually* safe. It is on by default - the
+  value of named frames in a user-attached report outweighs the rare
+  deadlock inside an already-crashing process - and
+  `LLMKIT_CRASH_BACKTRACE=0` restores the strictly safe path. Release
+  builds export function names (`-rdynamic`): frames print named
+  inline. `static` functions and stripped binaries still print raw
+  addresses - resolve offline with `addr2line -e <binary> <off>` (the
+  release binaries keep their symtab).
 - **`g_last_method` is a breadcrumb, not a log**: it holds only the most
   recent method name, bounded at 127 bytes.
 - only fatal signals are reported (`SIGSEGV`, `SIGBUS`, `SIGILL`,
@@ -85,7 +90,7 @@ shown here with `builtin-mcp`:
 
 ```
 make asan
-LLMKIT_CRASH_BACKTRACE=1 ./build/asan/llmkit-asan builtin-mcp
+./build/asan/llmkit-asan builtin-mcp
 ```
 
 Reproduce the load; asan prints the defect (heap overflow, uaf, stack

@@ -35,8 +35,6 @@ case "$trip" in
     *) echo "win.sh: $cc targets $trip, want *-w64-mingw32" >&2; exit 1 ;;
 esac
 command -v make >/dev/null 2>&1 || { echo "win.sh: no make" >&2; exit 1; }
-strip_cmd="$trip-strip"
-command -v "$strip_cmd" >/dev/null 2>&1 || strip_cmd=""
 
 # ---- dependencies: pinned, cross-built, static -------------------------------
 # curl takes minutes to cross-build, so the installed prefix is cached
@@ -106,7 +104,9 @@ if [ -n "$out" ]; then
 else
     echo "win.sh: warning: cannot run $exe on this host - stamp not verified" >&2
 fi
-[ -z "$strip_cmd" ] || "$strip_cmd" "$exe"
+# not stripped: the crash report's backtrace needs the symbols (the
+# linux packages build with -g alike, tools/pkg/*.sh rely on the Makefile)
+:
 
 # ---- pack --------------------------------------------------------------------
 arch=$(printf '%s' "$trip" | cut -d- -f1)

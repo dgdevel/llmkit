@@ -45,8 +45,6 @@ case "$trip" in
     *) echo "mac.sh: $cc targets $trip, want *-apple-darwin" >&2; exit 1 ;;
 esac
 command -v make >/dev/null 2>&1 || { echo "mac.sh: no make" >&2; exit 1; }
-strip_cmd="$trip-strip"
-command -v "$strip_cmd" >/dev/null 2>&1 || strip_cmd=""
 
 # ---- dependencies: pinned, cross-built, static -------------------------------
 # openssl and curl together take a while to cross-build, so the installed
@@ -146,7 +144,9 @@ if [ -n "$out" ]; then
 else
     echo "mac.sh: warning: cannot run $bin on this host - stamp not verified" >&2
 fi
-[ -z "$strip_cmd" ] || "$strip_cmd" "$bin"
+# not stripped: the crash report's backtrace needs the symbols (the
+# linux packages build with -g alike, tools/pkg/*.sh rely on the Makefile)
+:
 file_out=$(file "$bin" 2>/dev/null || true)
 printf '%s\n' "$file_out" | grep -q "Mach-O" \
     || { echo "mac.sh: $bin is not a Mach-O binary: $file_out" >&2; exit 1; }
