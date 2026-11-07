@@ -989,6 +989,12 @@ typedef struct repl_opts {
     bool helper_tool;           /* agent: attach the `helper` subagent -
                                    this same agent as one tool (the
                                    subagent's copy lacks it) */
+    const char *helper_model;   /* agent --helper-model: the helper's
+                                   own model, NULL = inherit the
+                                   session's */
+    const char *helper_effort;  /* agent --helper-reasoning-effort: the
+                                   helper's own reasoning effort, NULL =
+                                   inherit the session's */
     bool deepwiki_tool;         /* agent: attach the free deepwiki server
                                    through an mcp-proxy wrapper that
                                    renames its tools */
@@ -1023,6 +1029,11 @@ int repl_store_extract(int argc, char **argv, const char **store,
 int repl_verbose_extract(int argc, char **argv, char *err, size_t errsz);
 /* the same for --no-helper */
 int repl_nohelper_extract(int argc, char **argv, char *err, size_t errsz);
+/* pull --helper-model <m> and --helper-reasoning-effort <e> out of the
+   agent flag range, in place; NULL keeps each unset. returns the
+   compacted count, or -1 with err filled */
+int repl_helperopts_extract(int argc, char **argv, const char **model,
+                            const char **effort, char *err, size_t errsz);
 /* the same for --read-only */
 int repl_readonly_extract(int argc, char **argv, char *err, size_t errsz);
 /* pull --bell (seen when *bell_out) and --end-turn-command <cmd>

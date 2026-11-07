@@ -951,6 +951,12 @@ typedef struct slash_state {
     char *effort;             /* owned: the cfg copy's reasoning_effort,
                                  swapped by /thinking (same rule as the
                                  model's) */
+    char *h_model;            /* owned: the helper's own model when the
+                                 flags or /helper-model set it; NULL =
+                                 inherit the session's (cfg copy) */
+    char *h_effort;           /* owned: the helper's own reasoning
+                                 effort, /helper-thinking's; NULL =
+                                 inherit the session's */
 } slash_state_t;
 
 /* the session's command catalogue: one table for /help, the unknown-
@@ -962,6 +968,8 @@ static const struct {
     { "/help", "this list" },
     { "/models", "pick the model of the session" },
     { "/thinking", "pick the reasoning effort of the session" },
+    { "/helper-model", "pick the model of the helper subagent" },
+    { "/helper-thinking", "pick the reasoning effort of the helper" },
     { "/cd", "change the working directory" },
     { "/new", "start a fresh conversation" },
 };
@@ -1289,6 +1297,76 @@ static int slash_models(slash_state_t *sl, engine_t *e) {
    of the llm record (model) or a string field of its
    inference_options object (reasoning_effort). 0 applied, 2 failure
    (message already drawn) */
+
+/* the cfg copy's field of a session-owned string: where /models and
+   /thinking park their swaps (the borrowed pointers never freed) */
+static char **cfg_ptr(slash_state_t *sl, const char *field) {
+    return !strcmp(field, "model") ? &sl->cfg.model
+                                   : &sl->cfg.reasoning_effort;
+}
+
+/* drop the helper entry from the live tools record, rewrite its seed
+   and proxy-config files from the cfg copy, re-add it - the reconcile
+   respawns the child on the fresh seed. the seed's llm carries the
+   helper's own overrides (h_model/h_effort) when set, the session's
+   fields otherwise. 0 rebuilt, 2 failure (message already drawn) */
+static int helper_rebuild(slash_state_t *sl, engine_t *e) {
+    dspy_t *d = sl->d;
+    if (e->tools_cfg) {
+        cJSON *list = cJSON_GetObjectItemCaseSensitive(e->tools_cfg,
+                                                       "tools");
+        if (cJSON_IsArray(list)) {
+            cJSON *kept = cJSON_CreateArray();
+            if (!kept) return 2;
+            const cJSON *s;
+            cJSON_ArrayForEach(s, list) {
+                if (strcmp(rec_str(s, "name"), "helper"))
+                    cJSON_AddItemToArray(kept, cJSON_Duplicate((cJSON *)s, 1));
+            }
+            cJSON_DeleteItemFromObject(e->tools_cfg, "tools");
+            cJSON_AddItemToObject(e->tools_cfg, "tools", kept);
+        }
+    }
+    /* the rebuild's cfg view: the helper's own overrides stand in the
+       session's fields for the seed's llm record (shallow copy, the
+       strings outlive the call - the slash state owns them) */
+    call_cfg_t hc = sl->cfg;
+    if (sl->h_model) hc.model = sl->h_model;
+    if (sl->h_effort) hc.reasoning_effort = sl->h_effort;
+    /* the rewrite: the old seed and cfg files (their children hold no
+       descriptors - each read its file fully at startup) go first, the
+       rebuild fills the slots with its own fresh temps */
+    remove(sl->seed_path);
+    remove(sl->cfg_path);
+    cJSON *helper_srv = NULL;
+    int rc = repl_helper_build(&hc, prompt_system_prompts_helper,
+                               e->tools_cfg, sl->exe_path, sl->o->full_tools,
+                               e, (char *)sl->seed_path,
+                               strlen(sl->seed_path) + 1,
+                               (char *)sl->cfg_path,
+                               strlen(sl->cfg_path) + 1, &helper_srv);
+    if (rc == EXIT_OK) {
+        cJSON *tools = e->tools_cfg
+                           ? cJSON_Duplicate(e->tools_cfg, 1)
+                           : cJSON_Parse("{\"type\":\"tools\",\"tools\":[]}");
+        cJSON_AddItemToArray(cJSON_GetObjectItemCaseSensitive(tools, "tools"),
+                             helper_srv);
+        char *m2 = validate_tools(tools);
+        if (m2) {
+            dspy_error_line(d, NULL, m2);
+            free(m2);
+            cJSON_Delete(tools);
+            rc = EXIT_IO_ERROR;
+        } else {
+            engine_apply_config_record(e, tools);
+            cJSON_Delete(tools);
+        }
+    } else if (helper_srv) {
+        cJSON_Delete(helper_srv);
+    }
+    return rc == EXIT_OK ? 0 : 2;
+}
+
 static int slash_llm_swap(slash_state_t *sl, engine_t *e, const char *field,
                           const char *value, const char *done_fmt) {
     dspy_t *d = sl->d;
@@ -1319,65 +1397,20 @@ static int slash_llm_swap(slash_state_t *sl, engine_t *e, const char *field,
         /* the seed rebuild reads the cfg copy: the field moves to the
            picked one there too (the session's llm record already did).
            the copy's string is session-owned (repl_run_ex swapped the
-           borrowed pointers out) - only that one frees */
+           borrowed pointers out) - only that one frees. a helper with
+           its own override of this field keeps it - /models and
+           /thinking never clobber it */
         char **slot = !strcmp(field, "model") ? &sl->model : &sl->effort;
-        char **cfgf = !strcmp(field, "model") ? &sl->cfg.model
-                                              : &sl->cfg.reasoning_effort;
-        free(*slot);
-        *slot = strdup(value);
-        if (!*slot) return 2; /* engine already applied - nothing more */
-        *cfgf = *slot;
-        /* the rebuild drops the old helper entry from the live tools
-           record: the spawn keeps its config path, the rewritten seed
-           file carries the new model, reconcile swaps the child */
-        if (e->tools_cfg) {
-            cJSON *list =
-                cJSON_GetObjectItemCaseSensitive(e->tools_cfg, "tools");
-            if (cJSON_IsArray(list)) {
-                cJSON *kept = cJSON_CreateArray();
-                if (!kept) return 2; /* engine applied - nothing more */
-                const cJSON *s;
-                cJSON_ArrayForEach(s, list) {
-                    if (strcmp(rec_str(s, "name"), "helper"))
-                        cJSON_AddItemToArray(kept,
-                                             cJSON_Duplicate((cJSON *)s, 1));
-                }
-                cJSON_DeleteItemFromObject(e->tools_cfg, "tools");
-                cJSON_AddItemToObject(e->tools_cfg, "tools", kept);
-            }
+        char *over =
+            !strcmp(field, "model") ? sl->h_model : sl->h_effort;
+        if (!over) {
+            free(*slot);
+            *slot = strdup(value);
+            if (!*slot) return 2; /* engine already applied - nothing
+                                     more */
+            *cfg_ptr(sl, field) = *slot;
         }
-        /* rewrite: the old seed and cfg files (their children hold no
-           descriptors - each read its file fully at startup) go first,
-           the rebuild fills the slots with its own fresh temps */
-        remove(sl->seed_path);
-        remove(sl->cfg_path);
-        cJSON *helper_srv = NULL;
-        int rc = repl_helper_build(&sl->cfg, prompt_system_prompts_helper,
-                                   e->tools_cfg, sl->exe_path,
-                                   sl->o->full_tools, e,
-                                   (char *)sl->seed_path,
-                                   strlen(sl->seed_path) + 1,
-                                   (char *)sl->cfg_path,
-                                   strlen(sl->cfg_path) + 1, &helper_srv);
-        if (rc == EXIT_OK) {
-            cJSON *tools = e->tools_cfg
-                               ? cJSON_Duplicate(e->tools_cfg, 1)
-                               : cJSON_Parse("{\"type\":\"tools\",\"tools\":[]}");
-            cJSON_AddItemToArray(
-                cJSON_GetObjectItemCaseSensitive(tools, "tools"), helper_srv);
-            char *m2 = validate_tools(tools);
-            if (m2) {
-                dspy_error_line(d, NULL, m2);
-                free(m2);
-                cJSON_Delete(tools);
-                rc = EXIT_IO_ERROR;
-            } else {
-                engine_apply_config_record(e, tools);
-                cJSON_Delete(tools);
-            }
-        } else if (helper_srv) {
-            cJSON_Delete(helper_srv);
-        }
+        helper_rebuild(sl, e);
     }
     {
         char msg[300];
@@ -1482,6 +1515,201 @@ static int slash_thinking(slash_state_t *sl, engine_t *e) {
                           "reasoning effort: %s");
 }
 
+/* the helper's own override of one field: its current value (the
+   override when set, the session's inherited one otherwise), the
+   shared picker prompt, and whether an override is live */
+static void helper_cur(slash_state_t *sl, const char *field, char *cur,
+                       size_t sz, bool *over) {
+    const char *own = !strcmp(field, "model") ? sl->h_model : sl->h_effort;
+    const char *sess = !strcmp(field, "model") ? sl->cfg.model
+                                               : sl->cfg.reasoning_effort;
+    *over = own != NULL;
+    snprintf(cur, sz, "%s", own ? own : (sess ? sess : ""));
+}
+
+/* apply one helper field: set (or reset, value NULL) the override,
+   rebuild the helper's seed. the session's llm record is never
+   touched. 0 applied, 2 failure (message already drawn) */
+static int helper_set(slash_state_t *sl, engine_t *e, const char *field,
+                      const char *value) {
+    dspy_t *d = sl->d;
+    char **slot = !strcmp(field, "model") ? &sl->h_model : &sl->h_effort;
+    if (!value) { /* `inherit`: the override drops, the session's field
+                     stands again */
+        free(*slot);
+        *slot = NULL;
+    } else {
+        char *nv = strdup(value);
+        if (!nv) return 2;
+        free(*slot);
+        *slot = nv;
+    }
+    int rc = helper_rebuild(sl, e);
+    if (rc) return rc;
+    bool over;
+    char cur[128];
+    helper_cur(sl, field, cur, sizeof cur, &over);
+    char msg[300];
+    int mn;
+    if (!*slot) /* the reset: the inherited value, spelled out */
+        mn = snprintf(msg, sizeof msg,
+                      !strcmp(field, "model")
+                          ? "helper model: %s (inherited)"
+                          : "helper reasoning effort: %s (inherited)",
+                      *cur ? cur : "(none)");
+    else
+        mn = snprintf(msg, sizeof msg,
+                      !strcmp(field, "model") ? "helper model: %s"
+                                              : "helper reasoning effort: %s",
+                      *slot);
+    dspy_write(d, msg, (size_t)mn >= sizeof msg ? sizeof msg - 1
+                                                : (size_t)mn);
+    dspy_write_str(d, "\n");
+    return 0;
+}
+
+/* `/helper-model` and `/helper-thinking`: the same pickers the
+   session's own /models and /thinking run, but the pick lands on the
+   helper's seed alone - the session's llm record never moves. `inherit`
+   as the typed line drops the override, the helper follows the
+   session's field again. 0 applied, 1 canceled, 2 failure */
+/* `/helper-model` and `/helper-thinking`: the same pickers the
+   session's own /models and /thinking run, but the pick lands on the
+   helper's seed alone - the session's llm record never moves. `inherit`
+   as the typed line drops the override, the helper follows the
+   session's field again. 0 applied, 1 canceled, 2 failure */
+static int slash_helper_pick(slash_state_t *sl, engine_t *e,
+                             const char *field) {
+    dspy_t *d = sl->d;
+    bool is_model = !strcmp(field, "model");
+    if (!sl->o->helper_tool) {
+        dspy_ensure_nl(d);
+        dspy_write_str(d, "no helper in this session - agent attaches it, "
+                          "--no-helper drops it\n");
+        return 1;
+    }
+    if (!is_model && e->protocol == PROTO_ANTHROPIC) {
+        /* the session's /thinking note holds here: anthropic carries a
+           token budget, no effort ladder */
+        dspy_ensure_nl(d);
+        dspy_write_str(d,
+                       "no reasoning-effort levels on the anthropic "
+                       "protocol - its thinking rides a token budget "
+                       "(--max-tokens and inference_options "
+                       "thinking_budget)\n");
+        return 1;
+    }
+    bool over;
+    char cur[128];
+    helper_cur(sl, field, cur, sizeof cur, &over);
+    /* the model picker's list (the session's own flags' source of
+       truth), held for the tab completion and the loop's validation;
+       the effort picker needs no fetch */
+    cJSON *models = NULL;
+    if (is_model) {
+        const cJSON *headers =
+            cJSON_GetObjectItemCaseSensitive(e->llm, "headers");
+        char err[256] = "";
+        models = models_fetch(e->protocol, rec_str(e->llm, "api_base"),
+                              rec_str(e->llm, "api_key"), headers, err,
+                              sizeof err);
+        if (!models) {
+            dspy_error_line(d, NULL, err);
+            return 2;
+        }
+        if (d->io_fail) {
+            cJSON_Delete(models);
+            return 2;
+        }
+        if (!cJSON_GetArraySize(models)) {
+            dspy_error_line(d, NULL, "no models reported");
+            cJSON_Delete(models);
+            return 2;
+        }
+    }
+    /* the listing */
+    dspy_ensure_nl(d);
+    if (is_model) {
+        size_t idw = 2;
+        const cJSON *it;
+        cJSON_ArrayForEach(it, models) {
+            const cJSON *v = cJSON_GetObjectItemCaseSensitive(it, "id");
+            if (cJSON_IsString(v) && strlen(v->valuestring) > idw)
+                idw = strlen(v->valuestring);
+        }
+        cJSON_ArrayForEach(it, models) {
+            const cJSON *id = cJSON_GetObjectItemCaseSensitive(it, "id");
+            if (!cJSON_IsString(id)) continue;
+            char ln[512];
+            int wn = snprintf(ln, sizeof ln, "  %-*s", (int)idw,
+                              id->valuestring);
+            dspy_write(d, ln, (size_t)wn >= sizeof ln ? sizeof ln - 1
+                                                      : (size_t)wn);
+            dspy_write_str(d, "\n");
+        }
+    } else {
+        dspy_write_str(d, "reasoning effort levels: ");
+        for (size_t i = 0; i < sizeof effort_rungs / sizeof effort_rungs[0];
+             i++) {
+            if (i) dspy_write_str(d, ", ");
+            dspy_write_str(d, effort_rungs[i]);
+        }
+        dspy_write_str(d, "\n");
+        dspy_write_str(d,
+                       "(endpoints may support a subset or other spellings - "
+                       "a typed line is taken verbatim)\n");
+    }
+    {
+        char msg[220];
+        int mn = snprintf(msg, sizeof msg,
+                          "(current %s%s - empty keeps it, 'inherit' "
+                          "follows the session, ctrl-c cancels)",
+                          *cur ? cur : "(none)", over ? ", own" : "");
+        dspy_write(d, msg, (size_t)mn >= sizeof msg ? sizeof msg - 1
+                                                    : (size_t)mn);
+        dspy_write_str(d, "\n");
+    }
+    int rc = 1;
+    for (;;) {
+        int r = is_model ? pick_read_model(sl, models) : pick_read_effort(sl);
+        if (r) { /* canceled or failed */
+            if (r == 2) d->io_fail = true;
+            rc = r;
+            break;
+        }
+        if (!sl->pick.len) break; /* empty line: keep the current */
+        if (!strcmp(sl->pick.data, "inherit")) {
+            rc = helper_set(sl, e, field, NULL);
+            break;
+        }
+        if (is_model) {
+            bool found = false;
+            const cJSON *it;
+            cJSON_ArrayForEach(it, models) {
+                const cJSON *id = cJSON_GetObjectItemCaseSensitive(it, "id");
+                if (cJSON_IsString(id) && id->valuestring &&
+                    !strcmp(id->valuestring, sl->pick.data))
+                    found = true;
+            }
+            if (!found) {
+                char msg[400];
+                int mn = snprintf(msg, sizeof msg,
+                                  "no '%s' in the list - pick again",
+                                  sl->pick.data);
+                dspy_write(d, msg,
+                           (size_t)mn >= sizeof msg ? sizeof msg - 1
+                                                    : (size_t)mn);
+                dspy_write_str(d, "\n");
+                continue;
+            }
+        }
+        rc = helper_set(sl, e, field, sl->pick.data);
+        break;
+    }
+    cJSON_Delete(models);
+    return rc;
+}
+
 /* the headstart's display twin: the listing is a system block, not a
    transcript tool call, but the shell shows it as the files_list call
    it stands for - request line then reply text, brief style. display
@@ -1574,6 +1802,22 @@ static int slash_dispatch(slash_state_t *sl, const char *s, engine_t *e) {
         int r = slash_thinking(sl, e);
         if (sl->ed) sl->ed->prompt = sl->main_prompt;
         (void)r; /* both cancel and failure leave the session intact */
+        return 0;
+    }
+    if (!strcmp(s, "/helper-model") || !strcmp(s, "/helper-thinking")) {
+        const char *field = !strcmp(s, "/helper-model") ? "model"
+                                                        : "reasoning_effort";
+        if (sl->ed) {
+            /* the bold `helper model> `/`helper effort> ` prompt */
+            static _Thread_local char pp[96];
+            snprintf(pp, sizeof pp, "%s%s> ", sl->d->st->bold,
+                     !strcmp(field, "model") ? "helper model"
+                                             : "helper effort");
+            sl->ed->prompt = pp;
+        }
+        int r = slash_helper_pick(sl, e, field);
+        if (sl->ed) sl->ed->prompt = sl->main_prompt;
+        (void)r;
         return 0;
     }
     if (!strncmp(s, "/cd", 3) && (!s[3] || s[3] == ' ')) {
@@ -1724,8 +1968,21 @@ int repl_run_ex(const call_cfg_t *c, const repl_opts_t *o, int in_fd,
         sl.effort = strdup(cfg.reasoning_effort);
         if (sl.effort) sl.cfg.reasoning_effort = sl.effort;
     }
+    /* the helper's own model and reasoning effort (--helper-model,
+       --helper-reasoning-effort): NULL keeps the inheritance, the
+       value arms the override for the seed build below and every
+       rebuild after */
+    int rc = EXIT_IO_ERROR; /* the early gotos below never leave it */
+    if (o->helper_tool && o->helper_model) {
+        sl.h_model = strdup(o->helper_model);
+        if (!sl.h_model) goto done;
+    }
+    if (o->helper_tool && o->helper_effort) {
+        sl.h_effort = strdup(o->helper_effort);
+        if (!sl.h_effort) goto done;
+    }
 
-    int rc = call_compile(&cfg, e, exe_path);
+    rc = call_compile(&cfg, e, exe_path);
     if (rc) goto done;
     {
         /* the one record call does not compile: display latency is the
@@ -1826,9 +2083,14 @@ int repl_run_ex(const call_cfg_t *c, const repl_opts_t *o, int in_fd,
            tool; its seed copies the session's llm and every tool server
            but the helper itself (the recursion cut); its system prompt
            is the helper's own bundled text (system_prompts/helper.txt),
-           not the session's */
+           not the session's. the seed's llm carries the helper's own
+           overrides when the flags set them (the cfg view's fields
+           swap, the strings stay the slash state's) */
+        call_cfg_t hc = cfg;
+        if (sl.h_model) hc.model = sl.h_model;
+        if (sl.h_effort) hc.reasoning_effort = sl.h_effort;
         cJSON *helper_srv = NULL;
-        rc = repl_helper_build(&cfg, prompt_system_prompts_helper,
+        rc = repl_helper_build(&hc, prompt_system_prompts_helper,
                                e->tools_cfg, exe_path, o->full_tools,
                                e, helper_seed, sizeof helper_seed,
                                helper_cfg, sizeof helper_cfg, &helper_srv);
@@ -2021,6 +2283,8 @@ done:
     buf_free(&sl.pick);
     free(sl.model); /* the cfg copy's model, when /models armed it */
     free(sl.effort); /* the cfg copy's reasoning effort, /thinking's */
+    free(sl.h_model); /* the helper's own model override */
+    free(sl.h_effort); /* the helper's own effort override */
     /* the dspy sink's strdup'd brief state (agent display) */
     dspy_brief_flush(&sink.d); /* held request lines, not lost */
     free(sink.d.brief_tools);
@@ -2221,6 +2485,39 @@ int repl_endturn_extract(int argc, char **argv, bool *bell_out,
     return n;
 }
 
+/* pull --helper-model <m> and --helper-reasoning-effort <e> out of the
+   agent flag range, in place; NULL keeps each unset. returns the
+   compacted count, or -1 with err filled */
+int repl_helperopts_extract(int argc, char **argv, const char **model,
+                            const char **effort, char *err, size_t errsz) {
+    int n = 0;
+    *model = *effort = NULL;
+    for (int i = 0; i < argc; i++) {
+        if (!strcmp(argv[i], "--helper-model") ||
+            !strcmp(argv[i], "--helper-reasoning-effort")) {
+            bool is_model = argv[i][9] == 'm'; /* --helper-model vs
+                                                   --helper-reasoning-effort
+                                                   (char 9: 'm'/'r') */
+            const char **slot = is_model ? model : effort;
+            const char *nm =
+                is_model ? "--helper-model" : "--helper-reasoning-effort";
+            if (*slot) {
+                snprintf(err, errsz, "%s given twice", nm);
+                return -1;
+            }
+            if (i + 1 >= argc) {
+                snprintf(err, errsz, "missing value for %s", nm);
+                return -1;
+            }
+            *slot = argv[i + 1];
+            i++;
+            continue;
+        }
+        argv[n++] = argv[i];
+    }
+    return n;
+}
+
 static void agent_usage(FILE *out) {
     fputs("usage: llmkit agent (--anthropic|--openai|--openai-responses) "
           "<api_base>\n"
@@ -2233,6 +2530,8 @@ static void agent_usage(FILE *out) {
           "[--terminal-tool <name.tool>]...\n"
           "                [--conversation-store <file>] [--verbose] "
           "[--no-helper]\n"
+          "                [--helper-model <name>] "
+          "[--helper-reasoning-effort <value>]\n"
           "                [--no-deepwiki] [--read-only] [--bell]\n"
           "                [--end-turn-command <command>]\n",
           out);
@@ -2246,6 +2545,7 @@ int cmd_agent_repl(int argc, char **argv) {
     char err[256] = "";
     const char *store = NULL;
     const char *endcmd = NULL;
+    const char *helper_model = NULL, *helper_effort = NULL;
     bool bell = false;
     call_cfg_t c;
     int n = repl_store_extract(argc - 2, argv + 2, &store, err, sizeof err);
@@ -2255,6 +2555,13 @@ int cmd_agent_repl(int argc, char **argv) {
             n = -1;
         else {
             n -= h; /* the flag compacted away when seen */
+            int p = repl_helperopts_extract(n, argv + 2, &helper_model,
+                                            &helper_effort, err,
+                                            sizeof err);
+            if (p < 0)
+                n = -1;
+            else {
+            n = p; /* the compacted count (values taken above) */
             int w = repl_nodeepwiki_extract(n, argv + 2, err, sizeof err);
             if (w < 0)
                 n = -1;
@@ -2298,6 +2605,12 @@ int cmd_agent_repl(int argc, char **argv) {
                                       /* the helper subagent rides along
                                          unless --no-helper */
                                       .helper_tool = h != 1,
+                                      /* the helper's own model and
+                                         reasoning effort when the flags
+                                         set them; NULL inherits the
+                                         session's */
+                                      .helper_model = helper_model,
+                                      .helper_effort = helper_effort,
                                       /* the bundled deepwiki server rides
                                          along unless --no-deepwiki */
                                       .deepwiki_tool = w != 1,
@@ -2315,11 +2628,12 @@ int cmd_agent_repl(int argc, char **argv) {
                 }
             }
         }
-        }
-        }
-        }
     }
-    fprintf(stderr, "llmkit agent: %s\n", err);
+    }
+    }
+    }
+}
+fprintf(stderr, "llmkit agent: %s\n", err);
     agent_usage(stderr);
     return EXIT_OUT_OF_CHANNEL;
 }

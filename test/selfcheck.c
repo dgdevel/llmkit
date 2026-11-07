@@ -4150,6 +4150,10 @@ static repl_out_t repl_session_ft(call_cfg_t *c, const char *script,
 
 static void repl_session_free(repl_out_t *r) { free(r->ob); }
 
+/* defined later (the agent section): the opts-carrying session runner */
+static repl_out_t repl_session_opt(call_cfg_t *c, const repl_opts_t *o,
+                                   const char *script, size_t sn);
+
 static void test_repl(void) {
     call_cfg_t c;
     char err[256];
@@ -4438,8 +4442,137 @@ static void test_repl(void) {
         check(r.rc == EXIT_OK, "repl: /help listing session exits 0");
         check(strstr(r.ob, "/thinking") != NULL,
               "repl: /help lists /thinking");
+        check(strstr(r.ob, "/helper-model") != NULL &&
+                  strstr(r.ob, "/helper-thinking") != NULL,
+              "repl: /help lists the helper commands");
         repl_session_free(&r);
         call_cfg_free(&c);
+    }
+
+    /* ---- /helper-model, /helper-thinking: the helper's own setup ---- */
+    {
+        fturn_t turns[] = {
+            { .recs = (const char *[]){
+                  "{\"type\":\"response\",\"text\":\"ok\",\"partial\":false}"},
+              .nrecs = 1, .kind = TURN_FINAL, .abort_after = -1 },
+            { .recs = (const char *[]){
+                  "{\"type\":\"response\",\"text\":\"ok\",\"partial\":false}"},
+              .nrecs = 1, .kind = TURN_FINAL, .abort_after = -1 },
+        };
+        /* a live /models endpoint: /helper-model fetches it, the same
+           one /models reads */
+        static const char *MODELS_PY =
+            "from http.server import HTTPServer, BaseHTTPRequestHandler\n"
+            "class H(BaseHTTPRequestHandler):\n"
+            "    def do_GET(self):\n"
+            "        b = b'{\"object\":\"list\",\"data\":[{\"id\":"
+            "\"gpt-5.2\"},{\"id\":\"o4-mini\"}]}'\n"
+            "        self.send_response(200)\n"
+            "        self.send_header('Content-Type','application/json')\n"
+            "        self.send_header('Content-Length',str(len(b)))\n"
+            "        self.end_headers(); self.wfile.write(b)\n"
+            "    def log_message(self, *a): pass\n"
+            "srv = HTTPServer(('127.0.0.1', 0), H)\n"
+            "print(srv.server_address[1], flush=True)\n"
+            "srv.serve_forever()\n";
+        spawn_t msp;
+        write_file("/tmp/llmkit-test-models.py", MODELS_PY);
+        check(spawn_shell("python3 /tmp/llmkit-test-models.py", &msp) == 0,
+              "repl: helper models endpoint spawned");
+        char port[64] = "";
+        read_line_fd(msp.from_fd, port, sizeof port);
+        char base[128];
+        snprintf(base, sizeof base, "http://127.0.0.1:%s", port);
+
+        /* the agent surface: the helper rides along, its spawn fails
+           softly (exe /x, non-required) - the seed rebuild is what the
+           commands exercise */
+        repl_opts_t ho = { .default_prompt = prompt_system_prompts_agent,
+                           .builtin_mcp = true,
+                           .agents_md = true,
+                           .helper_tool = true };
+
+        /* /helper-model: pick gpt-5.2 - the session's llm stays */
+        g_factory_wire = fwire_new(turns, 2);
+        repl_cfg(&c, PROTO_OPENAI);
+        c.api_base = strdup(base);
+        repl_out_t r = repl_session_opt(&c, &ho,
+                                        "/helper-model\ngpt-5.2\nhi\n",
+                                        strlen("/helper-model\ngpt-5.2\n"
+                                               "hi\n"));
+        check(r.rc == EXIT_OK, "repl: /helper-model session exits 0");
+        check(strstr(r.ob, "helper model: gpt-5.2") != NULL,
+              "repl: /helper-model applies its pick");
+        check(strstr(g_seen_llm, "\"model\"") == NULL,
+              "repl: /helper-model leaves the session's llm record");
+        repl_session_free(&r);
+        call_cfg_free(&c);
+
+        /* a pick outside the endpoint's list: refused, retry then
+           cancel by ctrl-c-shaped EOF path (empty keep) */
+        g_factory_wire = fwire_new(turns, 1);
+        repl_cfg(&c, PROTO_OPENAI);
+        c.api_base = strdup(base);
+        r = repl_session_opt(&c, &ho, "/helper-model\nno-such\n\nhi\n",
+                             strlen("/helper-model\nno-such\n\nhi\n"));
+        check(r.rc == EXIT_OK, "repl: /helper-model miss session exits 0");
+        check(strstr(r.ob, "no 'no-such' in the list - pick again") != NULL,
+              "repl: /helper-model refuses an id outside the list");
+        repl_session_free(&r);
+        call_cfg_free(&c);
+
+        /* /helper-thinking: pick low, a second invocation inherits */
+        g_factory_wire = fwire_new(turns, 2);
+        repl_cfg(&c, PROTO_OPENAI);
+        c.api_base = strdup(base);
+        r = repl_session_opt(
+            &c, &ho, "/helper-thinking\nlow\n/helper-thinking\ninherit\nhi\n",
+            strlen("/helper-thinking\nlow\n/helper-thinking\ninherit\n"
+                   "hi\n"));
+        check(r.rc == EXIT_OK, "repl: /helper-thinking session exits 0");
+        check(strstr(r.ob, "helper reasoning effort: low") != NULL,
+              "repl: /helper-thinking applies its pick");
+        check(strstr(r.ob, "(inherited)") != NULL,
+              "repl: inherit resets the helper to the session's field");
+        check(strstr(g_seen_llm, "reasoning_effort") == NULL,
+              "repl: /helper-thinking leaves the session's llm record");
+        repl_session_free(&r);
+        call_cfg_free(&c);
+
+        /* --helper-model from boot: its own picker reports it own */
+        {
+            repl_opts_t hb = ho;
+            hb.helper_model = "o4-mini";
+            g_factory_wire = fwire_new(turns, 1);
+            repl_cfg(&c, PROTO_OPENAI);
+            c.api_base = strdup(base);
+            r = repl_session_opt(&c, &hb, "/helper-model\n\nhi\n",
+                                 strlen("/helper-model\n\nhi\n"));
+            check(r.rc == EXIT_OK,
+                  "repl: flag-armed helper session exits 0");
+            check(strstr(r.ob, "(current o4-mini, own") != NULL,
+                  "repl: the flag-set helper model reports as own");
+            repl_session_free(&r);
+            call_cfg_free(&c);
+        }
+
+        /* no helper in the session: the note line */
+        {
+            repl_opts_t nh = ho;
+            nh.helper_tool = false;
+            g_factory_wire = fwire_new(turns, 1);
+            repl_cfg(&c, PROTO_OPENAI);
+            c.api_base = strdup(base);
+            r = repl_session_opt(&c, &nh, "/helper-model\nhi\n",
+                                 strlen("/helper-model\nhi\n"));
+            check(r.rc == EXIT_OK, "repl: no-helper session exits 0");
+            check(strstr(r.ob, "no helper in this session") != NULL,
+                  "repl: /helper-model without a helper draws its note");
+            repl_session_free(&r);
+            call_cfg_free(&c);
+        }
+
+        spawn_kill(&msp);
     }
     {
         fturn_t turns[] = {
@@ -5317,6 +5450,43 @@ static void test_agent(void) {
         check(call_parse_ex(3, av4, &c, err, sizeof err, false) == 1 &&
                   strstr(err, "unknown flag '--no-helper'") != NULL,
               "agent: --no-helper is agent-only");
+    }
+
+    /* ---- --helper-model / --helper-reasoning-effort: extraction,
+       compaction, errors, duplicates, missing values ---- */
+    {
+        char err2[256] = "";
+        const char *hm = NULL, *he = NULL;
+        char *av[] = {"--openai", "http://x", "--helper-model", "m1",
+                      "--helper-reasoning-effort", "low", "--model", "m"};
+        int n = repl_helperopts_extract(8, av, &hm, &he, err2, sizeof err2);
+        check(n == 4, "agent: helper opts extracted, compacted to 4");
+        check_str(hm ? hm : "", "m1", "agent: --helper-model taken");
+        check_str(he ? he : "", "low",
+                  "agent: --helper-reasoning-effort taken");
+        check_str(av[2], "--model",
+                  "agent: helper opts compact argv in order");
+        char *av2[] = {"--openai", "http://x"};
+        hm = he = NULL;
+        check(repl_helperopts_extract(2, av2, &hm, &he, err2, sizeof err2) ==
+                  2,
+              "agent: no helper opts reports the count unchanged");
+        check(hm == NULL && he == NULL, "agent: absent helper opts NULL");
+        char *av3[] = {"--helper-model", "a", "--helper-model", "b"};
+        check(repl_helperopts_extract(4, av3, &hm, &he, err2,
+                                      sizeof err2) == -1 &&
+                  strstr(err2, "--helper-model given twice") != NULL,
+              "agent: --helper-model twice is a usage error");
+        char *av4[] = {"--helper-reasoning-effort"};
+        check(repl_helperopts_extract(1, av4, &hm, &he, err2,
+                                      sizeof err2) == -1 &&
+                  strstr(err2, "missing value") != NULL,
+              "agent: a valueless helper opt is a usage error");
+        /* the repl surface does not know the flags */
+        char *av5[] = {"--openai", "http://x", "--helper-model", "m"};
+        check(call_parse_ex(4, av5, &c, err, sizeof err, false) == 1 &&
+                  strstr(err, "unknown flag '--helper-model'") != NULL,
+              "agent: --helper-model is agent-only");
     }
 
     /* ---- --bell / --end-turn-command: extraction, compaction, errors -- */

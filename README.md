@@ -11,7 +11,7 @@ The easiest way to use `llmkit` is through the `repl` command. This provides a l
 $ llmkit repl --openai http://localhost:9931/v1
 ```
 
-- **Navigation**: Use `/help` for commands, `/models` to change the model, `/thinking` to pick the reasoning effort, and `/new` to start a fresh conversation.
+- **Navigation**: Use `/help` for commands, `/models` to change the model, `/thinking` to pick the reasoning effort, `/helper-model` and `/helper-thinking` to give the helper subagent its own setup, and `/new` to start a fresh conversation.
 - **Files**: Start a word with `@` and press Tab to autocomplete file or directory paths.
 - **Controls**: Ctrl-C stops the current turn; Ctrl-D exits.
 
@@ -26,6 +26,7 @@ $ llmkit agent --openai http://localhost:9931/v1 --model llama3.1 \
 - **Persistence**: Use `--conversation-store <file>` to save your chat history and resume it later.
 - **Safety**: Use `--read-only` to hide the file-writing built-in tools (`file_create`, `file_edit`, `file_delete`, `file_copy`, `file_move`, `download`). Search and read tools stay; the helper subagent inherits the restriction.
 - **Notifications**: `--bell` rings the terminal bell when the llm ends a turn (both `repl` and `agent`); `--end-turn-command '<command>'` runs a shell command instead, e.g. `--end-turn-command 'notify-send llmkit done'`. They fire on every turn end - success, interruption, or failure.
+- **Helper setup**: `--helper-model <name>` and `--helper-reasoning-effort <value>` give the `helper` subagent its own model and reasoning effort from boot; without them the helper inherits the session's. The `/helper-model` and `/helper-thinking` commands change them mid-session (`inherit` follows the session again).
 
 ### One-off Calls
 For scripts or simple questions, use the `call` command. It takes one prompt and returns one answer.
