@@ -945,6 +945,9 @@ typedef struct slash_state {
     const char *seed_path;    /* the helper's seed file (agent) */
     const char *cfg_path;     /* the helper's proxy config (agent) */
     call_cfg_t cfg;           /* the helper seed's source (its own copy) */
+    char *model;              /* owned: the cfg copy's model, swapped by
+                                 /models (the borrowed pointer of the
+                                 shallow copy must never be freed) */
 } slash_state_t;
 
 /* the session's command catalogue: one table for /help, the unknown-
@@ -1271,13 +1274,16 @@ static int slash_models(slash_state_t *sl, engine_t *e) {
     cJSON_Delete(llm);
     if (o->helper_tool) { /* the subagent inherits the session's model */
         /* the seed rebuild reads the cfg copy: its model field moves to
-           the picked one (the session's llm record already did) */
-        free(sl->cfg.model);
-        sl->cfg.model = strdup(model);
-        if (!sl->cfg.model) {
+           the picked one (the session's llm record already did). the
+           copy's model is session-owned (repl_run_ex swapped the
+           borrowed pointer out) - only that one frees */
+        free(sl->model);
+        sl->model = strdup(model);
+        if (!sl->model) {
             cJSON_Delete(models);
             return 2; /* engine already applied - nothing more */
         }
+        sl->cfg.model = sl->model;
         /* the rebuild drops the old helper entry from the live tools
            record: the spawn keeps its config path, the rewritten seed
            file carries the new model, reconcile swaps the child */
@@ -1562,6 +1568,14 @@ int repl_run_ex(const call_cfg_t *c, const repl_opts_t *o, int in_fd,
     sl.seed_path = helper_seed;
     sl.cfg_path = helper_cfg;
     sl.cfg = cfg;
+    /* the cfg copy's model goes session-owned: the shallow copy
+       borrows the caller's string, /models swaps it - its free must
+       never hit the borrowed pointer */
+    if (cfg.model) {
+        sl.model = strdup(cfg.model);
+        if (sl.model) sl.cfg.model = sl.model;
+        /* a failed strdup leaves the borrowed one: no swap, no free */
+    }
 
     int rc = call_compile(&cfg, e, exe_path);
     if (rc) goto done;
@@ -1857,6 +1871,7 @@ int repl_run_ex(const call_cfg_t *c, const repl_opts_t *o, int in_fd,
 done:
     buf_free(&line);
     buf_free(&sl.pick);
+    free(sl.model); /* the cfg copy's model, when /models armed it */
     /* the dspy sink's strdup'd brief state (agent display) */
     dspy_brief_flush(&sink.d); /* held request lines, not lost */
     free(sink.d.brief_tools);

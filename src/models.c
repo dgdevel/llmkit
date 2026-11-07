@@ -110,11 +110,12 @@ static bool fetch_page(const models_cfg_t *c, const char *after, buf_t *body,
     http_req_t r;
     memset(&r, 0, sizeof r);
     r.url = url.data;
-    r.hdrs = hdrs; /* freed by http_perform */
+    r.hdrs = hdrs;
     r.is_get = true;
     buf_init(&r.resp);
     buf_init(&r.content_type);
     int rc = http_perform(&r);
+    curl_slist_free_all(hdrs); /* http_perform borrows it, never frees */
     buf_free(&r.content_type);
     *status = r.status;
     if (rc == 0 && r.status >= 200 && r.status < 300) {
