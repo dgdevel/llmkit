@@ -11,7 +11,7 @@ The easiest way to use `llmkit` is through the `repl` command. This provides a l
 $ llmkit repl --openai http://localhost:9931/v1
 ```
 
-- **Navigation**: Use `/help` for commands, `/models` to change the model, and `/new` to start a fresh conversation.
+- **Navigation**: Use `/help` for commands, `/models` to change the model, `/thinking` to pick the reasoning effort, and `/new` to start a fresh conversation.
 - **Files**: Start a word with `@` and press Tab to autocomplete file or directory paths.
 - **Controls**: Ctrl-C stops the current turn; Ctrl-D exits.
 

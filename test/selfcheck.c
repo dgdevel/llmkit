@@ -129,6 +129,19 @@ static char g_seen_system[4096];
 static char g_seen_user[4096];
 /* the transcript length at each fake turn: /new drops it to 0 */
 static size_t g_seen_trn;
+/* the llm record as json at each fake turn: /models and /thinking swap
+   it mid-session, the wire reads the fresh one per turn */
+static char g_seen_llm[4096];
+
+static void capture_llm(const engine_t *e) {
+    g_seen_llm[0] = '\0';
+    if (!e || !e->llm) return;
+    buf_t b;
+    buf_init(&b);
+    buf_append_tree(&b, e->llm);
+    snprintf(g_seen_llm, sizeof g_seen_llm, "%s", b.data ? b.data : "");
+    buf_free(&b);
+}
 
 static void capture_system(const engine_t *e) {
     g_seen_system[0] = '\0';
@@ -152,6 +165,7 @@ static void capture_system(const engine_t *e) {
 static int fwire_turn(wire_t *base, engine_t *e, turn_out_t *out) {
     fwire_t *f = (fwire_t *)base;
     capture_system(e); /* per-turn: the /cd system block lands between */
+    capture_llm(e);    /* per-turn: /thinking and /models swap mid-way */
     g_seen_trn = e->tr.n;
     /* the last user record's text: the acp prompt-blocks join and the
        steering records surface here (tlist tail walk, user_text_join) */
@@ -4337,7 +4351,96 @@ static void test_repl(void) {
         call_cfg_free(&c);
     }
 
-    /* ---- tool traffic rendered: name+args, full response ---- */
+    /* ---- /thinking: the effort ladder, pick and keep ---- */
+    {
+        fturn_t turns[] = {
+            { .recs = (const char *[]){
+                  "{\"type\":\"response\",\"text\":\"ok\",\"partial\":false}"},
+              .nrecs = 1, .kind = TURN_FINAL, .abort_after = -1 },
+            { .recs = (const char *[]){
+                  "{\"type\":\"response\",\"text\":\"ok\",\"partial\":false}"},
+              .nrecs = 1, .kind = TURN_FINAL, .abort_after = -1 },
+        };
+        /* pick high: the llm record carries it from the next turn on */
+        g_factory_wire = fwire_new(turns, 2);
+        repl_cfg(&c, PROTO_OPENAI);
+        repl_out_t r = repl_session(&c, "/thinking\nhigh\nhi\n",
+                                    strlen("/thinking\nhigh\nhi\n"));
+        check(r.rc == EXIT_OK, "repl: /thinking pick session exits 0");
+        check(strstr(r.ob, "reasoning effort levels:") != NULL,
+              "repl: /thinking lists the effort ladder");
+        check(strstr(r.ob, "reasoning effort: high") != NULL,
+              "repl: /thinking draws its applied line");
+        check(strstr(g_seen_llm, "\"reasoning_effort\":\"high\"") != NULL,
+              "repl: /thinking lands the pick in the llm record");
+        repl_session_free(&r);
+        call_cfg_free(&c);
+
+        /* no current effort: an empty line refuses, the next pick
+           applies - the same shape /models has with no model yet */
+        g_factory_wire = fwire_new(turns, 2);
+        repl_cfg(&c, PROTO_OPENAI);
+        r = repl_session(&c, "/thinking\n\nhigh\nhi\n",
+                         strlen("/thinking\n\nhigh\nhi\n"));
+        check(r.rc == EXIT_OK,
+              "repl: /thinking no-current session exits 0");
+        check(strstr(r.ob, "(no effort set yet - pick one)") != NULL,
+              "repl: /thinking empty line with no current refuses");
+        check(strstr(g_seen_llm, "\"reasoning_effort\":\"high\"") != NULL,
+              "repl: /thinking applies the pick after the refusal");
+        repl_session_free(&r);
+        call_cfg_free(&c);
+
+        /* a flag-set effort shows as current and an empty line keeps it */
+        g_factory_wire = fwire_new(turns, 2);
+        repl_cfg(&c, PROTO_OPENAI);
+        c.reasoning_effort = strdup("medium");
+        r = repl_session(&c, "/thinking\n\nhi\n", strlen("/thinking\n\nhi\n"));
+        check(r.rc == EXIT_OK, "repl: /thinking keep session exits 0");
+        check(strstr(r.ob, "(current medium") != NULL,
+              "repl: /thinking shows the flag-set effort as current");
+        check(strstr(g_seen_llm, "\"reasoning_effort\":\"medium\"") != NULL,
+              "repl: /thinking empty line keeps the flag-set effort");
+        repl_session_free(&r);
+        call_cfg_free(&c);
+
+        /* a typed line is verbatim: rungs outside the ladder pass too */
+        g_factory_wire = fwire_new(turns, 1);
+        repl_cfg(&c, PROTO_OPENAI);
+        r = repl_session(&c, "/thinking\nultra\nhi\n",
+                         strlen("/thinking\nultra\nhi\n"));
+        check(r.rc == EXIT_OK, "repl: /thinking verbatim session exits 0");
+        check(strstr(r.ob, "reasoning effort: ultra") != NULL,
+              "repl: /thinking takes a typed effort verbatim");
+        check(strstr(g_seen_llm, "\"reasoning_effort\":\"ultra\"") != NULL,
+              "repl: /thinking lands the verbatim pick");
+        repl_session_free(&r);
+        call_cfg_free(&c);
+
+        /* anthropic: the budget note, no swap surface */
+        g_factory_wire = fwire_new(turns, 1);
+        repl_cfg(&c, PROTO_ANTHROPIC);
+        r = repl_session(&c, "/thinking\nhigh\nhi\n",
+                         strlen("/thinking\nhigh\nhi\n"));
+        check(r.rc == EXIT_OK, "repl: /thinking anthropic session exits 0");
+        check(strstr(r.ob, "no reasoning-effort levels on the anthropic "
+                           "protocol") != NULL,
+              "repl: /thinking draws the anthropic budget note");
+        check(strstr(g_seen_llm, "reasoning_effort") == NULL,
+              "repl: /thinking swaps nothing under anthropic");
+        repl_session_free(&r);
+        call_cfg_free(&c);
+
+        /* /help lists it */
+        g_factory_wire = fwire_new(turns, 1);
+        repl_cfg(&c, PROTO_OPENAI);
+        r = repl_session(&c, "/help\nhi\n", strlen("/help\nhi\n"));
+        check(r.rc == EXIT_OK, "repl: /help listing session exits 0");
+        check(strstr(r.ob, "/thinking") != NULL,
+              "repl: /help lists /thinking");
+        repl_session_free(&r);
+        call_cfg_free(&c);
+    }
     {
         fturn_t turns[] = {
             { .recs = (const char *[]){

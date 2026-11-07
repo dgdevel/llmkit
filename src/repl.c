@@ -948,6 +948,9 @@ typedef struct slash_state {
     char *model;              /* owned: the cfg copy's model, swapped by
                                  /models (the borrowed pointer of the
                                  shallow copy must never be freed) */
+    char *effort;             /* owned: the cfg copy's reasoning_effort,
+                                 swapped by /thinking (same rule as the
+                                 model's) */
 } slash_state_t;
 
 /* the session's command catalogue: one table for /help, the unknown-
@@ -958,9 +961,18 @@ static const struct {
 } slash_commands[] = {
     { "/help", "this list" },
     { "/models", "pick the model of the session" },
+    { "/thinking", "pick the reasoning effort of the session" },
     { "/cd", "change the working directory" },
     { "/new", "start a fresh conversation" },
 };
+
+/* the reasoning-effort ladder /thinking lists: the common rungs of the
+   provider families, least to most thinking. the endpoint itself has
+   the last word - a model supports a subset, an unsupported pick is
+   the endpoint's own api_error on the next turn, not this list's job
+   to police */
+static const char *const effort_rungs[] = { "none", "minimal", "low",
+                                            "medium", "high", "xhigh" };
 
 /* `/help`: the session's command catalogue */
 static void slash_help(dspy_t *d) {
@@ -1077,6 +1089,17 @@ static void complete_model(void *ctx, const char *line,
     }
 }
 
+/* tab completion over the reasoning-effort rungs (prefix matches) */
+static void complete_effort(void *ctx, const char *line,
+                            editor_candidates_t *c) {
+    (void)ctx;
+    size_t n = line ? strlen(line) : 0;
+    for (size_t i = 0; i < sizeof effort_rungs / sizeof effort_rungs[0];
+         i++)
+        if (!strncmp(effort_rungs[i], line ? line : "", n))
+            editor_add_candidate(c, effort_rungs[i]);
+}
+
 /* tab completion on the slash commands: a line that starts with the
    sigil and carries no blank yet offers the matching commands as
    whole-line candidates - a unique match is taken as typed-for (then
@@ -1133,13 +1156,17 @@ static int pick_read_model(slash_state_t *sl, const cJSON *models) {
     return pick_read_line(sl->pr, &sl->pick);
 }
 
+/* defined below (after the picker helpers): the shared llm-record swap
+   /models and /thinking both apply */
+static int slash_llm_swap(slash_state_t *sl, engine_t *e, const char *field,
+                          const char *value, const char *done_fmt);
+
 /* the /models picker: fetch the endpoint's list, let the user choose
    one (tab completion on a tty), apply it to the session - engine,
    seed, cfg - and inherit it to the helper. 0 picked and applied, 1
    canceled, 2 failure (message already drawn) */
 static int slash_models(slash_state_t *sl, engine_t *e) {
     dspy_t *d = sl->d;
-    const repl_opts_t *o = sl->o;
     /* the list is the session's own flags' - one source of truth */
     const cJSON *headers =
         cJSON_GetObjectItemCaseSensitive(e->llm, "headers");
@@ -1247,43 +1274,59 @@ static int slash_models(slash_state_t *sl, engine_t *e) {
     } else if (*cur) {
         model = cur;
     }
-    if (!model) { /* no current model and none picked: stay unset */
-        cJSON_Delete(models);
+    cJSON_Delete(models);
+    if (!model) /* no current model and none picked: stay unset */
         return 1;
-    }
-    if (*cur && !strcmp(model, cur)) {
-        /* the current model unchanged: nothing to swap */
-        cJSON_Delete(models);
-        return 0;
-    }
-    /* the swap: engine first (the llm record is the source the wire
-       reads per turn), then the helper's seed rewrite - spawn and
-       cfg files keep their paths, the files carry the new model */
+    if (*cur && !strcmp(model, cur))
+        return 0; /* the current model unchanged: nothing to swap */
+    return slash_llm_swap(sl, e, "model", model, "model: %s");
+}
+
+/* the llm record swap both /models and /thinking apply: engine first
+   (the llm record is the source the wire reads per turn), then the
+   helper's seed rewrite - spawn and cfg files keep their paths, the
+   files carry the new value. the named field must be a string field
+   of the llm record (model) or a string field of its
+   inference_options object (reasoning_effort). 0 applied, 2 failure
+   (message already drawn) */
+static int slash_llm_swap(slash_state_t *sl, engine_t *e, const char *field,
+                          const char *value, const char *done_fmt) {
+    dspy_t *d = sl->d;
+    const repl_opts_t *o = sl->o;
     cJSON *llm = cJSON_Duplicate(e->llm, 1);
-    cJSON_DeleteItemFromObject(llm, "model");
-    cJSON_AddStringToObject(llm, "model", model);
+    cJSON *target = llm;
+    if (!strcmp(field, "reasoning_effort")) {
+        target = cJSON_GetObjectItemCaseSensitive(llm, "inference_options");
+        if (!target) target = cJSON_AddObjectToObject(llm,
+                                                      "inference_options");
+    }
+    if (!llm || !target) {
+        cJSON_Delete(llm);
+        return 2;
+    }
+    cJSON_DeleteItemFromObject(target, field);
+    cJSON_AddStringToObject(target, field, value);
     char *verr = validate_llm(llm);
     if (verr) {
         dspy_error_line(d, NULL, verr);
         free(verr);
         cJSON_Delete(llm);
-        cJSON_Delete(models);
         return 2;
     }
     engine_apply_config_record(e, llm);
     cJSON_Delete(llm);
-    if (o->helper_tool) { /* the subagent inherits the session's model */
-        /* the seed rebuild reads the cfg copy: its model field moves to
-           the picked one (the session's llm record already did). the
-           copy's model is session-owned (repl_run_ex swapped the
-           borrowed pointer out) - only that one frees */
-        free(sl->model);
-        sl->model = strdup(model);
-        if (!sl->model) {
-            cJSON_Delete(models);
-            return 2; /* engine already applied - nothing more */
-        }
-        sl->cfg.model = sl->model;
+    if (o->helper_tool) { /* the subagent inherits the session's swap */
+        /* the seed rebuild reads the cfg copy: the field moves to the
+           picked one there too (the session's llm record already did).
+           the copy's string is session-owned (repl_run_ex swapped the
+           borrowed pointers out) - only that one frees */
+        char **slot = !strcmp(field, "model") ? &sl->model : &sl->effort;
+        char **cfgf = !strcmp(field, "model") ? &sl->cfg.model
+                                              : &sl->cfg.reasoning_effort;
+        free(*slot);
+        *slot = strdup(value);
+        if (!*slot) return 2; /* engine already applied - nothing more */
+        *cfgf = *slot;
         /* the rebuild drops the old helper entry from the live tools
            record: the spawn keeps its config path, the rewritten seed
            file carries the new model, reconcile swaps the child */
@@ -1292,10 +1335,7 @@ static int slash_models(slash_state_t *sl, engine_t *e) {
                 cJSON_GetObjectItemCaseSensitive(e->tools_cfg, "tools");
             if (cJSON_IsArray(list)) {
                 cJSON *kept = cJSON_CreateArray();
-                if (!kept) {
-                    cJSON_Delete(models);
-                    return 2; /* engine already applied - nothing more */
-                }
+                if (!kept) return 2; /* engine applied - nothing more */
                 const cJSON *s;
                 cJSON_ArrayForEach(s, list) {
                     if (strcmp(rec_str(s, "name"), "helper"))
@@ -1341,13 +1381,105 @@ static int slash_models(slash_state_t *sl, engine_t *e) {
     }
     {
         char msg[300];
-        int mn = snprintf(msg, sizeof msg, "model: %s", model);
+        int mn = snprintf(msg, sizeof msg, done_fmt, value);
         dspy_write(d, msg,
                    (size_t)mn >= sizeof msg ? sizeof msg - 1 : (size_t)mn);
         dspy_write_str(d, "\n");
     }
-    cJSON_Delete(models);
     return 0;
+}
+
+/* one picker line with the effort rungs as tab completions; 0 submit,
+   1 cancel, 2 failure */
+static int pick_read_effort(slash_state_t *sl) {
+    if (sl->ed) {
+        editor_tab_fn save_tab = sl->ed->on_tab;
+        void *save_ctx = sl->ed->tab_ctx;
+        sl->ed->on_tab = complete_effort;
+        int r = editor_line(sl->ed);
+        sl->ed->on_tab = save_tab;
+        sl->ed->tab_ctx = save_ctx;
+        if (r == ED_SUBMIT) {
+            buf_clear(&sl->pick);
+            buf_append(&sl->pick, sl->ed->line.data, sl->ed->line.len);
+            return 0;
+        }
+        if (r == ED_QUIT || r == ED_CLEAR) return 1;
+        return 2;
+    }
+    buf_clear(&sl->pick);
+    return pick_read_line(sl->pr, &sl->pick);
+}
+
+/* `/thinking`: list the reasoning-effort rungs, let the user pick one
+   (tab completion on a tty), apply it to the session - engine, seed,
+   cfg. an empty line keeps the current setting, a typed line is taken
+   verbatim (endpoints' own spellings vary), ctrl-c cancels. 0 picked
+   and applied, 1 canceled, 2 failure (message already drawn) */
+static int slash_thinking(slash_state_t *sl, engine_t *e) {
+    dspy_t *d = sl->d;
+    /* anthropic carries the reasoning budget as thinking_budget
+     * tokens, not a named effort - /thinking lists the rungs for the
+     * two openai protocols, anthropic keeps its budget */
+    if (e->protocol == PROTO_ANTHROPIC) {
+        dspy_ensure_nl(d);
+        dspy_write_str(d,
+                       "no reasoning-effort levels on the anthropic "
+                       "protocol - its thinking rides a token budget "
+                       "(--max-tokens and inference_options "
+                       "thinking_budget)\n");
+        return 1;
+    }
+    /* the current effort, the llm record's own */
+    char cur[64] = "";
+    {
+        const cJSON *io = cJSON_GetObjectItemCaseSensitive(e->llm,
+                                                    "inference_options");
+        const cJSON *ce =
+            cJSON_GetObjectItemCaseSensitive(io, "reasoning_effort");
+        if (cJSON_IsString(ce) && ce->valuestring)
+            snprintf(cur, sizeof cur, "%s", ce->valuestring);
+    }
+    /* the list: rungs comma-joined, the common rungs of the provider
+       families, least to most thinking */
+    dspy_ensure_nl(d);
+    dspy_write_str(d, "reasoning effort levels: ");
+    for (size_t i = 0; i < sizeof effort_rungs / sizeof effort_rungs[0];
+         i++) {
+        if (i) dspy_write_str(d, ", ");
+        dspy_write_str(d, effort_rungs[i]);
+    }
+    dspy_write_str(d, "\n");
+    dspy_write_str(d,
+                   "(endpoints may support a subset or other spellings - "
+                   "a typed line is taken verbatim)\n");
+    if (*cur) {
+        char msg[160];
+        int mn = snprintf(msg, sizeof msg,
+                          "(current %s - empty keeps it, ctrl-c cancels)",
+                          cur);
+        dspy_write(d, msg, (size_t)mn >= sizeof msg ? sizeof msg - 1
+                                                    : (size_t)mn);
+        dspy_write_str(d, "\n");
+    }
+    for (;;) {
+        int r = pick_read_effort(sl);
+        if (r) { /* canceled or failed: the session's own prompt again */
+            if (r == 2) d->io_fail = true;
+            return r;
+        }
+        if (!sl->pick.len) {
+            if (*cur) return 1; /* empty line: keep the current effort */
+            dspy_write_str(d, "(no effort set yet - pick one)\n");
+            continue;
+        }
+        break; /* a typed line: taken verbatim */
+    }
+    const char *effort = sl->pick.data;
+    if (*cur && !strcmp(effort, cur))
+        return 0; /* the current effort unchanged: nothing to swap */
+    return slash_llm_swap(sl, e, "reasoning_effort", effort,
+                          "reasoning effort: %s");
 }
 
 /* the headstart's display twin: the listing is a system block, not a
@@ -1428,6 +1560,18 @@ static int slash_dispatch(slash_state_t *sl, const char *s, engine_t *e) {
             sl->ed->prompt = pp;
         }
         int r = slash_models(sl, e);
+        if (sl->ed) sl->ed->prompt = sl->main_prompt;
+        (void)r; /* both cancel and failure leave the session intact */
+        return 0;
+    }
+    if (!strcmp(s, "/thinking")) {
+        if (sl->ed) {
+            /* the bold `effort> ` prompt, styled like the session's own */
+            static _Thread_local char pp[80];
+            snprintf(pp, sizeof pp, "%seffort> ", sl->d->st->bold);
+            sl->ed->prompt = pp;
+        }
+        int r = slash_thinking(sl, e);
         if (sl->ed) sl->ed->prompt = sl->main_prompt;
         (void)r; /* both cancel and failure leave the session intact */
         return 0;
@@ -1568,13 +1712,17 @@ int repl_run_ex(const call_cfg_t *c, const repl_opts_t *o, int in_fd,
     sl.seed_path = helper_seed;
     sl.cfg_path = helper_cfg;
     sl.cfg = cfg;
-    /* the cfg copy's model goes session-owned: the shallow copy
-       borrows the caller's string, /models swaps it - its free must
-       never hit the borrowed pointer */
+    /* the cfg copy's model and reasoning effort go session-owned: the
+       shallow copy borrows the caller's strings, /models and /thinking
+       swap them - their frees must never hit the borrowed pointers */
     if (cfg.model) {
         sl.model = strdup(cfg.model);
         if (sl.model) sl.cfg.model = sl.model;
         /* a failed strdup leaves the borrowed one: no swap, no free */
+    }
+    if (cfg.reasoning_effort) {
+        sl.effort = strdup(cfg.reasoning_effort);
+        if (sl.effort) sl.cfg.reasoning_effort = sl.effort;
     }
 
     int rc = call_compile(&cfg, e, exe_path);
@@ -1872,6 +2020,7 @@ done:
     buf_free(&line);
     buf_free(&sl.pick);
     free(sl.model); /* the cfg copy's model, when /models armed it */
+    free(sl.effort); /* the cfg copy's reasoning effort, /thinking's */
     /* the dspy sink's strdup'd brief state (agent display) */
     dspy_brief_flush(&sink.d); /* held request lines, not lost */
     free(sink.d.brief_tools);
