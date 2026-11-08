@@ -564,9 +564,10 @@ int wire_http_verdict(int rc, http_req_t *req, blkemit_t *be, bool failed,
 
 static int default_tool_exec(engine_t *e, const char *tool, cJSON *args,
                              buf_t *text_out, bool *is_error, char *err,
-                             size_t errsz) {
+                             size_t errsz, double *u_in, double *u_out,
+                             bool *u_have) {
     return mcp_call((mcp_mgr_t *)e->mcp, tool, args, text_out, is_error, err,
-                    errsz, e->tool_call_timeout);
+                    errsz, e->tool_call_timeout, u_in, u_out, u_have);
 }
 
 static void run_tool(engine_t *e, trec_t *r) {
@@ -574,7 +575,10 @@ static void run_tool(engine_t *e, trec_t *r) {
     buf_init(&text);
     bool is_err = false;
     char err[512] = "";
-    int rc = e->tool_exec(e, r->tool, r->args, &text, &is_err, err, sizeof err);
+    double u_in = 0, u_out = 0;
+    bool u_have = false;
+    int rc = e->tool_exec(e, r->tool, r->args, &text, &is_err, err, sizeof err,
+                          &u_in, &u_out, &u_have);
     if (rc == 2) {
         engine_emit_record(e, rec_tool_response(
                                   r->id,
@@ -592,8 +596,11 @@ static void run_tool(engine_t *e, trec_t *r) {
         engine_emit_error(e, EC_TOOL_FAILED, err[0] ? err : "tool failed",
                           false);
     } else {
-        engine_emit_record(e, rec_tool_response(r->id, text.data ? text.data : "",
-                                                is_err));
+        cJSON *rec =
+            rec_tool_response(r->id, text.data ? text.data : "", is_err);
+        /* helper-reported usage rides the ok-branch record (design) */
+        if (u_have) rec_attach_usage(rec, u_in, u_out);
+        engine_emit_record(e, rec);
         if (is_err)
             engine_emit_error(e, EC_TOOL_FAILED,
                               text.data ? text.data : "tool failed", false);

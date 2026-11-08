@@ -253,9 +253,13 @@ typedef struct ftool_script {
 ftool_script_t g_ftools;
 
 static int ftool_exec(engine_t *e, const char *tool, cJSON *args,
-                      buf_t *text_out, bool *is_error, char *err, size_t errsz) {
+                      buf_t *text_out, bool *is_error, char *err, size_t errsz,
+                      double *u_in, double *u_out, bool *u_have) {
     (void)args;
     (void)is_error;
+    (void)u_in;
+    (void)u_out;
+    if (u_have) *u_have = false;
     ftool_t *t =
         &g_ftools.v[g_ftools.pos < g_ftools.n ? g_ftools.pos++ : g_ftools.n - 1];
     check(t->tool && !strcmp(t->tool, tool), "tool executed in order");
@@ -910,7 +914,7 @@ static void test_validation(void) {
         buf_init(&lout);
         bool liserr = false;
         int lrc = mcp_call(mm, ltool.data, NULL, &lout, &liserr, lerr,
-                           sizeof lerr, -1);
+                           sizeof lerr, -1, NULL, NULL, NULL);
         check(lrc == 1 && strstr(lerr, "too long") != NULL,
               "mcp_call rejects an over-long server prefix");
         buf_free(&ltool);
@@ -1312,7 +1316,7 @@ static void test_mcp_stdio(void) {
     char err[256] = "";
     cJSON *args = cJSON_Parse("{\"text\":\"hi\"}");
     int rc = mcp_call((mcp_mgr_t *)e->mcp, "srv.echo", args, &out, &is_error,
-                      err, sizeof err, 5);
+                      err, sizeof err, 5, NULL, NULL, NULL);
     check(rc == 0 && !is_error, "echo call ok");
     check_str(out.data ? out.data : "", "echo: hi", "echo text round trip");
     buf_clear(&out);
@@ -1320,7 +1324,7 @@ static void test_mcp_stdio(void) {
 
     args = cJSON_Parse("{\"text\":\"hi\"}");
     rc = mcp_call((mcp_mgr_t *)e->mcp, "helper", args, &out, &is_error, err,
-                  sizeof err, 5);
+                  sizeof err, 5, NULL, NULL, NULL);
     check(rc == 0 && !is_error, "the flattened helper call routes");
     check_str(out.data ? out.data : "", "helper: hi",
               "the flattened helper routes to the helper server");
@@ -1331,7 +1335,7 @@ static void test_mcp_stdio(void) {
        of the same tool still routes (old transcripts replay) */
     args = cJSON_Parse("{\"text\":\"hi\"}");
     rc = mcp_call((mcp_mgr_t *)e->mcp, "echo", args, &out, &is_error, err,
-                  sizeof err, 5);
+                  sizeof err, 5, NULL, NULL, NULL);
     check(rc == 0 && !is_error, "the flattened builtin call routes");
     check_str(out.data ? out.data : "", "echo: hi",
               "the bare name routes to the builtin server");
@@ -1339,7 +1343,7 @@ static void test_mcp_stdio(void) {
     cJSON_Delete(args);
     args = cJSON_Parse("{\"text\":\"hi\"}");
     rc = mcp_call((mcp_mgr_t *)e->mcp, "builtin.echo", args, &out, &is_error,
-                  err, sizeof err, 5);
+                  err, sizeof err, 5, NULL, NULL, NULL);
     check(rc == 0 && !is_error, "the legacy dotted builtin call routes");
     check_str(out.data ? out.data : "", "echo: hi",
               "the dotted form still routes to the builtin server");
@@ -1349,14 +1353,14 @@ static void test_mcp_stdio(void) {
     /* a bare name nothing lists is an error, not a fallthrough */
     args = cJSON_Parse("{}");
     rc = mcp_call((mcp_mgr_t *)e->mcp, "nope", args, &out, &is_error, err,
-                  sizeof err, 5);
+                  sizeof err, 5, NULL, NULL, NULL);
     check(rc == 1 && strstr(err, "no server prefix") != NULL,
           "unknown bare name reports no server prefix");
     cJSON_Delete(args);
 
     args = cJSON_Parse("{}");
     rc = mcp_call((mcp_mgr_t *)e->mcp, "srv.boom", args, &out, &is_error, err,
-                  sizeof err, 5);
+                  sizeof err, 5, NULL, NULL, NULL);
     check(rc == 0 && is_error, "isError maps to is_error");
     cJSON_Delete(args);
     buf_free(&out);

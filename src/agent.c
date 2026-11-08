@@ -126,6 +126,9 @@ typedef struct agent_state {
                      summary line per tool reply - the session's
                      --verbose writes the flag into the helper's seed */
     size_t mark; /* transcript length after the last successful invoke */
+    /* lifetime token totals across all invokes of this helper session */
+    double lt_in, lt_out;
+    bool lt_have;
 } agent_state_t;
 
 /* ---- seed loading ---- */
@@ -493,13 +496,27 @@ static int agent_handle(void *ctx, const char *method, cJSON *params,
         }
         cJSON_AddItemToArray(content, blk);
         cJSON_AddItemToObject(res, "content", content);
+        if (out.have_usage) {
+            /* per-invoke usage rides structuredContent; lifetime totals
+               accumulate on the state */
+            cJSON *sc = cJSON_CreateObject();
+            cJSON *u = cJSON_CreateObject();
+            cJSON_AddNumberToObject(u, "input_tokens", out.tok_in);
+            cJSON_AddNumberToObject(u, "output_tokens", out.tok_out);
+            cJSON_AddItemToObject(sc, "usage", u);
+            cJSON_AddNumberToObject(sc, "duration_s", out.duration_s);
+            cJSON_AddItemToObject(res, "structuredContent", sc);
+            a->lt_in += out.tok_in;
+            a->lt_out += out.tok_out;
+            a->lt_have = true;
+        }
         *result_out = res;
         if (out.have_usage)
             fprintf(stderr,
                     "llmkit agent-as-tool: turn %.2fs | input %.0f tok | "
-                    "output %.0f tok | total %.0f tok\n",
+                    "output %.0f tok | total %.0f tok | session total %.0f tok\n",
                     out.duration_s, out.tok_in, out.tok_out,
-                    out.tok_in + out.tok_out);
+                    out.tok_in + out.tok_out, a->lt_in + a->lt_out);
         if (out.ok) {
             if (a->retain) a->mark = a->eng->tr.n;
         } else {

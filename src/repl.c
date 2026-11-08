@@ -58,6 +58,13 @@ typedef struct repl_sink {
     double tok_in;   /* input tokens */
     double tok_out;  /* output tokens */
     bool have_usage; /* a record of this turn reported usage */
+    /* the helper subagent's own model spend, summed across the turn's
+       helper invokes: a tool_response record's usage field is the
+       helper's own model usage, distinct from the session's (whose
+       last-round reading sits above) */
+    double h_tok_in;  /* helper input tokens */
+    double h_tok_out; /* helper output tokens */
+    bool h_have_usage; /* a tool_response of this turn carried usage */
     /* the agent's quiet display: thinking text suppressed to one
        `thinking...` line per turn (--verbose renders it whole) */
     bool quiet_think; /* armed at startup, never reset */
@@ -128,7 +135,9 @@ static void timing_reset(repl_sink_t *s) {
     s->tok_in = 0;
     s->tok_out = 0;
     s->have_usage = false;
-    s->think_shown = false; /* the turn's quiet `thinking...` line */
+    s->h_tok_in = 0;
+    s->h_tok_out = 0;
+    s->h_have_usage = false;
     s->think_done = false;
 }
 
@@ -142,6 +151,18 @@ static void timing_reset(repl_sink_t *s) {
    logged for the turn's last request. Absent usage is simply not
    counted - the rendering shows only what the endpoint reported */
 static void usage_accum(repl_sink_t *s, const cJSON *rec) {
+    /* a tool_response's usage is the helper subagent's own model spend:
+       each helper invoke is a separate conversation, so those sum, while
+       the model's own usage (response/tool_request records) keeps the
+       last-round reading below */
+    if (rec_classify(rec) == R_TOOL_RESPONSE) {
+        const cJSON *hu = cJSON_GetObjectItemCaseSensitive(rec, "usage");
+        if (!cJSON_IsObject(hu)) return;
+        s->h_tok_in += rec_num(hu, "input_tokens", 0.0);
+        s->h_tok_out += rec_num(hu, "output_tokens", 0.0);
+        s->h_have_usage = true;
+        return;
+    }
     const cJSON *u = cJSON_GetObjectItemCaseSensitive(rec, "usage");
     if (!cJSON_IsObject(u)) return;
     s->tok_in = rec_num(u, "input_tokens", 0.0);
@@ -362,6 +383,18 @@ static void render_stats_exit(repl_sink_t *s, int rc) {
     dspy_ensure_nl(&s->d);
     dspy_write(&s->d, line,
                (size_t)n >= sizeof line ? sizeof line - 1 : (size_t)n);
+    /* the helper subagent's own spend, when any helper invoke reported
+       it this turn: summed, unlike the session's last-round reading */
+    if (s->h_have_usage) {
+        n = snprintf(line, sizeof line,
+                     "%shelper: input %.0f tok | output %.0f tok"
+                     " | total %.0f tok\n",
+                     ts, s->h_tok_in, s->h_tok_out,
+                     s->h_tok_in + s->h_tok_out);
+        if (n <= 0) return;
+        dspy_write(&s->d, line,
+                   (size_t)n >= sizeof line ? sizeof line - 1 : (size_t)n);
+    }
 }
 
 static void repl_sink_fn(void *ctx, cJSON *rec) {

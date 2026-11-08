@@ -292,6 +292,7 @@ complete:
 | `id` | string | yes | the `id` of the `tool_request` this record answers |
 | `text` | string | yes | the payload as text. Multiple text content blocks of one mcp result are joined with `\n`. A result with non-text (or no) content is a failed call: `is_error` true plus a non-fatal `tool_failed` |
 | `is_error` | boolean | no | default false. The runner emits the field only when true |
+| `usage` | object | no | subagent-reported token counts (same fields as the response record's) - stamped when the answering tool server reports its own model usage (the helper subagent); not the model's turn usage |
 
 ## error
 

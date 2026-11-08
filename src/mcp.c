@@ -735,7 +735,8 @@ int mcp_request_raw(mcp_server_t *srv, const char *method,
 }
 
 int mcp_call(mcp_mgr_t *m, const char *tool, cJSON *args, buf_t *text_out,
-             bool *is_error, char *err, size_t errsz, double timeout) {
+             bool *is_error, char *err, size_t errsz, double timeout,
+             double *u_in, double *u_out, bool *u_have) {
     /* a dotted name splits server + tool; a bare name is the flattened
        form (the bundled `builtin` and `helper` servers list their tools
        unprefixed): resolve it through the listing so the upstream tool
@@ -797,6 +798,24 @@ int mcp_call(mcp_mgr_t *m, const char *tool, cJSON *args, buf_t *text_out,
         cJSON_Delete(result);
         snprintf(err, errsz, "tool '%s' returned no text content", tool);
         return 1;
+    }
+    /* structuredContent.usage: helper-reported token counts (design:
+       agent-as-tool reports per-invoke usage there) */
+    if (u_have) {
+        *u_have = false;
+        const cJSON *sc =
+            cJSON_GetObjectItemCaseSensitive(result, "structuredContent");
+        const cJSON *u =
+            sc ? cJSON_GetObjectItemCaseSensitive(sc, "usage") : NULL;
+        const cJSON *in =
+            u ? cJSON_GetObjectItemCaseSensitive(u, "input_tokens") : NULL;
+        const cJSON *uo =
+            u ? cJSON_GetObjectItemCaseSensitive(u, "output_tokens") : NULL;
+        if (in && uo && cJSON_IsNumber(in) && cJSON_IsNumber(uo)) {
+            if (u_in) *u_in = in->valuedouble;
+            if (u_out) *u_out = uo->valuedouble;
+            *u_have = true;
+        }
     }
     cJSON_Delete(result);
     *is_error = is_err;

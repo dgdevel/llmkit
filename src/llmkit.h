@@ -519,9 +519,12 @@ typedef struct wire {
 
 /* tool execution seam: returns 0 ok, 1 failed (err filled), 2 timeout.
    text_out is the tool payload; on failure it may carry a message. */
+/* usage out-params carry helper-reported token usage when the tool's
+   structuredContent provides it (NULL-safe) */
 typedef int (*tool_exec_fn)(struct engine *e, const char *tool, cJSON *args,
                             buf_t *text_out, bool *is_error, char *err,
-                            size_t errsz);
+                            size_t errsz, double *u_in, double *u_out,
+                            bool *u_have);
 
 struct engine {
     /* config snapshots (owned trees) */
@@ -694,7 +697,8 @@ int mcp_call(mcp_mgr_t *m,
                                  flattened server's listing entry */,
              cJSON *args,
              buf_t *text_out, bool *is_error, char *err, size_t errsz,
-             double timeout /*<0 none*/);
+             double timeout /*<0 none*/,
+             double *u_in, double *u_out, bool *u_have);
 /* join a tools/call result's text blocks with \n; text-block count, or
    -1 when a non-text block appears */
 int mcp_content_join(const cJSON *result, buf_t *out);
