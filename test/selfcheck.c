@@ -2551,7 +2551,7 @@ static void test_builtin(void) {
     t = bc_call("process_exec", "{\"cmdline\":\"echo one; echo two\"}", &ie);
     check(!ie && t && strstr(t, "Exit code: 0\n") &&
               strstr(t, "First and last three output lines:\n") &&
-              strstr(t, ": STDOUT: one\n") && strstr(t, ": STDOUT: two\n") &&
+              strstr(t, ": one\n") && strstr(t, ": two\n") &&
               !strstr(t, "still running") && !strstr(t, "[...]") &&
               !strstr(t, "Process output available"),
           "builtin: process_exec completed reply with stamped lines");
@@ -2563,37 +2563,43 @@ static void test_builtin(void) {
                 &ie);
     check(!ie && t && strstr(t, "Exit code: 0") &&
               strstr(t, "First and last three output lines:\n") &&
-              strstr(t, ": STDOUT: 1\n") && strstr(t, ": STDOUT: 2\n") &&
-              strstr(t, ": STDOUT: 3\n") && strstr(t, "[...]\n") &&
-              strstr(t, ": STDOUT: 10\n") && strstr(t, ": STDOUT: 11\n") &&
-              strstr(t, ": STDOUT: 12\n") && !strstr(t, ": STDOUT: 4\n") &&
-              !strstr(t, ": STDOUT: 5\n") && !strstr(t, ": STDOUT: 9\n") &&
+              strstr(t, ": 1\n") && strstr(t, ": 2\n") &&
+              strstr(t, ": 3\n") && strstr(t, "[...]\n") &&
+              strstr(t, ": 10\n") && strstr(t, ": 11\n") &&
+              strstr(t, ": 12\n") && !strstr(t, ": 4\n") &&
+              !strstr(t, ": 5\n") && !strstr(t, ": 9\n") &&
               strstr(t, "Process output available in") &&
+              strstr(t, " (stdout) and ") &&
               strstr(t, "(12 lines, use file_read)") &&
               !strstr(t, "currently 12 lines"),
           "builtin: process_exec quotes head, gap and tail");
-    {   /* the temp file holds all twelve stamped lines */
-        char path[512] = "";
+    {   /* the two temp files hold all twelve stamped stdout lines,
+           stderr file stays empty */
+        char path[512] = "", epath[512] = "";
         char *pin = t ? strstr(t, "Process output available in ") : NULL;
         if (pin)
-            sscanf(pin + 27, "%511s", path);
+            sscanf(pin + 27, "%511s (stdout) and %511s", path, epath);
         FILE *pf = path[0] ? fopen(path, "r") : NULL;
-        unsigned lines = 0;
+        FILE *ef = epath[0] ? fopen(epath, "r") : NULL;
+        unsigned lines = 0, elines = 0;
         bool stamped = true;
         if (pf) {
             char lb[128];
             while (fgets(lb, sizeof lb, pf)) {
                 lines++;
                 if (!(lb[2] == ':' && lb[5] == ':' && lb[8] == ':' &&
-                      lb[0] >= '0' &&
-                      (!strncmp(lb + 10, "STDOUT: ", 8) ||
-                       !strncmp(lb + 10, "STDERR: ", 8))))
+                      lb[0] >= '0' && lb[9] == ' '))
                     stamped = false;
             }
             fclose(pf);
         }
-        check(pf && lines == 12 && stamped,
-              "builtin: process temp file has all stamped lines");
+        if (ef) {
+            char lb[128];
+            while (fgets(lb, sizeof lb, ef)) elines++;
+            fclose(ef);
+        }
+        check(pf && ef && lines == 12 && elines == 0 && stamped,
+              "builtin: process temp files split and stamped");
     }
     free(t);
 
@@ -2604,19 +2610,57 @@ static void test_builtin(void) {
                 "\"echo a; echo b; echo c; echo d; echo e\"}",
                 &ie);
     check(!ie && t && strstr(t, "Exit code: 0") &&
-              strstr(t, ": STDOUT: a\n") && strstr(t, ": STDOUT: b\n") &&
-              strstr(t, ": STDOUT: c\n") && strstr(t, ": STDOUT: d\n") &&
-              strstr(t, ": STDOUT: e\n") && !strstr(t, "[...]") &&
+              strstr(t, ": a\n") && strstr(t, ": b\n") &&
+              strstr(t, ": c\n") && strstr(t, ": d\n") &&
+              strstr(t, ": e\n") && !strstr(t, "[...]") &&
               !strstr(t, "Process output available"),
           "builtin: process_exec short output shows every line once");
     free(t);
 
-    /* stderr gets its own stamp */
+    /* stderr lines land in the stderr temp file, stdout in its own */
     t = bc_call("process_exec",
                 "{\"cmdline\":\"echo toout; echo toerr 1>&2\"}", &ie);
-    check(!ie && t && strstr(t, ": STDOUT: toout\n") &&
-              strstr(t, ": STDERR: toerr\n"),
-          "builtin: process_exec separates stdout and stderr stamps");
+    check(!ie && t && strstr(t, ": toout\n") &&
+              strstr(t, ": toerr\n"),
+          "builtin: process_exec quotes both streams");
+    free(t);
+
+    t = bc_call("process_exec",
+                "{\"cmdline\":"
+                "\"seq 1 8; for i in $(seq 1 8); do echo e$i 1>&2; done\"}",
+                &ie);
+    check(!ie && t && strstr(t, "Process output available in") &&
+              strstr(t, " (stdout) and "),
+          "builtin: process_exec names both output files");
+    {   /* eight lines each: each file holds only its own stream */
+        char path[512] = "", epath[512] = "";
+        char *pin = t ? strstr(t, "Process output available in ") : NULL;
+        unsigned lines = 0, elines = 0;
+        bool osplit = false, esplit = false;
+        if (pin)
+            sscanf(pin + 27, "%511s (stdout) and %511s", path, epath);
+        FILE *pf = path[0] ? fopen(path, "r") : NULL;
+        FILE *ef = epath[0] ? fopen(epath, "r") : NULL;
+        if (pf) {
+            char lb[128];
+            while (fgets(lb, sizeof lb, pf)) {
+                lines++;
+                if (strstr(lb, ": 8\n")) osplit = true;
+            }
+            fclose(pf);
+        }
+        if (ef) {
+            char lb[128];
+            while (fgets(lb, sizeof lb, ef)) {
+                elines++;
+                if (strstr(lb, ": e8\n")) esplit = true;
+            }
+            fclose(ef);
+        }
+        check(pf && ef && lines == 8 && elines == 8 && osplit && esplit &&
+                  !strstr(t, ": e1\n"),
+              "builtin: process_exec splits stdout and stderr files");
+    }
     free(t);
 
     /* a long line is quoted cut at 150 characters, the note follows,
@@ -2642,7 +2686,7 @@ static void test_builtin(void) {
         if (dp) dur = strtod(dp + 10, NULL);
     }
     check(!ie && t && dur >= 0.4 && dur < 5.0 &&
-              strstr(t, ": STDOUT: after\n"),
+              strstr(t, ": after\n"),
           "builtin: process_exec recap carries a sane duration");
     free(t);
 
@@ -2685,7 +2729,7 @@ static void test_builtin(void) {
                 &ie);
     check(!ie && t && strstr(t, "is still running") &&
               strstr(t, "Use process_status or process_wait.") &&
-              strstr(t, ": STDOUT: started\n"),
+              strstr(t, ": started\n"),
           "builtin: process_exec wait reports still running");
     long pid = -1;
     if (t) {
@@ -2710,7 +2754,7 @@ static void test_builtin(void) {
             else free(fin), fin = NULL;
         }
         check(done && fin && strstr(fin, "Exit code: 0") &&
-                  strstr(fin, ": STDOUT: started\n"),
+                  strstr(fin, ": started\n"),
               "builtin: process_status sees the completion");
         free(fin);
     }
@@ -2770,13 +2814,13 @@ static void test_builtin(void) {
         snprintf(pargs, sizeof pargs, "{\"pid\":%ld,\"timeout\":1}", pid);
         t = bc_call("process_wait", pargs, &ie);
         check(!ie && t && strstr(t, "is still running") &&
-                  strstr(t, ": STDOUT: waiting\n"),
+                  strstr(t, ": waiting\n"),
               "builtin: process_wait timeout expiry reports still running");
         free(t);
         snprintf(pargs, sizeof pargs, "{\"pid\":%ld,\"timeout\":30}", pid);
         t = bc_call("process_wait", pargs, &ie);
         check(!ie && t && strstr(t, "Exit code: 0") &&
-                  strstr(t, ": STDOUT: waiting\n") &&
+                  strstr(t, ": waiting\n") &&
                   !strstr(t, "still running"),
               "builtin: process_wait sees the termination");
         free(t);

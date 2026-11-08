@@ -166,12 +166,13 @@ size 17b, type text/plain, 3 lines
 
 ### process_exec(cmdline)
 
-Runs `cmdline` through the shell (posix: `/bin/sh -c`, windows: `%ComSpec% /c`) with stdin connected to the null device, and waits up to 120 seconds for it to finish. stdout and stderr arrive on two separate pipes. Every line is stamped with a wall-clock timestamp and its stream, in the `annotate-output.sh` style with the stream named. A line is attributed when it is read. The order between the two streams at their boundary is therefore the reader's order, not a global one:
+Runs `cmdline` through the shell (posix: `/bin/sh -c`, windows: `%ComSpec% /c`) with stdin connected to the null device, and waits up to 120 seconds for it to finish. stdout and stderr arrive on two separate pipes and are kept apart: each stream goes into its own temp file. Every line is stamped with a wall-clock timestamp, in the `annotate-output.sh` style. A line is attributed when it is read. The order between the two streams at their boundary is therefore the reader's order, not a global one:
 
 ```
-HH:MM:SS: STDOUT: the line
-HH:MM:SS: STDERR: the line
+HH:MM:SS: the line
 ```
+
+The stream a quoted line belongs to is the file it lives in, not a per-line tag.
 
 The reply for a finished process:
 
@@ -179,13 +180,13 @@ The reply for a finished process:
 Exit code: ${code}
 Duration: ${seconds, three decimals}
 First and last three output lines:
-HH:MM:SS: STDOUT: ${line}
-HH:MM:SS: STDERR: ${line}
-HH:MM:SS: STDOUT: ${line}
+HH:MM:SS: ${line}
+HH:MM:SS: ${line}
+HH:MM:SS: ${line}
 [...]
-HH:MM:SS: STDOUT: ${line}
-HH:MM:SS: STDERR: ${line}
-HH:MM:SS: STDOUT: ${line}
+HH:MM:SS: ${line}
+HH:MM:SS: ${line}
+HH:MM:SS: ${line}
 ```
 
 The reply for one still running after the wait (no duration line: the process has not ended, so it has none yet):
@@ -197,19 +198,19 @@ First and last three output lines:
 Use process_status or process_wait.
 ```
 
-`First and last three output lines` carries whatever the process printed so far: the first three lines, `[...]`, the last three. A process with six lines or fewer is quoted whole. Head and tail overlap there, so each line prints once and no `[...]` appears. Each line is stamped with its stream. A quoted line longer than 150 bytes is cut at that width (never mid-utf-8-character) and one note follows the quote:
+`First and last three output lines` carries whatever the process printed so far: the first three lines, `[...]`, the last three. A process with six lines or fewer is quoted whole. Head and tail overlap there, so each line prints once and no `[...]` appears. Each line keeps only its timestamp: the stream a line belongs to is the file it lives in. A quoted line longer than 150 bytes is cut at that width (never mid-utf-8-character) and one note follows the quote:
 
 ```
 Output was cut at 150 characters, see full output file for full data
 ```
 
-The full stamped output is appended to one temp file per process (`$TMPDIR`, else `/tmp`, on posix. The user temp dir on windows) for the lifetime of the server. Once more than six lines exist, or any quoted line was cut, the reply names it:
+The full stamped output goes into two temp files per process (`$TMPDIR`, else `/tmp`, on posix. The user temp dir on windows) for the lifetime of the server: one holds stdout, the other stderr. Once more than six lines exist, or any quoted line was cut, the reply names them:
 
 ```
-Process output available in ${path} (currently ${n} lines)
+Process output available in ${stdout path} (stdout) and ${stderr path} (stderr) (currently ${n} lines, use file_read)
 ```
 
-The count keeps growing until the process ends and its output drains. Exit codes follow the shell convention: a normal exit reports its status, a signal death reports `128 + signal`, a command the shell cannot find reports 127.
+The count covers both files together and keeps growing until the process ends and its output drains. Exit codes follow the shell convention: a normal exit reports its status, a signal death reports `128 + signal`, a command the shell cannot find reports 127.
 
 ### process_status(pid)
 
