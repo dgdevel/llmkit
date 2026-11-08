@@ -1,1 +1,1 @@
-Run a command line, long running get backgrounded, get stdout and stderr
+Run a command line, long running get backgrounded, get first and last 3 lines and pointers to stdout and stderr
