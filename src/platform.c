@@ -209,7 +209,8 @@ static char *path_rel_from(const char *from, const char *to) {
    not (malloc'd) */
 char *path_relative(const char *from, const char *to) {
     char *r = path_rel_from(from, to);
-    return r ? r : (strdup(to) ? strdup(to) : NULL);
+    if (r) return r;
+    return strdup(to);
 }
 
 /* ---- queue: mutex + condvar, unbounded ---- */

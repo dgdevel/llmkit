@@ -4496,6 +4496,7 @@ static void test_repl(void) {
         /* /helper-model: pick gpt-5.2 - the session's llm stays */
         g_factory_wire = fwire_new(turns, 2);
         repl_cfg(&c, PROTO_OPENAI);
+        free(c.api_base);
         c.api_base = strdup(base);
         repl_out_t r = repl_session_opt(&c, &ho,
                                         "/helper-model\ngpt-5.2\nhi\n",
@@ -4513,6 +4514,7 @@ static void test_repl(void) {
            cancel by ctrl-c-shaped EOF path (empty keep) */
         g_factory_wire = fwire_new(turns, 1);
         repl_cfg(&c, PROTO_OPENAI);
+        free(c.api_base);
         c.api_base = strdup(base);
         r = repl_session_opt(&c, &ho, "/helper-model\nno-such\n\nhi\n",
                              strlen("/helper-model\nno-such\n\nhi\n"));
@@ -4525,6 +4527,7 @@ static void test_repl(void) {
         /* /helper-thinking: pick low, a second invocation inherits */
         g_factory_wire = fwire_new(turns, 2);
         repl_cfg(&c, PROTO_OPENAI);
+        free(c.api_base);
         c.api_base = strdup(base);
         r = repl_session_opt(
             &c, &ho, "/helper-thinking\nlow\n/helper-thinking\ninherit\nhi\n",
@@ -4546,6 +4549,7 @@ static void test_repl(void) {
             hb.helper_model = "o4-mini";
             g_factory_wire = fwire_new(turns, 1);
             repl_cfg(&c, PROTO_OPENAI);
+            free(c.api_base);
             c.api_base = strdup(base);
             r = repl_session_opt(&c, &hb, "/helper-model\n\nhi\n",
                                  strlen("/helper-model\n\nhi\n"));
@@ -4563,6 +4567,7 @@ static void test_repl(void) {
             nh.helper_tool = false;
             g_factory_wire = fwire_new(turns, 1);
             repl_cfg(&c, PROTO_OPENAI);
+            free(c.api_base);
             c.api_base = strdup(base);
             r = repl_session_opt(&c, &nh, "/helper-model\nhi\n",
                                  strlen("/helper-model\nhi\n"));

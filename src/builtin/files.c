@@ -244,6 +244,7 @@ static void tool_files(const cJSON *args, buf_t *out, bool *is_error,
     if (!bm_rx_compile(&rx, regex, err, sizeof err)) {
         buf_clear(out);
         buf_appendf(out, "%s", err);
+        free(path);
         *is_error = true;
         return;
     }

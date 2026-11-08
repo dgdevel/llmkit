@@ -609,7 +609,7 @@ static const char *asset_name(int flavor, const char *plain) {
     static char name[128];
     switch (flavor) {
     case PKG_DEB: {
-        char arch[16];
+        char arch[64];
         deb_arch(arch, sizeof arch);
         snprintf(name, sizeof name, "llmkit_%s-1_%s.deb", plain, arch);
         return name;

@@ -1034,6 +1034,7 @@ void acp_test_state_free(void *vst) {
     if (!st) return;
     if (st->requests) queue_free(st->requests);
     acp_state_free(st);
+    free(st);
 }
 
 /* ================= command ================= */
