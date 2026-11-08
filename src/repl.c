@@ -657,7 +657,8 @@ int inject_agents_md(engine_t *e, const char *dir, const char *prompt_text) {
 
 /* one temp jsonl per session, both writable only by us: the seed the
    subagent boots from and the proxy config that renames its tool. Same
-   recipe as builtin.c's proc_mktemp, minus the reuse-the-pid trick. */
+   recipe as builtin/process.c's temp pair, minus the reuse-the-pid
+   trick. */
 static FILE *repl_mktemp(char *path, size_t sz) {
 #ifdef _WIN32
     static unsigned seq;

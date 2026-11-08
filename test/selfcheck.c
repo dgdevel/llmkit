@@ -2569,8 +2569,8 @@ static void test_builtin(void) {
               strstr(t, ": 12\n") && !strstr(t, ": 4\n") &&
               !strstr(t, ": 5\n") && !strstr(t, ": 9\n") &&
               strstr(t, "Process output available in") &&
-              strstr(t, " (stdout) and ") &&
-              strstr(t, "(12 lines, use file_read)") &&
+              strstr(t, " (12 lines) and ") &&
+              strstr(t, "(0 lines). Use file_read to get content.") &&
               !strstr(t, "currently 12 lines"),
           "builtin: process_exec quotes head, gap and tail");
     {   /* the two temp files hold all twelve stamped stdout lines,
@@ -2578,11 +2578,14 @@ static void test_builtin(void) {
         char path[512] = "", epath[512] = "";
         char *pin = t ? strstr(t, "Process output available in ") : NULL;
         if (pin)
-            sscanf(pin + 27, "%511s (stdout) and %511s", path, epath);
+            sscanf(pin + 27, "%511s (%*[^)]) and %511s", path, epath);
         FILE *pf = path[0] ? fopen(path, "r") : NULL;
         FILE *ef = epath[0] ? fopen(epath, "r") : NULL;
         unsigned lines = 0, elines = 0;
-        bool stamped = true;
+        bool stamped = true, named = true;
+        size_t plen = strlen(path), elen = strlen(epath);
+        if (plen < 8 || strcmp(path + plen - 7, ".stdout")) named = false;
+        if (elen < 8 || strcmp(epath + elen - 7, ".stderr")) named = false;
         if (pf) {
             char lb[128];
             while (fgets(lb, sizeof lb, pf)) {
@@ -2598,7 +2601,7 @@ static void test_builtin(void) {
             while (fgets(lb, sizeof lb, ef)) elines++;
             fclose(ef);
         }
-        check(pf && ef && lines == 12 && elines == 0 && stamped,
+        check(pf && ef && lines == 12 && elines == 0 && stamped && named,
               "builtin: process temp files split and stamped");
     }
     free(t);
@@ -2630,7 +2633,8 @@ static void test_builtin(void) {
                 "\"seq 1 8; for i in $(seq 1 8); do echo e$i 1>&2; done\"}",
                 &ie);
     check(!ie && t && strstr(t, "Process output available in") &&
-              strstr(t, " (stdout) and "),
+              strstr(t, " (8 lines) and ") &&
+              strstr(t, "(8 lines). Use file_read to get content."),
           "builtin: process_exec names both output files");
     {   /* eight lines each: each file holds only its own stream */
         char path[512] = "", epath[512] = "";
@@ -2638,7 +2642,7 @@ static void test_builtin(void) {
         unsigned lines = 0, elines = 0;
         bool osplit = false, esplit = false;
         if (pin)
-            sscanf(pin + 27, "%511s (stdout) and %511s", path, epath);
+            sscanf(pin + 27, "%511s (%*[^)]) and %511s", path, epath);
         FILE *pf = path[0] ? fopen(path, "r") : NULL;
         FILE *ef = epath[0] ? fopen(epath, "r") : NULL;
         if (pf) {
@@ -2672,7 +2676,8 @@ static void test_builtin(void) {
     check(!ie && t && strstr(t, "Output was cut at 150 characters") &&
               strstr(t, "see full output file for full data") &&
               strstr(t, "Process output available in") &&
-              strstr(t, "(1 lines, use file_read)"),
+              strstr(t, "(1 lines) and ") &&
+              strstr(t, "(0 lines). Use file_read to get content."),
           "builtin: process_exec long line is cut with a note");
     free(t);
 

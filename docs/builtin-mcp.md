@@ -204,13 +204,13 @@ Use process_status or process_wait.
 Output was cut at 150 characters, see full output file for full data
 ```
 
-The full stamped output goes into two temp files per process (`$TMPDIR`, else `/tmp`, on posix. The user temp dir on windows) for the lifetime of the server: one holds stdout, the other stderr. Once more than six lines exist, or any quoted line was cut, the reply names them:
+The full stamped output goes into two temp files per process (`$TMPDIR`, else `/tmp`, on posix. The user temp dir on windows) for the lifetime of the server: `${tmpdir}/llmkit-proc-XXXXXX.stdout` holds stdout, `${tmpdir}/llmkit-proc-XXXXXX.stderr` holds stderr, sharing one random stem. Once more than six lines exist, or any quoted line was cut, the reply names them:
 
 ```
-Process output available in ${stdout path} (stdout) and ${stderr path} (stderr) (currently ${n} lines, use file_read)
+Process output available in ${stdout path} (currently ${n} lines) and ${stderr path} (currently ${m} lines). Use file_read to get content.
 ```
 
-The count covers both files together and keeps growing until the process ends and its output drains. Exit codes follow the shell convention: a normal exit reports its status, a signal death reports `128 + signal`, a command the shell cannot find reports 127.
+Each count covers its own file and keeps growing until the process ends and its output drains. Exit codes follow the shell convention: a normal exit reports its status, a signal death reports `128 + signal`, a command the shell cannot find reports 127.
 
 ### process_status(pid)
 

@@ -15,7 +15,8 @@
    exits or a timeout passes. Every process owns one
    record for the lifetime of the server: the pid, the exit code once
    reaped, and the output. stdout and stderr arrive on two pipes and
-   land in two separate per-process temp files (the two streams stay
+   land in two separate per-process temp files, <stem>.stdout and
+   <stem>.stderr (the two streams stay
    distinguishable by file; a line's true writer is only known
    for whole lines - one write() spanning both streams cannot happen,
    but partial-line interleave at the boundary is accepted), a detached
@@ -52,7 +53,9 @@ typedef struct proc_rec {
     double t_start;            /* mono clock at spawn, for the duration */
     double t_end;              /* mono clock at reap, when exited */
     bool eof;                  /* reader drained both pipes */
-    unsigned long long nlines; /* annotated lines in the temp file */
+    unsigned long long nlines_out; /* lines in the .stdout temp file */
+    unsigned long long nlines_err; /* lines in the .stderr temp file */
+    unsigned long long nlines; /* nlines_out + nlines_err, both temp files */
     char *tail[BM_PROC_TAIL];  /* the last lines, oldest first */
     int ntail;
     char *head[BM_PROC_HEAD];  /* the first lines, oldest first */
@@ -108,6 +111,8 @@ static void proc_emit(proc_rec_t *p, FILE *f, const char *s,
     }
     p->tail[p->ntail++] = buf_steal(&ln, NULL);
     p->nlines++;
+    if (f == p->err) p->nlines_err++;
+    else p->nlines_out++;
     pthread_mutex_unlock(&p->m);
 }
 
@@ -327,40 +332,110 @@ static void *proc_reader(void *arg) {
     return NULL;
 }
 
-/* one temp file per process, holding the full annotated output; the
-   reply names it once it holds more than the quoted tail */
-static FILE *proc_mktemp(char *path, size_t sz) {
+/* one stem per process, holding the annotated output in two files,
+   <stem>.stdout and <stem>.stderr; the reply names them once more is
+   there than the quoted head and tail */
+static bool proc_mktemp_pair(char *opath, size_t osz, FILE **of,
+                             char *epath, size_t esz, FILE **ef) {
+    *of = NULL;
+    *ef = NULL;
 #ifdef _WIN32
     static unsigned seq;
     char dir[264];
     DWORD dn = GetTempPathA(sizeof dir, dir);
-    if (!dn || dn >= sizeof dir) return NULL;
+    if (!dn || dn >= sizeof dir) return false;
     for (int i = 0; i < 4096; i++) {
-        snprintf(path, sz, "%sllmkit-proc-%lu-%u.tmp", dir,
-                 (unsigned long)GetCurrentProcessId(), ++seq);
-        HANDLE h = CreateFileA(path, GENERIC_WRITE, FILE_SHARE_READ, NULL,
-                               CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
-        if (h != INVALID_HANDLE_VALUE) {
-            int fd = _open_osfhandle((intptr_t)h, _O_BINARY | _O_NOINHERIT);
-            if (fd < 0) {
-                CloseHandle(h);
-                return NULL;
-            }
-            return fdopen(fd, "wb");
+        char stem[280];
+        if (snprintf(stem, sizeof stem, "%sllmkit-proc-%lu-%u", dir,
+                     (unsigned long)GetCurrentProcessId(), ++seq) >=
+            (int)sizeof stem)
+            return false;
+        if (snprintf(opath, osz, "%s.stdout", stem) >= (int)osz ||
+            snprintf(epath, esz, "%s.stderr", stem) >= (int)esz)
+            return false;
+        HANDLE ho = CreateFileA(opath, GENERIC_WRITE, FILE_SHARE_READ,
+                                NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL,
+                                NULL);
+        if (ho == INVALID_HANDLE_VALUE) {
+            DWORD e = GetLastError();
+            if (e == ERROR_FILE_EXISTS || e == ERROR_ACCESS_DENIED) continue;
+            return false;
         }
-        DWORD e = GetLastError();
-        if (e != ERROR_FILE_EXISTS && e != ERROR_ACCESS_DENIED) return NULL;
+        HANDLE he = CreateFileA(epath, GENERIC_WRITE, FILE_SHARE_READ,
+                                NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL,
+                                NULL);
+        if (he == INVALID_HANDLE_VALUE) {
+            DWORD e = GetLastError();
+            CloseHandle(ho);
+            DeleteFileA(opath);
+            if (e == ERROR_FILE_EXISTS || e == ERROR_ACCESS_DENIED) continue;
+            return false;
+        }
+        int fdo = _open_osfhandle((intptr_t)ho, _O_BINARY | _O_NOINHERIT);
+        int fde = _open_osfhandle((intptr_t)he, _O_BINARY | _O_NOINHERIT);
+        if (fdo < 0 || fde < 0) {
+            if (fdo >= 0) close(fdo);
+            else CloseHandle(ho);
+            if (fde >= 0) close(fde);
+            else CloseHandle(he);
+            DeleteFileA(opath);
+            DeleteFileA(epath);
+            return false;
+        }
+        *of = fdopen(fdo, "wb");
+        *ef = fdopen(fde, "wb");
+        if (!*of || !*ef) {
+            if (*of) fclose(*of);
+            else close(fdo);
+            if (*ef) fclose(*ef);
+            else close(fde);
+            *of = NULL;
+            *ef = NULL;
+            DeleteFileA(opath);
+            DeleteFileA(epath);
+            return false;
+        }
+        return true;
     }
-    return NULL;
+    return false;
 #else
     const char *dir = getenv("TMPDIR");
     if (!dir || !*dir) dir = "/tmp";
-    if (snprintf(path, sz, "%s/llmkit-proc-XXXXXX", dir) >= (int)sz &&
-        snprintf(path, sz, "/tmp/llmkit-proc-XXXXXX") >= (int)sz)
-        return NULL; /* an overlong TMPDIR falls back, then gives up */
-    int fd = mkstemp(path);
-    if (fd < 0) return NULL;
-    return fdopen(fd, "wb");
+    char stem[BM_PATH_MAX];
+    if (snprintf(stem, sizeof stem, "%s/llmkit-proc-XXXXXX", dir) >=
+            (int)sizeof stem &&
+        snprintf(stem, sizeof stem, "/tmp/llmkit-proc-XXXXXX") >=
+            (int)sizeof stem)
+        return false; /* an overlong TMPDIR falls back, then gives up */
+    int fd = mkstemp(stem);
+    if (fd < 0) return false;
+    close(fd);
+    remove(stem); /* only the two suffix files are kept */
+    if (snprintf(opath, osz, "%s.stdout", stem) >= (int)osz ||
+        snprintf(epath, esz, "%s.stderr", stem) >= (int)esz)
+        return false;
+    int fdo = open(opath, O_WRONLY | O_CREAT | O_EXCL, 0600);
+    if (fdo < 0) return false;
+    int fde = open(epath, O_WRONLY | O_CREAT | O_EXCL, 0600);
+    if (fde < 0) {
+        close(fdo);
+        remove(opath);
+        return false;
+    }
+    *of = fdopen(fdo, "wb");
+    *ef = fdopen(fde, "wb");
+    if (!*of || !*ef) {
+        if (*of) fclose(*of);
+        else close(fdo);
+        if (*ef) fclose(*ef);
+        else close(fde);
+        *of = NULL;
+        *ef = NULL;
+        remove(opath);
+        remove(epath);
+        return false;
+    }
+    return true;
 #endif
 }
 
@@ -582,11 +657,12 @@ static void proc_report(buf_t *out, proc_rec_t *p) {
     if (cut || p->nlines > (unsigned)BM_PROC_HEAD + (unsigned)BM_PROC_TAIL) {
         /* "currently" only makes sense while output can still grow */
         buf_appendf(out,
-                    "Process output available in %s (stdout) and %s "
-                    "(stderr) (%s%llu lines, use file_read)\n",
+                    "Process output available in %s (%s%llu lines) and "
+                    "%s (%s%llu lines). Use file_read to get content.\n",
                     p->out_path ? p->out_path : "?",
+                    p->exited ? "" : "currently ", p->nlines_out,
                     p->err_path ? p->err_path : "?",
-                    p->exited ? "" : "currently ", p->nlines);
+                    p->exited ? "" : "currently ", p->nlines_err);
     }
     if (!p->exited)
         buf_append_str(out, "Use process_status or process_wait.\n");
@@ -651,20 +727,11 @@ void tool_process_exec(const cJSON *args, buf_t *out, bool *is_error) {
     p->out_fd = -1;
     p->err_fd = -1;
     p->t_start = mono_now(); /* before spawn: the spawn itself counts */
-    p->out = proc_mktemp(path, sizeof path);
-    p->err = proc_mktemp(epath, sizeof epath);
-    if (!p->out || !p->err) {
+    if (!proc_mktemp_pair(path, sizeof path, &p->out,
+                          epath, sizeof epath, &p->err)) {
         buf_clear(out);
-        buf_append_str(out, "process_exec failed: cannot create temp output file");
+        buf_append_str(out, "process_exec failed: cannot create temp output files");
         *is_error = true;
-        if (p->out) {
-            fclose(p->out);
-            remove(path);
-        }
-        if (p->err) {
-            fclose(p->err);
-            remove(epath);
-        }
         free(p);
         return;
     }
