@@ -9,5 +9,4 @@ LLMKIT="${LLMKIT:-$ROOT/llmkit}"
 [ -x "$LLMKIT" ] || { echo "$LLMKIT not found - build it first: make" >&2; exit 1; }
 
 printf 'hello, how are you?\nand now a second turn\n' |
-"$LLMKIT" repl --openai http://localhost:9931/v1 \
-    --model llama3.1
+"$LLMKIT" repl --openai http://localhost:9931/v1

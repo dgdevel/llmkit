@@ -14,7 +14,6 @@ LLMKIT="${LLMKIT:-$ROOT/llmkit}"
 
 set +e
 "$LLMKIT" call --openai http://localhost:9931/v1 \
-    --model llama3.1 \
     --mcp-proxy "$ROOT/examples/mcp-proxy/expose.jsonl" \
     --terminal-tool expose.list_dir \
     --prompt "List the files in /tmp."

@@ -19,8 +19,7 @@ $ llmkit repl --openai http://localhost:9931/v1
 The `agent` command is a powerful version of the chat that includes built-in MCP tools (web search, file management, process execution, and skills). It also reads instructions from an `AGENTS.md` file in your current directory.
 
 ```sh
-$ llmkit agent --openai http://localhost:9931/v1 --model llama3.1 \
-      --conversation-store ~/chats/project.jsonl
+$ llmkit agent --openai http://localhost:9931/v1 --conversation-store ~/chats/project.jsonl
 ```
 
 - **Persistence**: Use `--conversation-store <file>` to save your chat history and resume it later.
@@ -32,7 +31,7 @@ $ llmkit agent --openai http://localhost:9931/v1 --model llama3.1 \
 For scripts or simple questions, use the `call` command. It takes one prompt and returns one answer.
 
 ```sh
-$ llmkit call --openai http://localhost:9931/v1 --model llama3.1 \
+$ llmkit call --openai http://localhost:9931/v1 \
       --system-prompt "You are a helpful assistant" \
       --prompt "hello, how are you?"
 ```

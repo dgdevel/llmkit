@@ -8,9 +8,7 @@ LLMKIT="${LLMKIT:-$ROOT/llmkit}"
 [ -x "$LLMKIT" ] || { echo "$LLMKIT not found - build it first: make" >&2; exit 1; }
 
 echo "Summarize this in one sentence:" |
-"$LLMKIT" call --openai http://localhost:9931/v1 \
-    --model llama3.1 \
-    --prompt -
+"$LLMKIT" call --openai http://localhost:9931/v1 --prompt -
 
 # capture pattern:
 #   ANSWER=$("$LLMKIT" call --openai "$API_BASE" --model "$MODEL" --prompt - < input.txt)

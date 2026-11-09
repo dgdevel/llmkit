@@ -36,6 +36,8 @@ examples/
     |-- agent-store.sh            llmkit agent: built-in tools, AGENTS.md,
     |                             a conversation store that resumes
     |                             (add --read-only to hide file writes)
+    |-- agent-dialog.sh           llmkit agent behind a dialog menu: pick
+    |                             a new (timestamped) or stored conversation
     |-- mcp-repl.sh               a piped mcp-repl session over builtin-mcp
     |-- prettyprint.sh             a saved transcript rendered repl-style
     `-- proxy.sh                   llmkit proxy in front of llama.cpp, one watched request
@@ -83,7 +85,7 @@ Or by hand:
 
 ```sh
 llmkit runner < examples/runner/minimal.jsonl
-llmkit call --openai http://localhost:9931/v1 --model llama3.1 --prompt "hello"
+llmkit call --openai http://localhost:9931/v1 --prompt "hello"
 ```
 
 Every `.jsonl` file here is one record per line: jsonl is oneline by
