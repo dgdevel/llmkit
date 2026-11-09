@@ -51,9 +51,18 @@ $ llmkit call --openai http://localhost:9931/v1 \
 - **`mcp-repl`**: A debugging console to test tools from a specific MCP server.
 
 ```sh
-$ llmkit mcp-repl --stdio './calculator-mcp'
-> add(1, 1)
-2
+$ llmkit mcp-repl --stdio 'llmkit builtin-mcp'
+Tools available:
+web_search(string keywords): Search on the internet
+- string keywords: Space-separated search keywords
+web_fetch(string url): Fetch a web page
+[...]
+> web_search("a test search")
+URL: https://www.geeksforgeeks.org/machine-learning/generate-and-test-search/
+Description: Introduction: Generate and Test Search is a heuristic search technique based on Depth First Search with Backtracking which guarantees to find a solution if done systematically and there exists a solution. In this technique, all the solutions are generated and tested for the best solution.
+
+[...]
+> 
 ```
 
 ### Monitoring and Debugging
