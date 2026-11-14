@@ -288,10 +288,166 @@ static char *rx_ere(const char *pat) {
     return buf_steal(&b, NULL);
 }
 
-/* compile a pattern for the file tools; false + err on invalid syntax */
-bool bm_rx_compile(regex_t *rx, const char *pattern, char *err,
+/* worst-case repetition guard: glibc's regcomp duplicates the token
+   tree per repetition operator, stacked ones multiply (a+++... is 2^n
+   nodes -> gigabytes). the estimate below walks the ere like regcomp
+   does: branches add, nesting multiplies, reps multiply the sub-tree
+   by their bound (stacked +-?* count as 2 each, {n,} as n+1). patterns
+   a person writes stay far under the cap; anything above is rejected
+   with a clear error before libc allocates. */
+#define BM_RX_MAX_EXPANSION (1u << 20)
+
+/* true when p points at an {n,m}/{n}/{n,} repetition; on success *end
+   is the '}' and n/m the bounds ({n,} gives m = n+1: unbounded reps
+   loop, the estimate only needs to cross the cap) */
+static bool rx_bound(const char *p, unsigned long long *n,
+                     unsigned long long *m, const char **end) {
+    if (*p != '{') return false;
+    p++;
+    if (!isdigit((unsigned char)*p)) return false; /* literal { */
+    *n = *m = 0;
+    while (isdigit((unsigned char)*p)) {
+        *n = *m = *n * 10 + (unsigned char)(*p - '0');
+        if (*n > BM_RX_MAX_EXPANSION) return false; /* absurd: reject */
+        p++;
+    }
+    if (*p == ',') {
+        p++;
+        if (isdigit((unsigned char)*p)) {
+            *m = 0;
+            while (isdigit((unsigned char)*p)) {
+                *m = *m * 10 + (unsigned char)(*p - '0');
+                if (*m > BM_RX_MAX_EXPANSION) return false;
+                p++;
+            }
+        } else {
+            *m = *n + 1; /* {n,} */
+        }
+    }
+    if (*p != '}') return false;
+    *end = p;
+    return true;
+}
+
+/* estimate the atom count of the pattern starting at p: escapes are
+   single atoms, [...] one atom, groups recurse (depth capped: glibc's
+   parser recurses too), branches add, a repetition replaces the last
+   atom by m copies ({n,} counts as n+1: unbounded, only the cap
+   matters, +-?* as 2 each). returns false when the estimate crosses
+   BM_RX_MAX_EXPANSION or the nesting is absurd; syntax slips go to
+   regcomp which reports them. *end receives the position of the
+   matching ')' (the caller's p++ steps past it), or NUL at the end. */
+#define BM_RX_MAX_DEPTH 128
+
+static bool rx_size(const char *p, int depth, unsigned long long *count,
+                    const char **end) {
+    *count = 0;
+    unsigned long long cur = 0;   /* atoms so far in this alternative */
+    unsigned long long last = 0;  /* atom count of the last atom */
+    bool repped = false; /* a rep op already consumed the last atom: a
+                            stacked one doubles the sub-tree in glibc's
+                            parse_dup_op (a+++... is 2^n nodes) */
+    for (; *p; p++) {
+        char c = *p;
+        if (c == '\\' && p[1]) {
+            p++;
+            cur++;
+            last = 1;
+            repped = false;
+            continue;
+        }
+        if (c == '[') {
+            const char *q = p + 1;
+            if (*q == '^') q++;
+            if (*q == ']') q++;
+            while (*q && *q != ']') q++;
+            if (!*q) return false; /* unterminated class: regcomp reports */
+            p = q;
+            cur++;
+            last = 1;
+            repped = false;
+            continue;
+        }
+        if (c == '(') {
+            unsigned long long inner;
+            if (depth >= BM_RX_MAX_DEPTH) return false;
+            if (!rx_size(p + 1, depth + 1, &inner, &p)) return false;
+            cur += inner;
+            last = inner ? inner : 1; /* () is an empty but matchable unit */
+            repped = false;
+            if (*p == ')') continue; /* p is at ')', the p++ below steps past it */
+            break; /* end of string: group unterminated, regcomp reports */
+        }
+        if (c == ')' ) {
+            *count += cur;
+            *end = p;
+            return true;
+        }
+        if (c == '|') {
+            *count += cur;
+            if (*count > BM_RX_MAX_EXPANSION) return false;
+            cur = 0;
+            last = 0;
+            repped = false;
+            continue;
+        }
+        if (c == '{') {
+            unsigned long long n, m;
+            const char *q;
+            if (rx_bound(p, &n, &m, &q)) {
+                if (last == 0) return false; /* rep on nothing: regcomp
+                                                reports */
+                if (repped) last *= 2; /* stacked on +-?*: doubles */
+                cur = cur - last + m * last;
+                if (cur > BM_RX_MAX_EXPANSION) return false;
+                p = q;
+                repped = true;
+                continue;
+            }
+            /* literal brace: falls through as an atom */
+        }
+        if (c == '+' || c == '*' || c == '?') {
+            if (last == 0) return false; /* leading rep: regcomp reports */
+            if (repped) { /* stacked: the tree doubles per op */
+                cur = cur + last;
+                last *= 2;
+            } else {
+                cur += last;
+            }
+            if (cur > BM_RX_MAX_EXPANSION) return false;
+            repped = true;
+            continue;
+        }
+        cur++; /* literal atom */
+        last = 1;
+        repped = false;
+    }
+    *count += cur;
+    *end = p;
+    return *count <= BM_RX_MAX_EXPANSION;
+}
+
+/* reject patterns whose token-tree expansion is catastrophic */
+static bool bm_rx_sane(const char *pat) {
+    unsigned long long count;
+    const char *end;
+    if (!rx_size(pat, 0, &count, &end)) return false;
+    if (!*end) return true; /* consumed the whole pattern */
+    /* stopped at ')': unmatched at top level; count the rest, regcomp
+       reports the syntax slip itself */
+    unsigned long long rest;
+    return rx_size(end + 1, 0, &rest, &end) && count + rest <= BM_RX_MAX_EXPANSION;
+}
+
+    /* compile a pattern for the file tools; false + err on invalid syntax */
+    bool bm_rx_compile(regex_t *rx, const char *pattern, char *err,
                        size_t errsz) {
-    char *ere = rx_ere(pattern);
+        char *ere = rx_ere(pattern);
+    if (!bm_rx_sane(ere)) {
+        free(ere);
+        snprintf(err, errsz, "invalid regex: too many repetitions");
+        return false;
+    }
     int rc = regcomp(rx, ere, REG_EXTENDED | REG_NOSUB);
     if (rc) {
         char rxe[128];

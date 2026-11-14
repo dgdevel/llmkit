@@ -23,9 +23,10 @@
 #ifndef LLMKIT_MDTERM_H
 #define LLMKIT_MDTERM_H
 
-#include <stdio.h>
+#include "llmkit.h" /* first: the feature macros must win over glibc's
+                       defaults, stdio.h below would predefine them */
 
-#include "llmkit.h"
+#include <stdio.h>
 
 /* the markdown styles: attribute codes the probe fills; "" = off.
    the palette is fixed 16-color ANSI: no truecolor escape is ever

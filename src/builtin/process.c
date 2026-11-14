@@ -548,6 +548,7 @@ static void proc_reap(proc_rec_t *p) {
 /* /bin/sh <script>, stdin on /dev/null, stdout and stderr on two
    pipes so the streams stay distinguishable */
 static int proc_spawn(const char *cmdline, proc_rec_t *p) {
+    (void)cmdline; /* posix runs the script below, not the line */
     int out_pipe[2], err_pipe[2];
     if (pipe(out_pipe)) return -1;
     if (pipe(err_pipe)) {
