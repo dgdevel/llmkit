@@ -1077,7 +1077,540 @@ static void analyze_php(const char *text, size_t len, nodes_t *ns) {
     free(src);
 }
 
-/* does a declaration head open with the `typedef` word? */
+/* ---------- typescript: imports, types, interfaces, enums,
+   classes, functions ---------- */
+
+/* typescript blanking: like C plus backtick template literals, whose
+   ${...} interpolation bodies are blanked too (never copy their
+   braces). malloc'd same-length copy */
+static char *ts_blank(const char *text, size_t len) {
+    char *out = malloc(len + 1);
+    if (!out) {
+        perror("llmkit: malloc");
+        exit(EXIT_OUT_OF_CHANNEL);
+    }
+    size_t i = 0;
+    int state = 0; /* 0 code 1 // 2 block 3 str 4 char 5 template
+                      6 interpolation body */
+    int id = 0;    /* interpolation brace depth */
+    while (i < len) {
+        char c = text[i];
+        char nxt = i + 1 < len ? text[i + 1] : '\0';
+        if (state == 0) {
+            if (c == '/' && nxt == '/') {
+                out[i++] = ' ';
+                out[i++] = ' ';
+                state = 1;
+            } else if (c == '/' && nxt == '*') {
+                out[i++] = ' ';
+                out[i++] = ' ';
+                state = 2;
+            } else if (c == '"') {
+                out[i++] = ' ';
+                state = 3;
+            } else if (c == '\'') {
+                out[i++] = ' ';
+                state = 4;
+            } else if (c == '`') {
+                out[i++] = ' ';
+                state = 5;
+            } else {
+                out[i++] = c;
+            }
+        } else if (state == 1) {
+            out[i] = c == '\n' ? '\n' : ' ';
+            if (c == '\n') state = 0;
+            i++;
+        } else if (state == 2) {
+            if (c == '*' && nxt == '/') {
+                out[i++] = ' ';
+                out[i++] = ' ';
+                state = 0;
+            } else {
+                out[i++] = c == '\n' ? '\n' : ' ';
+            }
+        } else if (state == 5) {
+            if (c == '`') {
+                out[i++] = ' ';
+                state = 0;
+            } else if (c == '$' && nxt == '{') {
+                out[i++] = ' ';
+                out[i++] = ' ';
+                state = 6;
+                id = 1;
+            } else {
+                out[i] = c == '\n' ? '\n' : ' ';
+                i++;
+            }
+        } else if (state == 6) {
+            if (c == '{') {
+                id++;
+                out[i++] = ' ';
+            } else if (c == '}') {
+                id--;
+                out[i++] = ' ';
+                if (!id) state = 5;
+            } else {
+                out[i] = c == '\n' ? '\n' : ' ';
+                i++;
+            }
+        } else { /* string or char literal: the content stays (so
+                    `import fs from 'fs'` names its module), backslash
+                    escapes and newlines do not */
+            if (c == '\\' && nxt) {
+                out[i++] = ' ';
+                out[i++] = nxt == '\n' ? '\n' : nxt;
+            } else if ((state == 3 && c == '"') ||
+                       (state == 4 && c == '\'')) {
+                out[i++] = ' ';
+                state = 0;
+            } else {
+                out[i] = c == '\n' ? '\n' : c;
+                i++;
+            }
+        }
+    }
+    out[len] = '\0';
+    return out;
+}
+
+/* offset of the real head past leading export/default/declare words */
+static size_t ts_strip(const char *s) {
+    size_t n = strlen(s), k = 0;
+    for (;;) {
+        while (k < n && (s[k] == ' ' || s[k] == '\t')) k++;
+        size_t wl = 0;
+        if (k + 6 <= n && !strncmp(s + k, "export", 6) &&
+            word_ends(s, n, k, 6))
+            wl = 6;
+        else if (k + 7 <= n && !strncmp(s + k, "default", 7) &&
+                 word_ends(s, n, k, 7))
+            wl = 7;
+        else if (k + 7 <= n && !strncmp(s + k, "declare", 7) &&
+                 word_ends(s, n, k, 7))
+            wl = 7;
+        if (!wl) break;
+        k += wl;
+    }
+    while (k < n && (s[k] == ' ' || s[k] == '\t')) k++;
+    return k;
+}
+
+/* does s start with the word w? */
+static bool ts_first_word(const char *s, const char *w) {
+    size_t wl = strlen(w), n = strlen(s);
+    return !strncmp(s, w, wl) && word_ends(s, n, 0, wl);
+}
+
+/* is the first word a statement keyword (so the head cannot open a
+   function or member)? */
+static bool ts_stmt_head(const char *s) {
+    static const char *const words[] = {
+        "if", "for", "while", "switch", "return", "let", "const",
+        "var", "new", "throw", "try", "do", "break", "continue",
+        "case", "delete", "typeof", "instanceof", "in", "of", NULL};
+    for (int w = 0; words[w]; w++)
+        if (ts_first_word(s, words[w])) return true;
+    return false;
+}
+
+/* byte index of the first depth-0 => (paren/bracket depth tracked),
+   n when there is none */
+static size_t ts_arrow_at(const char *s, size_t n) {
+    int d = 0;
+    for (size_t i = 0; i + 1 < n; i++) {
+        char c = s[i];
+        if (c == '(' || c == '[')
+            d++;
+        else if (c == ')' || c == ']') {
+            if (d) d--;
+        } else if (!d && c == '=' && s[i + 1] == '>')
+            return i;
+    }
+    return n;
+}
+
+/* byte index of the first depth-0 plain = (not == <= >= != => or a
+   compound assignment), n when there is none */
+static size_t ts_eq_at(const char *s, size_t n) {
+    int d = 0; /* ( [ < nest the head; a generic = is not a cut */
+    for (size_t i = 0; i < n; i++) {
+        char c = s[i];
+        if (c == '(' || c == '[' || c == '<')
+            d++;
+        else if (c == ')' || c == ']' || c == '>') {
+            if (d) d--;
+        } else if (!d && c == '=') {
+            if (i + 1 < n && s[i + 1] == '>') continue; /* => */
+            char p = i ? s[i - 1] : ' ';
+            if (strchr("=!<>+-*/|&%^", p)) continue;
+            if (i + 1 < n && s[i + 1] == '=') continue;
+            return i;
+        }
+    }
+    return n;
+}
+
+/* the outline label of a head: cut at the first depth-0 =>, else at
+   the first depth-0 plain =, else the whole head */
+static void ts_label(char *dst, size_t cap, const char *s) {
+    size_t n = strlen(s);
+    size_t cut = ts_arrow_at(s, n);
+    if (cut == n) cut = ts_eq_at(s, n);
+    while (cut > 0 && (s[cut - 1] == ' ' || s[cut - 1] == '\t')) cut--;
+    label_copy(dst, cap, s, cut < n ? cut : n);
+}
+
+/* the kind char of an aggregate head: c lass, i nterface, e num,
+   n amespace, 0 none; abstract/readonly/const modifiers may precede */
+static char ts_agg_kind(const char *s) {
+    size_t n = strlen(s), k = 0;
+    for (;;) {
+        if (k + 8 <= n && !strncmp(s + k, "abstract", 8) &&
+            word_ends(s, n, k, 8))
+            k += 8;
+        else if (k + 8 <= n && !strncmp(s + k, "readonly", 8) &&
+                 word_ends(s, n, k, 8))
+            k += 8;
+        else if (k + 5 <= n && !strncmp(s + k, "const", 5) &&
+                 word_ends(s, n, k, 5))
+            k += 5;
+        else
+            break;
+    }
+    while (k < n && (s[k] == ' ' || s[k] == '\t')) k++;
+    if (k + 5 <= n && !strncmp(s + k, "class", 5) && word_ends(s, n, k, 5))
+        return 'c';
+    if (k + 9 <= n && !strncmp(s + k, "interface", 9) &&
+        word_ends(s, n, k, 9))
+        return 'i';
+    if (k + 4 <= n && !strncmp(s + k, "enum", 4) && word_ends(s, n, k, 4))
+        return 'e';
+    if (k + 9 <= n && !strncmp(s + k, "namespace", 9) &&
+        word_ends(s, n, k, 9))
+        return 'n';
+    return 0;
+}
+
+/* is the head the opener of a function, method, accessor or arrow
+   assignment? [modifiers] function name (...), constructor(...),
+   [modifiers] [get|set] name(...) with the paren group closed, or
+   anything with a depth-0 => that is not a control-flow statement */
+static bool ts_callable(const char *s) {
+    size_t n = strlen(s);
+    /* a control-flow head opens no node: if (x) {, switch (c) {,
+       return () => {, describe(suite, () => {, ... */
+    if (ts_stmt_head(s)) return false;
+    if (ts_arrow_at(s, n) < n) {
+        /* arrow assignment: the head must be an assignment - the =>
+           follows a plain = (never a call argument or such) */
+        return ts_eq_at(s, n) < n;
+    }
+    static const char *const mods[] = {
+        "public", "private", "protected", "static", "readonly",
+        "abstract", "override", "async", "declare", "export",
+        "default", "get", "set", NULL};
+    size_t k = 0;
+    bool had_mod = false; /* a modifier, function or constructor */
+    for (;;) { /* modifiers may stack */
+        while (k < n && (s[k] == ' ' || s[k] == '\t')) k++;
+        size_t wl = 0;
+        for (int w = 0; mods[w] && !wl; w++) {
+            size_t ml = strlen(mods[w]);
+            if (k + ml <= n && !strncmp(s + k, mods[w], ml) &&
+                word_ends(s, n, k, ml)) {
+                /* get<T>(...)/set<T>(...): a generic method named
+                   get/set, not an accessor */
+                if ((!strcmp(mods[w], "get") || !strcmp(mods[w], "set")) &&
+                    k + ml < n && s[k + ml] == '<')
+                    continue;
+                wl = ml;
+            }
+        }
+        if (!wl) break;
+        had_mod = true;
+        k += wl;
+    }
+    while (k < n && (s[k] == ' ' || s[k] == '\t')) k++;
+    if (k + 11 <= n && !strncmp(s + k, "constructor", 11) &&
+        word_ends(s, n, k, 11))
+        had_mod = true; /* constructor(...) has no other marker */
+    if (k + 8 <= n && !strncmp(s + k, "function", 8) &&
+        word_ends(s, n, k, 8)) {
+        had_mod = true;
+        k += 8;
+        while (k < n && (s[k] == ' ' || s[k] == '\t')) k++;
+    }
+    /* a bare name(...): a call, not a declaration (no modifier,
+       constructor or function word, no return type either) */
+    if (!had_mod) {
+        /* ...unless a return type follows the parens: area(): T */
+        const char *close = NULL;
+        int d2 = 0;
+        for (const char *q = s + k; *q; q++) {
+            if (*q == '(') d2++;
+            else if (*q == ')') {
+                if (!--d2) {
+                    close = q;
+                    break;
+                }
+            }
+        }
+        if (!close) return false;
+        const char *after = close + 1;
+        while (*after == ' ' || *after == '\t') after++;
+        if (*after != ':') return false;
+    }
+    if (k >= n || !(s[k] == '_' || s[k] == '#' ||
+                    (s[k] >= 'A' && s[k] <= 'Z') ||
+                    (s[k] >= 'a' && s[k] <= 'z')))
+        return false;
+    if (s[k] == '#') k++; /* a #private name */
+    while (k < n && (isalnum((unsigned char)s[k]) || s[k] == '_'))
+        k++;
+    while (k < n && (s[k] == ' ' || s[k] == '\t')) k++;
+    if (k < n && s[k] == '<') { /* a generic parameter list */
+        int gd = 0;
+        while (k < n) {
+            if (s[k] == '<') gd++;
+            else if (s[k] == '>') {
+                if (!--gd) {
+                    k++;
+                    break;
+                }
+            }
+            k++;
+        }
+        while (k < n && (s[k] == ' ' || s[k] == '\t')) k++;
+    }
+    if (k >= n || s[k] != '(') return false;
+    /* the paren group must close: kills foo(() => { callbacks */
+    int d = 0;
+    for (size_t i = k; i < n; i++) {
+        if (s[i] == '(')
+            d++;
+        else if (s[i] == ')') {
+            d--;
+            if (!d) return true;
+        } else if (!d && s[i] == ';')
+            return false;
+    }
+    return false;
+}
+
+/* a top-level value declaration that deserves a node: [let|const|
+   var] name = ... with an arrow or function on the right, or any
+   callable head that opens no control flow */
+static bool ts_top_decl(const char *s) {
+    if (ts_first_word(s, "const") || ts_first_word(s, "let") ||
+        ts_first_word(s, "var")) {
+        size_t n = strlen(s);
+        return ts_arrow_at(s, n) < n ||
+               strstr(s, " function ") != NULL;
+    }
+    return ts_callable(s);
+}
+
+static void analyze_typescript(const char *text, size_t len,
+                               nodes_t *ns) {
+    char *src = ts_blank(text, len);
+
+    int stack[64];        /* brace depth at each open aggregate */
+    size_t stack_n = 0;
+    int depth = 0;
+    char acc[AN_ACC_MAX]; /* the declaration head being built */
+    size_t acc_len = 0;
+    long acc_line = -1;
+    bool acc_blank = true; /* acc still all whitespace */
+    bool acc_bad = false;  /* head overran the cap: no node from it */
+    int glue = 0;          /* brace depth of an import/export's brace
+                              group (import { ... } from ...): the
+                              braces are statement text, no structure */
+
+    size_t pos = 0;
+    const char *line;
+    size_t ll;
+    long lineno = 0;
+
+    while (bm_next_line(src, len, &pos, &line, &ll)) {
+        lineno++;
+
+        for (size_t c = 0; c < ll; c++) {
+            char ch = line[c];
+
+            /* a case/default label's colon resets the head; any other
+               colon is just head text */
+            if (ch == ':') {
+                acc[acc_len] = '\0';
+                char head[AN_ACC_MAX];
+                squeeze_spaces(head, sizeof head, acc, acc_len);
+                size_t off = head[0] ? ts_strip(head) : 0;
+                if (head[0] && (ts_first_word(head + off, "case") ||
+                                ts_first_word(head + off, "default"))) {
+                    acc_len = 0;
+                    acc_bad = false;
+                    acc_blank = true;
+                    acc_line = -1;
+                    continue;
+                }
+            }
+
+            if (ch != '{' && ch != '}' && ch != ';') {
+                if (!acc_bad) {
+                    if (acc_blank && ch != ' ' && ch != '\t') {
+                        acc_line = lineno;
+                        acc_blank = false;
+                    }
+                    if (acc_len + 1 < sizeof acc)
+                        acc[acc_len++] = ch;
+                    else
+                        acc_bad = true;
+                }
+                continue;
+            }
+
+            acc[acc_len] = '\0';
+            char head[AN_ACC_MAX];
+            squeeze_spaces(head, sizeof head, acc, acc_len);
+            size_t off = head[0] ? ts_strip(head) : 0;
+            const char *s = head + off;
+            size_t sn = strlen(s);
+            bool inbody = stack_n ? depth == stack[stack_n - 1] + 1
+                                  : depth == 0;
+
+            if (ch == '{') {
+                if (glue) {
+                    glue++;
+                } else if (stack_n == 0 && !acc_bad && head[0] &&
+                           (ts_first_word(head, "import") ||
+                            (ts_first_word(head, "export") &&
+                             !head[ts_strip(head)]))) {
+                    glue = 1; /* import { ... } / export { ... }: the
+                                 braces are part of the statement, no
+                                 structure of their own */
+                }
+                if (glue) {
+                    if (acc_len + 1 < sizeof acc) acc[acc_len++] = ch;
+                    else acc_bad = true;
+                    continue;
+                }
+                if (!acc_bad && head[0] && inbody) {
+                    char label[AN_LABEL_MAX + 8];
+                    if (ts_first_word(s, "type") &&
+                        ts_eq_at(s, sn) < sn) {
+                        /* type alias with an object body: the label
+                           ends at the = */
+                        size_t cut = ts_eq_at(s, sn);
+                        while (cut > 0 &&
+                               (s[cut - 1] == ' ' || s[cut - 1] == '\t'))
+                            cut--;
+                        label_copy(label, sizeof label, s, cut);
+                        node_add(ns, acc_line, (int)stack_n, label);
+                        if (stack_n < sizeof stack / sizeof stack[0])
+                            stack[stack_n++] = depth;
+                    } else if (ts_agg_kind(s) == 'e') {
+                        /* an enum's head labels it; its members land
+                           at the closing } */
+                        label_copy(label, sizeof label, s, sn);
+                        node_add(ns, acc_line, (int)stack_n, label);
+                    } else if (ts_agg_kind(s)) {
+                        label_copy(label, sizeof label, s, sn);
+                        node_add(ns, acc_line, (int)stack_n, label);
+                        if (stack_n < sizeof stack / sizeof stack[0])
+                            stack[stack_n++] = depth;
+                    } else if (ts_callable(s) || ts_top_decl(s)) {
+                        ts_label(label, sizeof label, s);
+                        node_add(ns, acc_line, (int)stack_n, label);
+                    }
+                }
+                if (!acc_bad && head[0] && ts_agg_kind(s) == 'e' &&
+                    stack_n < sizeof stack / sizeof stack[0])
+                    /* the enum opens the stack with no label yet: its
+                       members reach the } handler */
+                    stack[stack_n++] = depth;
+                depth++;
+            } else if (ch == '}') {
+                if (glue) {
+                    glue--;
+                    if (acc_len + 1 < sizeof acc) acc[acc_len++] = ch;
+                    else acc_bad = true;
+                    continue;
+                }
+                if (stack_n && depth == stack[stack_n - 1] + 1 && !acc_bad &&
+                    head[0] && !ts_stmt_head(s) &&
+                    ts_agg_kind(s) != 'e') {
+                    /* an enum's tail members: Red, Green */
+                    char headcp[AN_LABEL_MAX + 8];
+                    label_copy(headcp, sizeof headcp, s, strlen(s));
+                    /* one label per member: split on the commas that
+                       survive the blanking, each cut at its = */
+                    char *save = NULL;
+                    for (char *m = strtok_r(headcp, ",", &save); m;
+                         m = strtok_r(NULL, ",", &save)) {
+                        while (*m == ' ' || *m == '\t' || *m == '\n')
+                            m++;
+                        char *e = m + strlen(m);
+                        while (e > m && (e[-1] == ' ' || e[-1] == '\t' ||
+                                         e[-1] == '\n'))
+                            *--e = '\0';
+                        if (!*m) continue;
+                        char label[AN_LABEL_MAX + 8];
+                        ts_label(label, sizeof label, m);
+                        if (label[0])
+                            node_add(ns, acc_line, (int)stack_n, label);
+                    }
+                }
+                if (depth > 0) depth--;
+                if (stack_n && stack[stack_n - 1] == depth) stack_n--;
+            } else { /* ';' */
+                if (!acc_bad && head[0]) {
+                    char label[AN_LABEL_MAX + 8];
+                    if (!stack_n) {
+                        if (ts_first_word(s, "type") &&
+                            ts_eq_at(s, sn) < sn) {
+                            /* a type alias: the label ends at the =,
+                               export and all */
+                            size_t cut = ts_eq_at(s, sn);
+                            while (cut > 0 && (s[cut - 1] == ' ' ||
+                                               s[cut - 1] == '\t'))
+                                cut--;
+                            label_copy(label, sizeof label, s, cut);
+                            node_add(ns, acc_line, 0, label);
+                        } else if (ts_first_word(head, "import") ||
+                                   ts_first_word(head, "export")) {
+                            /* the whole head labels the line, cut at
+                               the => when there is one */
+                            if (ts_arrow_at(head, strlen(head)) <
+                                strlen(head))
+                                ts_label(label, sizeof label, head);
+                            else
+                                label_copy(label, sizeof label, head,
+                                           strlen(head));
+                            node_add(ns, acc_line, 0, label);
+                        } else if (ts_top_decl(s)) {
+                            /* a bare top-level arrow or const fn
+                               head: const el = (x) => ... */
+                            ts_label(label, sizeof label, s);
+                            node_add(ns, acc_line, 0, label);
+                        }
+                    } else if (inbody && !ts_stmt_head(s)) {
+                        ts_label(label, sizeof label, s);
+                        if (label[0])
+                            node_add(ns, acc_line, (int)stack_n, label);
+                    }
+                }
+            }
+
+            acc_len = 0;
+            acc_bad = false;
+            acc_blank = true;
+            acc_line = -1;
+            glue = 0;
+        }
+    }
+    free(src);
+}
+
 static bool starts_typedef(const char *head) {
     return !strncmp(head, "typedef", 7) &&
            (head[7] == '\0' || head[7] == ' ');
@@ -1201,7 +1734,7 @@ static const char *const EXTS_MARKDOWN[] = {
     ".md", ".markdown", ".mdown", NULL};
 static const char *const EXTS_C[] = {
     ".c", ".h", ".cpp", ".cc", ".cxx", ".hpp", ".hh", ".hxx",
-    ".java", ".cs", ".js", ".jsx", ".ts", ".tsx", NULL};
+    ".java", ".cs", ".js", ".jsx", NULL};
 static const char *const EXTS_PYTHON[] = {
     ".py", ".pyi", NULL};
 static const char *const EXTS_SHELL[] = {
@@ -1212,6 +1745,8 @@ static const char *const EXTS_PWSH[] = {
     ".ps1", NULL};
 static const char *const EXTS_PHP[] = {
     ".php", ".phtml", ".phps", NULL};
+static const char *const EXTS_TS[] = {
+    ".ts", ".tsx", ".mts", ".cts", NULL};
 
 static const analyzer_t ANALYZERS[] = {
     {"markdown", EXTS_MARKDOWN, analyze_markdown},
@@ -1221,6 +1756,7 @@ static const analyzer_t ANALYZERS[] = {
     {"batch",    EXTS_BATCH,    analyze_batch},
     {"powershell", EXTS_PWSH,   analyze_pwsh},
     {"php",      EXTS_PHP,      analyze_php},
+    {"typescript", EXTS_TS,     analyze_typescript},
 };
 enum { ANALYZERS_N = sizeof ANALYZERS / sizeof ANALYZERS[0] };
 

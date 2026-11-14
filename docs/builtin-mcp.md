@@ -145,7 +145,8 @@ Moves the file or directory tree at `sourcepath` to `destpath`. Same `destpath` 
 
 ### file_analyze(path)
 
-Shows the structure of a text file of a known type instead of its whole content. This is cheaper than `file_read` when only the shape of a file matters. The type comes from the extension: markdown files (`.md`, `.markdown`, `.mdown`) come back as their heading tree, c-family sources (`.c .h .cpp .cc .cxx .hpp .hh .hxx .java .cs .js .jsx .ts .tsx`) as their structs with typed members, full function signatures and typedefs, python files (`.py`, `.pyi`) as their classes and defs with parameter lists, php files (`.php`, `.phtml`, `.phps`) as their namespaces, imports, classes/interfaces/traits/enums and function or method signatures. One line per element: its line number, an indent per nesting level, then the element, under a header naming the path, the kind and the line count:
+Shows the structure of a text file of a known type instead of its whole content. This is cheaper than `file_read` when only the shape of a file matters. The type comes from the extension: markdown files (`.md`, `.markdown`, `.mdown`) come back as their heading tree, c-family sources (`.c .h .cpp .cc .cxx .hpp .hh .hxx .java .cs .js .jsx`) as their structs with typed members, full function signatures and typedefs, python files (`.py`, `.pyi`) as their classes and defs with parameter lists, php files (`.php`, `.phtml`, `.phps`) as their namespaces, imports, classes/interfaces/traits/enums and function or method signatures, typescript files (`.ts`, `.tsx`, `.mts`, `.cts`) as their imports and exports, type aliases, interfaces, enums, namespaces, classes with members, and function or method signatures.
+One line per element: its line number, an indent per nesting level, then the element, under a header naming the path, the kind and the line count:
 
 ```
 src/builtin.c  [c]  4052 lines
@@ -160,7 +161,7 @@ src/builtin.c  [c]  4052 lines
 Comments and string literals are ignored, so nothing inside them can look like structure. A file with no elements answers `(nothing found)`. At most 1000 elements are returned, marked `... [truncated]` past that. Directories, non regular files, non textual files of a known type and files over the 64Mb read cap are errors. An unknown type is not an error: the reply reports its human readable size, the content type when the OS can name one (the `file` utility on posix, FindMimeFromData on windows), the line count when the file is textual, and the list of analyzable types:
 
 ```
-notes.txt: unknown file type (known: markdown, c, python, shell, batch, powershell, php)
+notes.txt: unknown file type (known: markdown, c, python, shell, batch, powershell, php, typescript)
 size 17b, type text/plain, 3 lines
 ```
 

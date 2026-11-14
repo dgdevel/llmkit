@@ -2523,6 +2523,54 @@ static void test_builtin(void) {
           "builtin: file_analyze php namespaces, classes, methods");
     free(t);
 
+    write_file("/tmp/llmkit-test-builtin/app.ts",
+               "// class Fake { }\n"
+               "import fs from 'fs';\n"
+               "import { EventEmitter } from \"events\";\n"
+               "export type Id<T> = T & { id: string; };\n"
+               "export interface Shape { area(): number; }\n"
+               "export enum Color { Red = 1, Green }\n"
+               "export class Circle<T> implements Shape {\n"
+               "    private readonly r: number = 1;\n"
+               "    constructor(r: number) { }\n"
+               "    area(): number { return 3; }\n"
+               "    get<T>(key: T): boolean { return true; }\n"
+               "    #secret(): void { }\n"
+               "    move = (d: number): void => { };\n"
+               "}\n"
+               "function main(): void { }\n"
+               "export const help = async (a: string) => a;\n"
+               "const bare = (x: number) => x + 1;\n"
+               "describe('suite', () => { it('works', () => {}); });\n"
+               "switch (c) { case 1: break; default: break; }\n"
+               "export { Circle, main };\n");
+    t = bc_call("file_analyze",
+                "{\"path\":\"/tmp/llmkit-test-builtin/app.ts\"}", &ie);
+    check(!ie && t && strstr(t, "  [typescript]  20 lines\n") &&
+              strstr(t, "import fs from fs\n") &&
+              strstr(t, "import { EventEmitter } from events\n") &&
+              strstr(t, "type Id<T>\n") &&
+              strstr(t, "id: string\n") &&
+              strstr(t, "interface Shape\n") &&
+              strstr(t, "area(): number\n") &&
+              strstr(t, "enum Color\n") &&
+              strstr(t, "Red\n") && strstr(t, "Green\n") &&
+              strstr(t, "class Circle<T> implements Shape\n") &&
+              strstr(t, "private readonly r: number\n") &&
+              strstr(t, "constructor(r: number)\n") &&
+              strstr(t, "get<T>(key: T): boolean\n") &&
+              strstr(t, "#secret(): void\n") &&
+              strstr(t, "move = (d: number): void\n") &&
+              strstr(t, "function main(): void\n") &&
+              strstr(t, "export const help = async (a: string)\n") &&
+              strstr(t, "const bare = (x: number)\n") &&
+              strstr(t, "export { Circle, main }\n") &&
+              !strstr(t, "Fake") && !strstr(t, "return") &&
+              !strstr(t, "describe") && !strstr(t, "switch") &&
+              !strstr(t, "break") && !strstr(t, "=>"),
+          "builtin: file_analyze typescript imports, types, classes");
+    free(t);
+
     write_file("/tmp/llmkit-test-builtin/plain.md", "just text\n");
     t = bc_call("file_analyze",
                 "{\"path\":\"/tmp/llmkit-test-builtin/plain.md\"}", &ie);
