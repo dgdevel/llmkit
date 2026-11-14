@@ -26,7 +26,8 @@ SRC  = src/buf.c src/sse.c src/platform.c src/jsonl.c src/jstream.c src/wire_ope
        src/call.c src/models.c src/editor.c src/repl.c src/acp.c src/mcprepl.c \
        src/update.c \
        src/pretty.c src/llmproxy.c src/prompts.gen.c \
-       src/vendor/linenoise/linenoise.c
+       src/mdterm.c \
+       src/vendor/linenoise/linenoise.c src/vendor/md4c/md4c.c
 MAIN = src/main.c
 TEST = test/selfcheck.c
 
@@ -63,7 +64,7 @@ FUZZFLAGS ?= -fsanitize=address
 #   make fuzz FUZZFLAGS=-fsanitize=address,undefined
 # run one: ./fuzz/fuzz_sse fuzz/seeds/sse
 # fuzz_mcp_tools (real tools/call) is docker-only: fuzz/docker-fuzz.sh
-FUZZ_HARNESS = sse jsonl html regex proxy mcp mcp_tools
+FUZZ_HARNESS = sse jsonl html regex proxy mcp mcp_tools mdterm
 
 fuzz: $(foreach h,$(FUZZ_HARNESS),fuzz/fuzz_$(h))
 
@@ -131,7 +132,7 @@ clean:
 	      llmkit.exe src/prompts.gen.c src/prompts.gen.h \
 	      fuzz/fuzz_sse fuzz/fuzz_jsonl fuzz/fuzz_html \
 	      fuzz/fuzz_regex fuzz/fuzz_proxy fuzz/fuzz_mcp \
-	      fuzz/fuzz_mcp_tools
+	      fuzz/fuzz_mcp_tools fuzz/fuzz_mdterm
 
 # stage: tests, build, packages in dist/ - runs inside the build container
 # usage: make stage TAG=v1.2.3

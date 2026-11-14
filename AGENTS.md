@@ -26,6 +26,10 @@ This document gives context and instructions for agents that work on the `llmkit
       per tool family (`files.c`, `analyze.c`, `process.c`, `web.c`,
       `skills.c`) plus shared helpers (`util.c`, `internal.h`).
     - `call.c`, `models.c`, `repl.c`, `mcprepl.c`, `pretty.c`: the command front-ends (one-off call, models listing, interactive repl, mcp console, transcript rendering).
+    - `mdterm.c` + `vendor/md4c/`: markdown rendering for the terminal
+      (LLM response text): a whole-document md4c-SAX renderer and a
+      streaming line machine, styled through `style_probe`'s tty gate
+      (plain bytes on pipes, colors honor NO_COLOR).
     - `editor.c` + `vendor/linenoise/`: interactive line editing behind the repl (`@` path completion, tab hooks for the model picker).
     - `platform.c`, `sse.c`, `buf.c`, `jsonl.c`: platform tty and pipes, SSE parsing, buffers, JSON Lines.
     - `prompts/`: system and tool prompts. `tools/gen-prompts.sh` bundles them into the binary at build time.

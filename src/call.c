@@ -3,6 +3,7 @@
    engine, unchanged. The parser owns CLI shape only - value problems stay
    record validation, the requirements' two error tiers. */
 #include "llmkit.h"
+#include "mdterm.h"
 
 #include <errno.h>
 #include <stdlib.h>
@@ -425,6 +426,13 @@ typedef struct call_sink {
     bool wrote;    /* any text byte written */
     bool last_nl;  /* last written byte was \n */
     bool io_fail;  /* stdout write failed (design sec.12: exit 1) */
+    /* markdown rendering: armed only when out is a tty (a pipe keeps
+       the byte-exact plain stream). The streamed deltas accumulate,
+       the whole answer renders once at the final record */
+    bool md_tty;
+    buf_t md_text; /* the accumulated response text */
+    style_t md_style;
+    dspy_t md_dspy;
     /* tool_response snapshot: the terminal ending's answer is the record
        whose id matches engine terminal_id (design sec.11) */
     char **tresp_ids, **tresp_texts;
@@ -458,7 +466,22 @@ static void call_sink_fn(void *ctx, cJSON *rec) {
     call_sink_t *s = ctx;
     int k = rec_classify(rec);
     if (k == R_RESPONSE) {
-        call_sink_write(s, rec_str(rec, "text"));
+        const char *tx = rec_str(rec, "text");
+        if (!s->md_tty) {
+            call_sink_write(s, tx);
+        } else if (!rec_bool(rec, "partial", false)) {
+            /* the whole answer at once: the deltas plus this tail are
+               the complete text, rendered through one document pass */
+            buf_append_str(&s->md_text, tx ? tx : "");
+            md_render(&s->md_dspy, s->md_text.data ? s->md_text.data : "",
+                      s->md_text.len);
+            s->md_dspy.wrote = true;
+            s->wrote = true;
+            s->last_nl = s->md_dspy.last_nl;
+            buf_clear(&s->md_text);
+        } else {
+            buf_append_str(&s->md_text, tx ? tx : "");
+        }
     } else if (k == R_TOOL_RESPONSE) {
         call_sink_tresp_push(s, rec);
     } else if (k == R_ERROR) {
@@ -546,6 +569,17 @@ int call_run(const call_cfg_t *c, FILE *out, FILE *errf, const char *exe_path,
     memset(&s, 0, sizeof s);
     s.out = out;
     s.err = errf;
+    buf_init(&s.md_text);
+    /* markdown styling on a tty only: pipes keep the byte stream.
+       the local dspy mirrors call_sink_write's io_fail discipline
+       through its own flag, checked below */
+    s.md_tty = isatty(fileno(out)) != 0;
+    if (s.md_tty) {
+        s.md_dspy.out = out;
+        s.md_dspy.st = &s.md_style;
+        s.md_dspy.cur = -1;
+        style_probe(&s.md_style, out);
+    }
     engine_t *e = engine_new(call_sink_fn, &s);
     if (factory) e->wire_factory = factory;
     int rc = 0;
@@ -589,6 +623,8 @@ int call_run(const call_cfg_t *c, FILE *out, FILE *errf, const char *exe_path,
     }
 
 done:
+    if (s.md_dspy.io_fail) s.io_fail = true; /* styled writes failed alike */
+    buf_free(&s.md_text);
     /* the answer ends with a newline; an empty answer writes nothing */
     if ((rc == 0 || rc == EXIT_TERMINAL_TOOL) && s.wrote && !s.last_nl &&
         !s.io_fail) {

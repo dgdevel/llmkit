@@ -84,7 +84,44 @@ void dspy_styled(dspy_t *s, const char *on, const char *text) {
     if (*on) dspy_write_str(s, s->st->reset);
 }
 
+/* ================= markdown rendering (mdterm.c) ================= */
+
+#include "mdterm.h"
+
+void dspy_md_feed(dspy_t *s, const char *text) {
+    if (!text || !*text) return;
+    if (!s->md) {
+        s->md = malloc(sizeof *s->md);
+        if (!s->md) { /* oom: plain passthrough beats a dead session */
+            dspy_write_str(s, text);
+            return;
+        }
+        if (md_line_init(s->md, s) != 0) {
+            free(s->md);
+            s->md = NULL;
+            dspy_write_str(s, text);
+            return;
+        }
+    }
+    dspy_sep_flush(s);
+    md_line_feed(s->md, text, strlen(text));
+}
+
+void dspy_md_close(dspy_t *s) {
+    if (!s->md) return;
+    md_line_close(s->md);
+}
+
+void dspy_md_free(dspy_t *s) {
+    if (!s->md) return;
+    md_line_close(s->md); /* an aborted turn's tail is not lost */
+    md_line_free(s->md);
+    free(s->md);
+    s->md = NULL;
+}
+
 void dspy_error_line(dspy_t *s, const char *code, const char *msg) {
+    dspy_md_close(s); /* pending streamed text draws before the error */
     dspy_ensure_nl(s);
     s->cur = -1; /* an error line closes any open block */
     dspy_write_str(s, "! ");
@@ -160,6 +197,7 @@ static bool dspy_trim_match(const char *tool) {
 /* the tool traffic arms both record dispatchers share: the tool name
    with its arguments tree, and the response text, bold */
 void dspy_tool_request(dspy_t *s, const cJSON *rec) {
+    dspy_md_close(s); /* streamed text ends where the tools begin */
     s->cur = -1;
     const char *tool = rec_str(rec, "tool");
     const char *full = tool; /* pre-strip: the trim list names the
@@ -409,9 +447,19 @@ static void pretty_record(dspy_t *s, const cJSON *rec) {
             s->sep_pending = true;
             s->cur = k;
         }
-        dspy_styled(s, k == R_THINKING ? s->st->italic : "", tx);
+        if (k == R_THINKING) {
+            /* reasoning: the italic block shape, kept whole - markdown
+               styling inside thinking text would fight the dim frame
+               sessions draw around it */
+            dspy_styled(s, s->st->italic, tx);
+        } else {
+            dspy_md_feed(s, tx);
+        }
         if (!rec_bool(rec, "partial", false)) {
-            if (k == R_RESPONSE) render_usage(s, rec);
+            if (k == R_RESPONSE) {
+                dspy_md_close(s);
+                render_usage(s, rec);
+            }
             dspy_ensure_nl(s); /* per-block trailing newline, call's rule */
             s->cur = -1;
         }
@@ -453,6 +501,7 @@ void pretty_live_record(pretty_live_t *l, cJSON *rec) {
 bool pretty_live_io_failed(const pretty_live_t *l) { return l->s.io_fail; }
 
 void pretty_live_free(pretty_live_t *l) {
+    dspy_md_free(&l->s);
     free(l->s.brief_tools);
     free(l->s.brief_strip);
     dspy_brief_clear(&l->s);
@@ -528,6 +577,7 @@ int pretty_run(FILE *in, FILE *out) {
     }
     if (sink.io_fail) rc = EXIT_OUT_OF_CHANNEL;
     dspy_brief_flush(&sink); /* held request lines, not lost */
+    dspy_md_free(&sink);
     free(sink.brief_tools);
     free(sink.brief_strip);
     dspy_brief_clear(&sink);

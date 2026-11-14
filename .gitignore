@@ -20,9 +20,14 @@ fuzz/timeout-*
 fuzz/leak-*
 fuzz/oom-*
 fuzz/fuzz_sse
+fuzz/fuzz_mdterm
 fuzz/fuzz_jsonl
 fuzz/fuzz_html
 fuzz/fuzz_regex
 fuzz/fuzz_proxy
 fuzz/fuzz_mcp
 fuzz/fuzz_mcp_tools
+
+# reference clones kept out of the tree
+fuzz/seeds/mdterm/*
+!fuzz/seeds/mdterm/sample-md.jsonl

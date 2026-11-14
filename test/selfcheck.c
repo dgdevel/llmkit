@@ -7970,6 +7970,160 @@ static void test_acp(void) {
     test_acp_turn();
 }
 
+/* ================= mdterm ================= */
+
+#include "mdterm.h"
+
+/* a sink over a memory stream: non-tty, so styling is plain - the
+   goldens assert the plain-text shape; the styled path is covered by
+   the line machine's structure tests below (no tty in CI) */
+static dspy_t *md_test_sink(buf_t *out) {
+    FILE *f = open_memstream(&out->data, &out->cap);
+    if (!f) return NULL;
+    dspy_t *s = calloc(1, sizeof *s);
+    if (!s) { fclose(f); return NULL; }
+    static style_t st; /* zeroed once: "" codes, plain output */
+    memset(&st, 0, sizeof st);
+    s->out = f;
+    s->st = &st;
+    s->cur = -1;
+    return s;
+}
+
+static char *md_test_close(dspy_t *s, buf_t *out) {
+    fclose(s->out); /* flushes; updates data and cap, not buf_t.len */
+    out->len = out->cap; /* open_memstream's byte count lands in cap */
+    free(s);
+    buf_append_byte(out, '\0');
+    return out->data;
+}
+
+static void test_md_render(void) {
+    /* whole-document rendering through a non-tty sink: plain text out */
+    buf_t out;
+    buf_init(&out);
+    dspy_t *s = md_test_sink(&out);
+    check(s != NULL, "mdterm: sink builds");
+
+    md_render(s, "# Head\n\nsome **bold** text\n\n- one\n- two\n",
+              strlen("# Head\n\nsome **bold** text\n\n- one\n- two\n"));
+    char *got = md_test_close(s, &out);
+    check(got && !strcmp(got, "Head\nsome bold text\n- one\n- two\n"),
+          "mdterm: md_render plain text shape");
+    free(got);
+
+    /* links: label plus url beside it */
+    buf_init(&out);
+    s = md_test_sink(&out);
+    md_render(s, "see [docs](https://x.io) now",
+              strlen("see [docs](https://x.io) now"));
+    got = md_test_close(s, &out);
+    check(got && !strcmp(got, "see docs (https://x.io) now"),
+          "mdterm: link label and url");
+    free(got);
+
+    /* code fence: language banner, verbatim body */
+    buf_init(&out);
+    s = md_test_sink(&out);
+    md_render(s, "```c\nint x = 1;\n```\n", strlen("```c\nint x = 1;\n```\n"));
+    got = md_test_close(s, &out);
+    check(got && strstr(got, "c\nint x = 1;") != NULL,
+          "mdterm: code fence banner and body");
+    free(got);
+
+    /* table: aligned columns, header separator */
+    buf_init(&out);
+    s = md_test_sink(&out);
+    md_render(s, "| a | b |\n|---|---|\n| 1 | 2 |",
+              strlen("| a | b |\n|---|---|\n| 1 | 2 |"));
+    got = md_test_close(s, &out);
+    check(got && strstr(got, "a  b") != NULL && strstr(got, "1  2") != NULL,
+          "mdterm: table rows align");
+    free(got);
+
+    /* quote: the bar prefixes each line */
+    buf_init(&out);
+    s = md_test_sink(&out);
+    md_render(s, "> quoted", strlen("> quoted"));
+    got = md_test_close(s, &out);
+    check(got && strstr(got, "| quoted") != NULL,
+          "mdterm: quote bar");
+    free(got);
+
+    /* entity decoding */
+    buf_init(&out);
+    s = md_test_sink(&out);
+    md_render(s, "a &amp; b &lt;c&gt;", strlen("a &amp; b &lt;c&gt;"));
+    got = md_test_close(s, &out);
+    check(got && strstr(got, "a & b <c>") != NULL,
+          "mdterm: entities decode");
+    free(got);
+}
+
+static void test_md_line(void) {
+    /* the streaming machine: deltas split anywhere, same output as
+       the whole-document renderer for line-addressable markdown */
+    buf_t out;
+    buf_init(&out);
+    dspy_t *s = md_test_sink(&out);
+    check(s != NULL, "mdterm: line sink builds");
+
+    md_line_t m;
+    check(md_line_init(&m, s) == 0, "mdterm: line machine inits");
+    /* feed char by char: the worst split the wires can produce */
+    const char *doc = "# T\n\nhello **b** x\n\n- a\n- b\n\n```\ncode\n```\n";
+    for (const char *p = doc; *p; p++) md_line_feed(&m, p, 1);
+    md_line_close(&m);
+    char *got = md_test_close(s, &out);
+    check(got && !strcmp(got, "T\n\nhello b x\n\n- a\n- b\n\ncode\n\n"),
+          "mdterm: streamed shape keeps blank separators");
+    md_line_free(&m);
+    free(got);
+
+    /* the table: header held, delimiter promotes, rows collect,
+       close flushes aligned */
+    buf_init(&out);
+    s = md_test_sink(&out);
+    md_line_init(&m, s);
+    md_line_feed(&m, "| a | b |\n", strlen("| a | b |\n"));
+    md_line_feed(&m, "|---|---|\n", strlen("|---|---|\n"));
+    md_line_feed(&m, "| 1 | 2 |\n", strlen("| 1 | 2 |\n"));
+    md_line_close(&m);
+    got = md_test_close(s, &out);
+    check(got && strstr(got, "a  b") != NULL && strstr(got, "1  2") != NULL,
+          "mdterm: streamed table aligns");
+    md_line_free(&m);
+    free(got);
+
+    /* a lone pipe line that is not a table: plain text through */
+    buf_init(&out);
+    s = md_test_sink(&out);
+    md_line_init(&m, s);
+    md_line_feed(&m, "a | b\n", 6);
+    md_line_feed(&m, "next\n", 5);
+    md_line_close(&m);
+    got = md_test_close(s, &out);
+    check(got && !strcmp(got, "a | b\nnext\n"), "mdterm: pipe line no table");
+    md_line_free(&m);
+    free(got);
+
+    /* quote bars in the stream */
+    buf_init(&out);
+    s = md_test_sink(&out);
+    md_line_init(&m, s);
+    md_line_feed(&m, "> hi\n", 5);
+    md_line_close(&m);
+    got = md_test_close(s, &out);
+    check(got && !strcmp(got, "| hi\n"), "mdterm: streamed quote");
+    md_line_free(&m);
+    free(got);
+}
+
+static void test_mdterm(void) {
+    test_md_render();
+    test_md_line();
+}
+
 int main(void) {
     setenv("LLMKIT_EXEC_WAIT_MS", "2000", 1); /* process_exec tests: fast */
     signals_init();
@@ -8005,6 +8159,8 @@ int main(void) {
     test_agent_tool_streamed();
     fprintf(stderr, "selfcheck: call\n");
     test_call();
+    fprintf(stderr, "selfcheck: mdterm\n");
+    test_mdterm();
     fprintf(stderr, "selfcheck: repl\n");
     test_repl();
     fprintf(stderr, "selfcheck: agent\n");

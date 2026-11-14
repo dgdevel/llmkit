@@ -1112,6 +1112,10 @@ typedef struct dspy {
     struct dspy_brief_q *brief_head; /* the in-flight entries, FIFO */
     struct dspy_brief_q *brief_tail;
     size_t brief_n; /* its length */
+    /* markdown rendering state for streamed response text: created
+       lazily by dspy_md_feed, owned until dspy_md_free (mdterm.c's
+       streaming line machine; opaque here to keep the header clean) */
+    struct md_line *md;
 } dspy_t;
 
 void dspy_write(dspy_t *s, const char *t, size_t n);
@@ -1120,6 +1124,13 @@ void dspy_ensure_nl(dspy_t *s);
 void dspy_rule(dspy_t *s, char glyph);
 void dspy_sep_flush(dspy_t *s);
 void dspy_styled(dspy_t *s, const char *on, const char *text);
+/* markdown paths (mdterm.c): stream response text through the line
+   machine (partial deltas) and close it at the block's end; whole
+   text renders in one pass. Styling self-gates on the output's tty
+   probe - a pipe yields the plain bytes verbatim */
+void dspy_md_feed(dspy_t *s, const char *text);
+void dspy_md_close(dspy_t *s);
+void dspy_md_free(dspy_t *s);
 void dspy_error_line(dspy_t *s, const char *code, const char *msg);
 /* the tool traffic arms both record dispatchers share */
 void dspy_tool_request(dspy_t *s, const cJSON *rec);

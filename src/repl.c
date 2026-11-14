@@ -445,7 +445,11 @@ static void repl_sink_fn(void *ctx, cJSON *rec) {
                 s->t_resp = now;
             }
         }
-        dspy_styled(&s->d, k == R_THINKING ? s->d.st->italic : "", tx);
+        if (k == R_THINKING) {
+            dspy_styled(&s->d, s->d.st->italic, tx);
+        } else {
+            dspy_md_feed(&s->d, tx);
+        }
         if (!rec_bool(rec, "partial", false)) {
             double now = mono_now(); /* the block closed its segment */
             if (k == R_THINKING) {
@@ -460,6 +464,7 @@ static void repl_sink_fn(void *ctx, cJSON *rec) {
                 }
                 s->resp_done = true;
                 s->turn_s = rec_num(rec, "duration_s", 0.0);
+                dspy_md_close(&s->d);
             }
             dspy_ensure_nl(&s->d); /* per-block trailing newline, call's rule */
             s->d.cur = -1;
@@ -2321,6 +2326,7 @@ done:
     free(sl.h_effort); /* the helper's own effort override */
     /* the dspy sink's strdup'd brief state (agent display) */
     dspy_brief_flush(&sink.d); /* held request lines, not lost */
+    dspy_md_free(&sink.d);
     free(sink.d.brief_tools);
     dspy_brief_clear(&sink.d);
     free(sink.d.brief_strip);
