@@ -561,12 +561,12 @@ static void close_inherited_fds(void) {
 }
 
 int spawn_shell(const char *command_line, spawn_t *out) {
-    /* the pre-exec child checks its parent against this value before it
-       arms PR_SET_PDEATHSIG: a shell may have forked this process after
-       our spawn was already reparented (to init), in which case arming
-       the signal would kill the freshly execed helper at once */
+    /* the pre-exec child compares this value with its own getppid: the
+       direct child of a reparented (orphan-adopted) caller is already
+       parented by init/1 and must not arm PR_SET_PDEATHSIG - the signal
+       would kill the freshly execed helper at once */
 #if defined(__linux__)
-    const pid_t spawn_ppid = getppid();
+    const pid_t spawn_ppid = getpid();
 #endif
     int in_pipe[2], out_pipe[2];
     if (pipe(in_pipe)) return -1;
@@ -601,7 +601,14 @@ int spawn_shell(const char *command_line, spawn_t *out) {
            macOS there is no pdeathsig; an orphaned helper lives until its
            own turn ends - acceptable for a dev-only target. */
         #if defined(__linux__)
-                if (getppid() == (pid_t)spawn_ppid) prctl(PR_SET_PDEATHSIG, SIGTERM);
+        if (getppid() == (pid_t)spawn_ppid) {
+            prctl(PR_SET_PDEATHSIG, SIGTERM);
+            /* the race the arm cannot close alone: the parent may have
+               died between the fork and the prctl - pdeathsig only fires
+               on deaths from here on, so a dead-by-now parent would leave
+               this child armed and alive. The ppid recheck catches it. */
+            if (getppid() != (pid_t)spawn_ppid) _exit(1);
+        }
         #endif
                 /* nothing else is inherited: other servers' pipes and any open
            sockets belong to the parent, not to this server. close_range
