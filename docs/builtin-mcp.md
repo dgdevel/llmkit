@@ -167,7 +167,7 @@ size 17b, type text/plain, 3 lines
 
 ### process_exec(cmdline)
 
-Runs `cmdline` through the shell (posix: `/bin/sh -c`, windows: `%ComSpec% /c`) with stdin connected to the null device, and waits up to 120 seconds for it to finish. stdout and stderr arrive on two separate pipes and are kept apart: each stream goes into its own temp file. Every line is stamped with a wall-clock timestamp, in the `annotate-output.sh` style. A line is attributed when it is read. The order between the two streams at their boundary is therefore the reader's order, not a global one:
+`cmdline` is written verbatim into a temp script (`${tmpdir}/llmkit-proc-XXXXXX.sh` on posix, `llmkit-proc-....ps1` in the user temp dir on windows), which is then executed by `/bin/sh` (posix) or `powershell.exe -File` (windows), stdin on the null device. The tool waits up to 120 seconds for it to finish. stdout and stderr arrive on two separate pipes and are kept apart: each stream goes into its own temp file. Every line is stamped with a wall-clock timestamp, in the `annotate-output.sh` style. A line is attributed when it is read. The order between the two streams at their boundary is therefore the reader's order, not a global one:
 
 ```
 HH:MM:SS: the line
@@ -180,6 +180,7 @@ The reply for a finished process:
 ```
 Exit code: ${code}
 Duration: ${seconds, three decimals}
+To repeat invocation use ${script path} as cmdline.
 First and last three output lines:
 HH:MM:SS: ${line}
 HH:MM:SS: ${line}
@@ -190,7 +191,7 @@ HH:MM:SS: ${line}
 HH:MM:SS: ${line}
 ```
 
-The reply for one still running after the wait (no duration line: the process has not ended, so it has none yet):
+The reply for one still running after the wait (no duration line: the process has not ended, so it has none yet, and no repeat line: that names the script only once it ran):
 
 ```
 PID ${pid} is still running.
@@ -198,6 +199,8 @@ First and last three output lines:
 ...
 Use process_status or process_wait.
 ```
+
+The `To repeat invocation use ... as cmdline.` line in the finished reply names the temp script: run it again through `sh '${path}'` (posix) or `powershell -File '${path}'` (windows) for the same invocation.
 
 `First and last three output lines` carries whatever the process printed so far: the first three lines, `[...]`, the last three. A process with six lines or fewer is quoted whole. Head and tail overlap there, so each line prints once and no `[...]` appears. Each line keeps only its timestamp: the stream a line belongs to is the file it lives in. A quoted line longer than 150 bytes is cut at that width (never mid-utf-8-character) and one note follows the quote:
 

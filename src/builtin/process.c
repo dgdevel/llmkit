@@ -62,6 +62,7 @@ typedef struct proc_rec {
     int nhead;
     char *out_path;            /* the temp file with stdout */
     char *err_path;            /* the temp file with stderr */
+    char *script_path;         /* the temp script the cmdline lives in */
     FILE *out;                 /* reader-owned while the reader lives */
     FILE *err;                 /* same, for stderr */
     int out_fd;                /* the stdout pipe, reader-owned */
@@ -441,8 +442,8 @@ static bool proc_mktemp_pair(char *opath, size_t osz, FILE **of,
 
 #ifdef _WIN32
 
-/* %ComSpec% /c <cmdline>, stdin on NUL, stdout and stderr on two pipes
-   so the streams stay distinguishable */
+/* powershell -File <script>, stdin on NUL, stdout and stderr on two
+   pipes so the streams stay distinguishable */
 static int proc_spawn(const char *cmdline, proc_rec_t *p) {
     p->hproc = NULL;
     p->out_fd = -1;
@@ -466,12 +467,9 @@ static int proc_spawn(const char *cmdline, proc_rec_t *p) {
         return -1;
     }
     fflush(NULL);
-    const char *sh = getenv("ComSpec");
-    if (!sh || !*sh) sh = "cmd.exe";
-    wchar_t wsh[280], wcl[4096];
-    if (MultiByteToWideChar(CP_ACP, 0, sh, -1, wsh, 280) == 0 ||
-        MultiByteToWideChar(CP_UTF8, 0, cmdline, -1, wcl,
-                            (int)(sizeof wcl / sizeof *wcl) - 300) == 0) {
+    wchar_t wcl[BM_PATH_MAX];
+    if (MultiByteToWideChar(CP_UTF8, 0, p->script_path, -1, wcl,
+                            (int)(sizeof wcl / sizeof *wcl)) == 0) {
         CloseHandle(in_r);
         CloseHandle(out_r);
         CloseHandle(out_w);
@@ -480,13 +478,13 @@ static int proc_spawn(const char *cmdline, proc_rec_t *p) {
         return -1;
     }
     wchar_t cmd[4096];
-    /* cmd /c strips the first and last quote of the tail when it starts
-       with one (cmd /? rule 2): a leading-quoted cmdline gets an extra
-       outer pair so the stripped quotes are the spare ones */
-    if (wcl[0] == L'"')
-        _snwprintf(cmd, 4096, L"\"%ls\" /c \"%ls\"", wsh, wcl);
-    else
-        _snwprintf(cmd, 4096, L"\"%ls\" /c %ls", wsh, wcl);
+    /* powershell runs the temp script directly: no cmd /c, no
+       quote-stripping workaround */
+    _snwprintf(cmd, 4096,
+               L"\"%%SystemRoot%%\\System32\\WindowsPowerShell\\v1.0\\"
+               L"powershell.exe\" -NoProfile -NonInteractive "
+               L"-ExecutionPolicy Bypass -File \"%ls\"",
+               wcl);
 
     STARTUPINFOEXW si;
     memset(&si, 0, sizeof si);
@@ -547,7 +545,7 @@ static void proc_reap(proc_rec_t *p) {
 
 #else /* posix */
 
-/* /bin/sh -c <cmdline>, stdin on /dev/null, stdout and stderr on two
+/* /bin/sh <script>, stdin on /dev/null, stdout and stderr on two
    pipes so the streams stay distinguishable */
 static int proc_spawn(const char *cmdline, proc_rec_t *p) {
     int out_pipe[2], err_pipe[2];
@@ -583,7 +581,7 @@ static int proc_spawn(const char *cmdline, proc_rec_t *p) {
         long maxfd = sysconf(_SC_OPEN_MAX);
         if (maxfd < 0) maxfd = 16384;
         for (int fd = 3; fd < maxfd; fd++) close(fd);
-        execl("/bin/sh", "sh", "-c", cmdline, (char *)NULL);
+        execl("/bin/sh", "sh", p->script_path, (char *)NULL);
         _exit(127);
     }
     close(out_pipe[1]);
@@ -631,6 +629,9 @@ static void proc_report(buf_t *out, proc_rec_t *p) {
         buf_appendf(out, "Exit code: %d\n", p->exit_code);
         buf_appendf(out, "Duration: %.3fs\n",
                     (p->t_end ? p->t_end : mono_now()) - p->t_start);
+        if (p->script_path)
+            buf_appendf(out, "To repeat invocation use %s as cmdline.\n",
+                        p->script_path);
     } else {
         buf_appendf(out, "PID %ld is still running.\n", p->pid);
     }
@@ -737,6 +738,67 @@ void tool_process_exec(const cJSON *args, buf_t *out, bool *is_error) {
     }
     p->out_path = strdup(path);
     p->err_path = strdup(epath);
+    /* the cmdline goes verbatim into a sibling temp script: stem is
+       the pair's path minus the ".stdout" suffix */
+    char spath[BM_PATH_MAX];
+    size_t slen = strlen(path);
+    if (slen < 8 || strcmp(path + slen - 7, ".stdout")) {
+        buf_clear(out);
+        buf_append_str(out, "process_exec failed: cannot create temp script");
+        *is_error = true;
+        fclose(p->out);
+        remove(p->out_path);
+        free(p->out_path);
+        fclose(p->err);
+        remove(p->err_path);
+        free(p->err_path);
+        free(p);
+        return;
+    }
+    memcpy(spath, path, slen - 7);
+#ifdef _WIN32
+    memcpy(spath + slen - 7, ".ps1", 5);
+#else
+    memcpy(spath + slen - 7, ".sh", 4);
+#endif
+    int sfd = BM_OPEN_NEW(spath);
+    if (sfd >= 0) {
+        bool wok;
+#ifndef _WIN32
+        size_t srem = strlen(cmdline) + sizeof "#!/bin/sh\n" - 1;
+        char *sbuf = malloc(srem + 1);
+        ssize_t swn = sbuf ? 1 : -1;
+        if (sbuf) {
+            snprintf(sbuf, srem + 1, "#!/bin/sh\n%s\n", cmdline);
+            swn = write(sfd, sbuf, srem);
+            free(sbuf);
+        }
+        wok = swn == (ssize_t)srem;
+        BM_CLOSE(sfd);
+#else
+        HANDLE sh = (HANDLE)_get_osfhandle(sfd);
+        DWORD swn = 0, srem = (DWORD)strlen(cmdline);
+        wok = WriteFile(sh, cmdline, srem, &swn, NULL) && swn == srem &&
+              WriteFile(sh, "\r\n", 2, &swn, NULL);
+        BM_CLOSE(sfd);
+#endif
+        if (wok && BM_CHMOD(spath, 0700) == 0)
+            p->script_path = strdup(spath);
+    }
+    if (!p->script_path) {
+        remove(spath);
+        buf_clear(out);
+        buf_append_str(out, "process_exec failed: cannot create temp script");
+        *is_error = true;
+        fclose(p->out);
+        remove(p->out_path);
+        free(p->out_path);
+        fclose(p->err);
+        remove(p->err_path);
+        free(p->err_path);
+        free(p);
+        return;
+    }
     pthread_mutex_init(&p->m, NULL);
     if (proc_spawn(cmdline, p) || thread_start_detached(proc_reader, p) != 0) {
         /* nothing is watching the child yet: kill, reap, wipe */
@@ -761,6 +823,10 @@ void tool_process_exec(const cJSON *args, buf_t *out, bool *is_error) {
         fclose(p->err);
         remove(p->err_path);
         free(p->err_path);
+        if (p->script_path) {
+            remove(p->script_path);
+            free(p->script_path);
+        }
         for (int i = 0; i < p->nhead; i++) free(p->head[i]);
         for (int i = 0; i < p->ntail; i++) free(p->tail[i]);
         pthread_mutex_destroy(&p->m);

@@ -2604,6 +2604,8 @@ static void test_builtin(void) {
     check(!ie && t && strstr(t, "Exit code: 0\n") &&
               strstr(t, "First and last three output lines:\n") &&
               strstr(t, ": one\n") && strstr(t, ": two\n") &&
+              strstr(t, "To repeat invocation use ") &&
+              strstr(t, ".sh as cmdline.") &&
               !strstr(t, "still running") && !strstr(t, "[...]") &&
               !strstr(t, "Process output available"),
           "builtin: process_exec completed reply with stamped lines");
@@ -2614,6 +2616,7 @@ static void test_builtin(void) {
                 "\"seq 1 12\"}",
                 &ie);
     check(!ie && t && strstr(t, "Exit code: 0") &&
+              strstr(t, "To repeat invocation use ") &&
               strstr(t, "First and last three output lines:\n") &&
               strstr(t, ": 1\n") && strstr(t, ": 2\n") &&
               strstr(t, ": 3\n") && strstr(t, "[...]\n") &&
@@ -2655,6 +2658,36 @@ static void test_builtin(void) {
         }
         check(pf && ef && lines == 12 && elines == 0 && stamped && named,
               "builtin: process temp files split and stamped");
+    }
+    free(t);
+
+    /* the cmdline lands verbatim in a temp script, named in the reply;
+       the script re-runs standalone via sh */
+    t = bc_call("process_exec", "{\"cmdline\":\"echo uniq-$((40+2))\"}",
+                &ie);
+    {   /* the reply names the script; file_read shows the raw cmdline */
+        char spath[512] = "";
+        char *pre = t ? strstr(t, "To repeat invocation use ") : NULL;
+        if (pre)
+            sscanf(pre + 25, "%511s as cmdline", spath);
+        size_t slen = strlen(spath);
+        bool shname = slen > 3 && !strcmp(spath + slen - 3, ".sh") &&
+                      strstr(spath, "llmkit-proc-");
+        char jargs[640];
+        snprintf(jargs, sizeof jargs,
+                 "{\"path\":\"%s\",\"lines_offset\":0,\"lines_length\":10}",
+                 spath);
+        char *ft = shname ? bc_call("file_read", jargs, &ie) : NULL;
+        check(!ie && ft && strstr(ft, "#!/bin/sh") &&
+                  strstr(ft, "echo uniq-$((40+2))"),
+              "builtin: process_exec writes cmdline verbatim to temp script");
+        free(ft);
+        snprintf(jargs, sizeof jargs,
+                 "{\"cmdline\":\"sh '%s'\"}", spath);
+        char *rt = shname ? bc_call("process_exec", jargs, &ie) : NULL;
+        check(!ie && rt && strstr(rt, ": uniq-42\n"),
+              "builtin: process_exec temp script re-runs standalone");
+        free(rt);
     }
     free(t);
 
