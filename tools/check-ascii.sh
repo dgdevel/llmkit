@@ -16,7 +16,13 @@
 set -u
 cd "$(dirname "$0")/.." || exit 2
 
-hits=$(git ls-files --cached --others --exclude-standard |
+# bind-mounted repos (docker pkg builds) carry a foreign uid; scope the
+# safe.directory exception to this one invocation, like mac.Dockerfile
+command -v git >/dev/null 2>&1 || {
+    echo "check-ascii: git missing - cannot enumerate files" >&2
+    exit 2
+}
+hits=$(git -c safe.directory="$PWD" ls-files --cached --others --exclude-standard |
     grep -v '^src/prompts/' |
     grep -v '^src/banner\.txt$' | # the greeting art: UTF-8 box characters
     grep -v '^src/vendor/md4c/' | # vendored md4c: upstream code stays pristine

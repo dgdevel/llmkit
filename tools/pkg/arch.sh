@@ -11,7 +11,9 @@ VER=${VER:?}
 cd "$(dirname "$0")/../.."
 
 if [ "$(id -u)" = 0 ]; then
-    pacman -Sy --needed --noconfirm curl gcc make ca-certificates >/dev/null
+    # -Syu not -Sy: rolling image is often stale, a partial upgrade pulls
+    # a newer openssl that breaks the image's sudo (libcrypto.so=3-64)
+    pacman -Syu --needed --noconfirm curl gcc make ca-certificates git >/dev/null
 fi
 
 sh tools/pkg/cjson.sh

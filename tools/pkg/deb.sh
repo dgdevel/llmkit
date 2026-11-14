@@ -13,7 +13,7 @@ export DEBIAN_FRONTEND=noninteractive
 if [ "$(id -u)" = 0 ]; then
     apt-get update -qq
     apt-get install -y -qq --no-install-recommends \
-        build-essential libcurl4-openssl-dev curl ca-certificates >/dev/null
+        build-essential libcurl4-openssl-dev curl ca-certificates git >/dev/null
 fi
 
 sh tools/pkg/cjson.sh
