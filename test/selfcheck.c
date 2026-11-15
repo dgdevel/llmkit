@@ -5449,9 +5449,17 @@ static void test_agent(void) {
     }
 
     /* ---- sessions: the agent default prompt, AGENTS.md, builtin ---- */
-    system("rm -rf /tmp/llmkit-test-agent");
+    system("rm -rf /tmp/llmkit-test-agent /tmp/llmkit-test-home");
     system("mkdir -p /tmp/llmkit-test-agent/empty");
+    /* HOME stays a scratch dir for the whole block: USER.md's $HOME
+       fallback reads it, a real ~/.agents/USER.md on the host would
+       ride into every session and break the expectations below */
     {
+        char oldhome[4096] = "";
+        const char *oh = getenv("HOME");
+        if (oh) snprintf(oldhome, sizeof oldhome, "%s", oh);
+        setenv("HOME", "/tmp/llmkit-test-home", 1);
+        {
         fturn_t turns[] = {
             { .recs = (const char *[]){
                   "{\"type\":\"response\",\"text\":\"ok\",\"partial\":false}"},
@@ -5459,7 +5467,8 @@ static void test_agent(void) {
         };
         repl_opts_t o = { .default_prompt = prompt_system_prompts_agent,
                           .builtin_mcp = true,
-                          .agents_md = true };
+                          .agents_md = true,
+                          .user_md = true };
         check(chdir("/tmp/llmkit-test-agent/empty") == 0,
               "agent: chdir to the clean dir");
         g_factory_wire = fwire_new(turns, 1);
@@ -5497,6 +5506,63 @@ static void test_agent(void) {
         }
         repl_session_free(&r);
         call_cfg_free(&c);
+
+        /* USER.md: searched in .agents/USER.md under the cwd then
+           $HOME, first found wins, block rides after AGENTS.md */
+        system("mkdir -p /tmp/llmkit-test-agent/empty/.agents");
+        write_file("/tmp/llmkit-test-agent/empty/.agents/USER.md",
+                   "The user likes short answers.\n");
+        g_factory_wire = fwire_new(turns, 1);
+        repl_cfg(&c, PROTO_OPENAI);
+        r = repl_session_opt(&c, &o, "hi\n", 3);
+        check(r.rc == EXIT_OK, "agent: USER.md session exits 0");
+        {
+            buf_t want;
+            buf_init(&want);
+            buf_appendf(&want, "%s\n"
+                               "##### Content of AGENTS.md #####\n"
+                               "Keep answers short.\n"
+                               "\n" /* the block join after the file's nl */
+                               "##### Content of USER.md #####\n"
+                               "The user likes short answers.\n",
+                        prompt_system_prompts_agent);
+            check_str(g_seen_system, want.data ? want.data : "",
+                      "agent: USER.md rides as the block after AGENTS.md");
+            buf_free(&want);
+        }
+        repl_session_free(&r);
+        call_cfg_free(&c);
+
+        /* the local file gone: $HOME's .agents/USER.md fills in */
+        system("rm /tmp/llmkit-test-agent/empty/.agents/USER.md");
+        system("mkdir -p /tmp/llmkit-test-home/.agents");
+        write_file("/tmp/llmkit-test-home/.agents/USER.md",
+                   "Home level note.\n");
+        {
+            g_factory_wire = fwire_new(turns, 1);
+            repl_cfg(&c, PROTO_OPENAI);
+            r = repl_session_opt(&c, &o, "hi\n", 3);
+            check(r.rc == EXIT_OK, "agent: home USER.md session exits 0");
+            check(strstr(g_seen_system, "##### Content of USER.md #####\n"
+                                        "Home level note.\n") != NULL,
+                  "agent: $HOME/.agents/USER.md injected when local absent");
+            repl_session_free(&r);
+            call_cfg_free(&c);
+        }
+
+        /* neither present: no USER.md block at all */
+        system("rm -rf /tmp/llmkit-test-home");
+        g_factory_wire = fwire_new(turns, 1);
+        repl_cfg(&c, PROTO_OPENAI);
+        r = repl_session_opt(&c, &o, "hi\n", 3);
+        check(r.rc == EXIT_OK, "agent: no USER.md session exits 0");
+        check(strstr(g_seen_system, "Content of USER.md") == NULL,
+              "agent: no USER.md block when neither file exists");
+        repl_session_free(&r);
+        call_cfg_free(&c);
+        /* clean the .agents dir before the headstart test: it asserts
+           on the directory listing content */
+        system("rm -rf /tmp/llmkit-test-agent/empty/.agents");
 
         /* the head start: the working directory's listing as the first
            extra block, ahead of AGENTS.md; hidden dirs carry the note */
@@ -5550,6 +5616,9 @@ static void test_agent(void) {
                   "agent: AGENTS.md follows an explicit prompt too");
         repl_session_free(&r);
         call_cfg_free(&c);
+        }
+        if (*oldhome) setenv("HOME", oldhome, 1);
+        else unsetenv("HOME");
     }
     check(chdir(cwd) == 0, "agent: chdir back");
 

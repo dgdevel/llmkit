@@ -16,7 +16,7 @@ $ llmkit repl --openai http://localhost:9931/v1
 - **Controls**: Ctrl-C stops the current turn; Ctrl-D exits.
 
 ### AI Agent with Tools
-The `agent` command is a powerful version of the chat that includes built-in MCP tools (web search, file management, process execution, and skills). It also reads instructions from an `AGENTS.md` file in your current directory.
+The `agent` command is a powerful version of the chat that includes built-in MCP tools (web search, file management, process execution, and skills). It also reads instructions from an `AGENTS.md` file in your current directory, plus optional user info from `.agents/USER.md` (current dir first, then the home dir; first found wins).
 
 ```sh
 $ llmkit agent --openai http://localhost:9931/v1 --conversation-store ~/chats/project.jsonl

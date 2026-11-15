@@ -75,7 +75,8 @@ Notes:
   across conversations, and concurrent conversations can carry
   different cwds (multi-root projects, explicit work dirs). Each
   session's built-in server child gets its own `--cwd`, `AGENTS.md`
-  is read from the session's dir, and the parent never chdirs - so
+  is read from the session's dir (`.agents/USER.md` likewise, home
+  dir as the fallback), and the parent never chdirs - so
   mixed-cwd sessions stay isolated.
 - `session/prompt` accepts text blocks only (the advertised
   `promptCapabilities` are all false); anything else answers

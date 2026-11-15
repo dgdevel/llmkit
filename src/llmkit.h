@@ -975,6 +975,8 @@ typedef struct repl_opts {
     bool builtin_mcp;           /* attach the built-in mcp server */
     bool agents_md;             /* inject ./AGENTS.md as a second system
                                    content block, after the prompt */
+    bool user_md;               /* inject .agents/USER.md (cwd then
+                                   $HOME) as a block after AGENTS.md */
     bool headstart;             /* agent: the working directory's listing
                                    (files_list(".", ".*", false, true)) as
                                    an extra system block, before AGENTS.md */
@@ -1019,6 +1021,11 @@ int repl_run(const call_cfg_t *c, int in_fd, FILE *out, const char *exe_path,
    block after prompt_text (NULL = no leading block); returns the exit
    code on a read/validation failure, 0 otherwise (shared with acp.c) */
 int inject_agents_md(engine_t *e, const char *dir, const char *prompt_text);
+/* inject .agents/USER.md of dir (NULL/empty = the cwd) then
+   $HOME/.agents/USER.md, first found wins, as one more text block after
+   prompt_text; 0 when absent or on success, exit code on failure
+   (shared with acp.c) */
+int inject_user_md(engine_t *e, const char *dir, const char *prompt_text);
 /* repl_run with the agent extras: the default prompt, the built-in mcp
    server, AGENTS.md injection, conversation store load/persist */
 int repl_run_ex(const call_cfg_t *c, const repl_opts_t *o, int in_fd,

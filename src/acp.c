@@ -684,6 +684,10 @@ static int acp_handle_session_new(acp_state_t *st, const cJSON *params,
            own workspace dir, never a process-global cwd */
         rc = inject_agents_md(s->e, s->cwd, c.system);
     }
+    if (rc == 0 && st->cfg.bundle != ACP_BUNDLE_NONE) {
+        /* USER.md rides after AGENTS.md - same workspace rule */
+        rc = inject_user_md(s->e, s->cwd, NULL);
+    }
     if (rc) {
     fail:
         acp_session_free(s);

@@ -31,6 +31,9 @@
 /* the line that prefixes the AGENTS.md content block */
 #define AGENTS_MD_PREFIX "##### Content of AGENTS.md #####\n"
 
+/* the line that prefixes the USER.md content block */
+#define USER_MD_PREFIX "##### Content of USER.md #####\n"
+
 /* ================= display sink ================= */
 /* the shared framing state machine (pretty.c) plus the session's own
    extras: the conversation store and the turn's timing spans and token
@@ -638,19 +641,14 @@ static int system_append_block(engine_t *e, const char *prompt_text,
     return rc;
 }
 
-/* the prompt's own content block stays first; the file's content rides
-   in its own block after it, prefixed with the content line. shared
-   with the acp server (one engine session per acp session). dir: the
-   workspace to read AGENTS.md from (NULL/empty = the cwd, the repl's
-   own single-session world) */
-int inject_agents_md(engine_t *e, const char *dir, const char *prompt_text) {
-    char path[4096];
-    if (dir && *dir) {
-        snprintf(path, sizeof path, "%s/AGENTS.md", dir);
-        path_slashes(path); /* windows '\' folds like the /cd path */
-    } else {
-        snprintf(path, sizeof path, "AGENTS.md");
-    }
+/* the shared open/read/BOM/utf8/prefix/append pipeline behind
+   inject_agents_md and inject_user_md: reads path whole, strips a
+   leading BOM, validates utf8, and appends the content as one text
+   block prefixed with `prefix`; label names the file in error
+   messages. absent file = 0, nothing injected */
+static int md_inject_file(engine_t *e, const char *path,
+                          const char *prefix, const char *label,
+                          const char *prompt_text) {
     FILE *f = fopen(path, "r");
     if (!f) return 0; /* absent: nothing to inject */
     buf_t b;
@@ -664,8 +662,9 @@ int inject_agents_md(engine_t *e, const char *dir, const char *prompt_text) {
 
     int rc = 0;
     if (ioerr) {
-        engine_emit_record(e,
-                           rec_error(EC_IO_ERROR, "cannot read AGENTS.md", true));
+        char m[256];
+        snprintf(m, sizeof m, "cannot read %s", label);
+        engine_emit_record(e, rec_error(EC_IO_ERROR, m, true));
         rc = EXIT_IO_ERROR;
     } else {
         if (b.len >= 3 && !memcmp(b.data, "\xef\xbb\xbf", 3)) {
@@ -673,14 +672,14 @@ int inject_agents_md(engine_t *e, const char *dir, const char *prompt_text) {
             b.len -= 3;
         }
         if (!utf8_valid((const uint8_t *)(b.data ? b.data : ""), b.len)) {
-            engine_emit_record(e,
-                               rec_error(EC_INVALID_RECORD,
-                                         "invalid UTF-8 in AGENTS.md", true));
+            char m[256];
+            snprintf(m, sizeof m, "invalid UTF-8 in %s", label);
+            engine_emit_record(e, rec_error(EC_INVALID_RECORD, m, true));
             rc = EXIT_INVALID_RECORD;
         } else {
             buf_t tx;
             buf_init(&tx);
-            buf_append_str(&tx, AGENTS_MD_PREFIX);
+            buf_append_str(&tx, prefix);
             buf_append(&tx, b.data ? b.data : "", b.len);
             rc = system_append_block(e, prompt_text,
                                      tx.data ? tx.data : "");
@@ -689,6 +688,55 @@ int inject_agents_md(engine_t *e, const char *dir, const char *prompt_text) {
     }
     buf_free(&b);
     return rc;
+}
+
+/* the prompt's own content block stays first; the file's content rides
+   in its own block after it, prefixed with the content line. shared
+   with the acp server (one engine session per acp session). dir: the
+   workspace to read AGENTS.md from (NULL/empty = the cwd, the repl's
+   own single-session world) */
+int inject_agents_md(engine_t *e, const char *dir, const char *prompt_text) {
+    char path[4096];
+    if (dir && *dir) {
+        snprintf(path, sizeof path, "%s/AGENTS.md", dir);
+        path_slashes(path); /* windows '\' folds like the /cd path */
+    } else {
+        snprintf(path, sizeof path, "AGENTS.md");
+    }
+    return md_inject_file(e, path, AGENTS_MD_PREFIX, "AGENTS.md",
+                          prompt_text);
+}
+
+/* inject the user's USER.md (info about the user) as one more text
+   block after AGENTS.md: searched in `<dir>/.agents/USER.md` (or
+   `.agents/USER.md` relative to the cwd when dir is NULL/empty) then
+   `$HOME/.agents/USER.md` (USERPROFILE on windows); first found wins,
+   no merge, neither present = 0 (shared with acp.c) */
+int inject_user_md(engine_t *e, const char *dir, const char *prompt_text) {
+    char path[4096];
+    if (dir && *dir) {
+        snprintf(path, sizeof path, "%s/.agents/USER.md", dir);
+        path_slashes(path); /* windows '\' folds like the /cd path */
+    } else {
+        snprintf(path, sizeof path, ".agents/USER.md");
+    }
+    FILE *f = fopen(path, "r");
+    if (f) {
+        fclose(f);
+        return md_inject_file(e, path, USER_MD_PREFIX, "USER.md",
+                              prompt_text);
+    }
+    const char *home = getenv("HOME");
+#ifdef _WIN32
+    if (!home || !*home) home = getenv("USERPROFILE");
+#endif
+    if (!home || !*home) return 0;
+    snprintf(path, sizeof path, "%s/.agents/USER.md", home);
+    path_slashes(path);
+    f = fopen(path, "r");
+    if (!f) return 0;
+    fclose(f);
+    return md_inject_file(e, path, USER_MD_PREFIX, "USER.md", prompt_text);
 }
 
 /* ================= the helper subagent ================= */
@@ -1806,6 +1854,10 @@ static int slash_new(slash_state_t *sl, engine_t *e) {
         int rc = inject_agents_md(e, NULL, NULL);
         if (rc) return 1;
     }
+    if (sl->o->user_md) {
+        int rc = inject_user_md(e, NULL, NULL);
+        if (rc) return 1;
+    }
     dspy_ensure_nl(d);
     dspy_write_str(d, "new conversation\n");
     return 0;
@@ -2053,6 +2105,10 @@ int repl_run_ex(const call_cfg_t *c, const repl_opts_t *o, int in_fd,
     }
     if (o->agents_md) {
         rc = inject_agents_md(e, NULL, cfg.system);
+        if (rc) goto done;
+    }
+    if (o->user_md) {
+        rc = inject_user_md(e, NULL, NULL);
         if (rc) goto done;
     }
     if (o->builtin_mcp) {
@@ -2633,6 +2689,7 @@ int cmd_agent_repl(int argc, char **argv) {
                                           prompt_system_prompts_agent,
                                       .builtin_mcp = true,
                                       .agents_md = true,
+                                      .user_md = true,
                                       .headstart = true,
                                       .store = store,
                                       .llm_retry = true,
