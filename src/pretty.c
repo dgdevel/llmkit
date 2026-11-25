@@ -419,6 +419,26 @@ static void render_user_record(dspy_t *s, const cJSON *rec) {
     dspy_styled(s, s->st->bold, text.data ? text.data : "");
     dspy_ensure_nl(s);
     buf_free(&text);
+    /* image blocks render as one dim marker line: the count and the
+       first block's description (the base64 itself never prints) */
+    const cJSON *content =
+        cJSON_GetObjectItemCaseSensitive(rec, "content");
+    size_t nimg = 0;
+    const cJSON *first = NULL;
+    for (const cJSON *b = content ? content->child : NULL; b; b = b->next) {
+        const cJSON *ty = cJSON_GetObjectItemCaseSensitive(b, "type");
+        if (!cJSON_IsString(ty) || strcmp(ty->valuestring, "image")) continue;
+        if (!first) first = b;
+        nimg++;
+    }
+    if (nimg) {
+        char *desc = image_block_desc(first);
+        char line[256];
+        snprintf(line, sizeof line, "[%zu image%s attached: %s]\n", nimg,
+                 nimg == 1 ? "" : "s", desc ? desc : "image");
+        free(desc);
+        dspy_styled(s, s->st->italic, line);
+    }
 }
 
 /* one parsed record, the repl sink's dispatch (design sec.12):

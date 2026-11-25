@@ -5,6 +5,7 @@
 #include "llmkit.h"
 #include "prompts.gen.h"
 
+#include <ctype.h>
 #include <signal.h>
 #include <stdlib.h>
 #include <string.h>
@@ -127,6 +128,9 @@ static char g_seen_system[4096];
 /* the last user record's joined text, captured by fwire_turn the same
    way: the acp prompt-blocks join surfaces here, no real body build */
 static char g_seen_user[4096];
+/* the last user record's content array as json, captured by fwire_turn:
+   image blocks and prompt-block layout surface here, no real body build */
+static char g_seen_content[8192];
 /* the transcript length at each fake turn: /new drops it to 0 */
 static size_t g_seen_trn;
 /* the llm record as json at each fake turn: /models and /thinking swap
@@ -182,6 +186,25 @@ static int fwire_turn(wire_t *base, engine_t *e, turn_out_t *out) {
             }
         }
         buf_free(&ub);
+    }
+    /* the last user record's content array as json (image blocks etc.) */
+    {
+        g_seen_content[0] = '\0';
+        for (size_t i = e->tr.n; i > 0; i--) {
+            if (e->tr.v[i - 1]->kind == T_USER) {
+                const cJSON *content = cJSON_GetObjectItemCaseSensitive(
+                    e->tr.v[i - 1]->tree, "content");
+                if (content) {
+                    char *s = cJSON_PrintUnformatted(content);
+                    if (s) {
+                        snprintf(g_seen_content,
+                                 sizeof g_seen_content, "%s", s);
+                        free(s);
+                    }
+                }
+                break;
+            }
+        }
     }
     memset(out, 0, sizeof *out);
     fturn_t *t = &f->turns[f->pos < f->nturns ? f->pos++ : f->nturns - 1];
@@ -692,6 +715,8 @@ static void test_sse_parser(void) {
 
 /* ================= 3. validation ================= */
 
+static void validation_image_cases(void);
+
 static void test_validation(void) {
     cap_t cap = { 0 };
 
@@ -921,6 +946,359 @@ static void test_validation(void) {
         buf_free(&lout);
         mcp_mgr_free(mm);
     }
+    cap_destroy(&cap);
+    validation_image_cases();
+}
+
+/* ================= 3b. b64 / vision ================= */
+static void validation_image_cases(void);
+
+static void test_b64(void) {
+    /* RFC 4648 test vectors */
+    struct { const char *in, *want; } v[] = {
+        {"", ""}, {"f", "Zg=="}, {"fo", "Zm8="}, {"foo", "Zm9v"},
+        {"foob", "Zm9vYg=="}, {"fooba", "Zm9vYmE="}, {"foobar", "Zm9vYmFy"},
+    };
+    for (size_t i = 0; i < sizeof v / sizeof v[0]; i++) {
+        buf_t b;
+        buf_init(&b);
+        buf_append_b64(&b, v[i].in, strlen(v[i].in));
+        check_str(b.data ? b.data : "", v[i].want, "b64 vector");
+        buf_free(&b);
+    }
+}
+
+/* parse {"type":"user","content":content_json} and run validate_content;
+   returns malloc'd message or NULL (content_json may be large) */
+static char *vc_err(const char *content_json) {
+    size_t n = strlen(content_json) + 64;
+    char *rec = malloc(n);
+    snprintf(rec, n, "{\"type\":\"user\",\"content\":%s}", content_json);
+    cJSON *r = cJSON_Parse(rec);
+    if (!r) { free(rec); return strdup("parse fail"); }
+    char *m = validate_content(cJSON_GetObjectItemCaseSensitive(r, "content"));
+    char *out = m ? strdup(m) : NULL;
+    free(rec);
+    cJSON_Delete(r);
+    return out;
+}
+
+static void validation_image_cases(void) {
+    char *m = vc_err("[{\"type\":\"image\",\"source\":{\"type\":\"base64\","
+                     "\"media_type\":\"image/png\",\"data\":\"iVBORw0KGgo=\"}}]");
+    check(m == NULL, "vc: valid base64 png");
+    free(m);
+    m = vc_err("[{\"type\":\"image\",\"source\":{\"type\":\"url\","
+               "\"url\":\"https://example.com/x.png\"}}]");
+    check(m == NULL, "vc: valid url");
+    free(m);
+    m = vc_err("[{\"type\":\"image\",\"source\":{\"type\":\"base64\","
+               "\"media_type\":\"image/bmp\",\"data\":\"iVBORw0KGgo=\"}}]");
+    check(m && strstr(m, "unsupported image media_type"), "vc: bad media_type");
+    free(m);
+    m = vc_err("[{\"type\":\"image\",\"source\":{\"type\":\"base64\","
+               "\"media_type\":\"image/png\",\"data\":\"iVBO*Rw0\"}}]");
+    check(m && strstr(m, "image data not base64"), "vc: bad alphabet");
+    free(m);
+    m = vc_err("[{\"type\":\"image\",\"source\":{\"type\":\"base64\","
+               "\"media_type\":\"image/png\",\"data\":\"iVBORw0KGg\"}}]");
+    check(m && strstr(m, "image data length not a multiple of 4"),
+          "vc: length not multiple of 4");
+    free(m);
+    m = vc_err("[{\"type\":\"image\",\"source\":{\"type\":\"base64\","
+               "\"media_type\":\"image/png\",\"data\":\"\"}}]");
+    check(m && strstr(m, "image source missing data"), "vc: empty data");
+    free(m);
+    char *big = malloc(7 * 1024 * 1024 + 1);
+    memset(big, 'A', 7 * 1024 * 1024);
+    big[7 * 1024 * 1024] = 0;
+    char *rec = malloc(7 * 1024 * 1024 + 128);
+    snprintf(rec, 7 * 1024 * 1024 + 128,
+             "{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"%s\"}",
+             big);
+    char *cj = malloc(7 * 1024 * 1024 + 256);
+    snprintf(cj, 7 * 1024 * 1024 + 256,
+             "[{\"type\":\"image\",\"source\":%s}]", rec);
+    m = vc_err(cj);
+    check(m && strstr(m, "image exceeds 5 MiB limit"), "vc: oversize");
+    free(m);
+    free(cj);
+    free(rec);
+    free(big);
+    m = vc_err("[{\"type\":\"image\",\"source\":{\"type\":\"url\","
+               "\"url\":\"ftp://x/y.png\"}}]");
+    check(m && strstr(m, "image source url must be http(s)"), "vc: ftp url");
+    free(m);
+    m = vc_err("[{\"type\":\"image\",\"source\":{\"type\":\"file\","
+               "\"path\":\"x\"}}]");
+    check(m && strstr(m, "unknown image source type"), "vc: unknown source type");
+    free(m);
+    m = vc_err("[{\"type\":\"video\",\"x\":1}]");
+    check(m && strstr(m, "unknown content block type"), "vc: unknown block type");
+    free(m);
+    m = vc_err("[{\"type\":\"text\",\"text\":\"hi\"},"
+               "{\"type\":\"image\",\"source\":{\"type\":\"base64\","
+               "\"media_type\":\"image/png\",\"data\":\"iVBORw0KGgo=\"}}]");
+    check(m == NULL, "vc: mixed text+image valid");
+    free(m);
+}
+
+static void test_image(void) {
+    char path[] = "/tmp/llmkit-selfcheck-img-XXXXXX";
+    int fd = mkstemp(path);
+    check(fd >= 0, "image: mkstemp");
+    char err[256];
+    cJSON *blk;
+
+    if (fd >= 0) {
+        const unsigned char png[12] = {0x89, 'P', 'N', 'G', 0x0D, 0x0A,
+                                       0x1A, 0x0A, '0', '0', '0', '0'};
+        check(write(fd, png, sizeof png) == (ssize_t)sizeof png,
+              "image: write png");
+        close(fd);
+        blk = image_block_from_path(path, err, sizeof err);
+        check(blk != NULL, "image: png sniffed");
+        if (blk) {
+            const cJSON *src =
+                cJSON_GetObjectItemCaseSensitive(blk, "source");
+            const cJSON *st =
+                cJSON_GetObjectItemCaseSensitive(src, "type");
+            const cJSON *mt =
+                cJSON_GetObjectItemCaseSensitive(src, "media_type");
+            check(st && cJSON_IsString(st) &&
+                      !strcmp(st->valuestring, "base64"),
+                  "image: png source type base64");
+            check(mt && cJSON_IsString(mt) &&
+                      !strcmp(mt->valuestring, "image/png"),
+                  "image: png media_type");
+            buf_t want;
+            buf_init(&want);
+            buf_append_b64(&want, png, sizeof png);
+            const cJSON *dt = cJSON_GetObjectItemCaseSensitive(src, "data");
+            check_str(dt && cJSON_IsString(dt) ? dt->valuestring : "",
+                      want.data ? want.data : "", "image: png b64 data");
+            char *desc = image_block_desc(blk);
+            check(desc && strncmp(desc, "image/png", 9) == 0,
+                  "image: desc starts image/png");
+            free(desc);
+            buf_free(&want);
+            cJSON_Delete(blk);
+        }
+        unlink(path);
+    }
+
+    struct { const char *bytes; size_t n; const char *want; const char *ext; }
+        v[] = {
+            {"\xFF\xD8\xFF\xE0", 4, "image/jpeg", ".jpg"},
+            {"GIF89a", 6, "image/gif", ".gif"},
+            {"RIFF\0\0\0\0WEBP", 12, "image/webp", ".webp"},
+        };
+    for (size_t i = 0; i < sizeof v / sizeof v[0]; i++) {
+        char p2[128];
+        snprintf(p2, sizeof p2, "/tmp/llmkit-selfcheck-img%s", v[i].ext);
+        FILE *f = fopen(p2, "wb");
+        if (!f) continue;
+        fwrite(v[i].bytes, 1, v[i].n, f);
+        fclose(f);
+        blk = image_block_from_path(p2, err, sizeof err);
+        check(blk != NULL, "image: sniff via magic");
+        if (blk) {
+            const cJSON *mt = cJSON_GetObjectItemCaseSensitive(
+                cJSON_GetObjectItemCaseSensitive(blk, "source"), "media_type");
+            check(mt && cJSON_IsString(mt) &&
+                      !strcmp(mt->valuestring, v[i].want),
+                  "image: media_type match");
+            cJSON_Delete(blk);
+        }
+        unlink(p2);
+    }
+
+    /* extension fallback */
+    const char *p3 = "/tmp/llmkit-selfcheck-weird.png";
+    FILE *f = fopen(p3, "wb");
+    if (f) { fwrite("plain text", 1, 10, f); fclose(f); }
+    blk = image_block_from_path(p3, err, sizeof err);
+    check(blk != NULL, "image: extension fallback");
+    if (blk) {
+        const cJSON *mt = cJSON_GetObjectItemCaseSensitive(
+            cJSON_GetObjectItemCaseSensitive(blk, "source"), "media_type");
+        check(mt && cJSON_IsString(mt) && !strcmp(mt->valuestring, "image/png"),
+              "image: ext fallback image/png");
+        cJSON_Delete(blk);
+    }
+    unlink(p3);
+
+    const char *p4 = "/tmp/llmkit-selfcheck-nope.bin";
+    f = fopen(p4, "wb");
+    if (f) { fwrite("plain text", 1, 10, f); fclose(f); }
+    blk = image_block_from_path(p4, err, sizeof err);
+    check(blk == NULL && strstr(err, "unrecognized image type") != NULL,
+          "image: unknown type error");
+    unlink(p4);
+
+    blk = image_block_from_path("/nonexistent/x.png", err, sizeof err);
+    check(blk == NULL && strstr(err, "cannot read image") != NULL,
+          "image: missing file error");
+
+    const char *p5 = "/tmp/llmkit-selfcheck-big.bin";
+    f = fopen(p5, "wb");
+    if (f) {
+        size_t total = 6 * 1024 * 1024;
+        char chunk[65536];
+        memset(chunk, 'A', sizeof chunk);
+        while (total) {
+            size_t k = total < sizeof chunk ? total : sizeof chunk;
+            fwrite(chunk, 1, k, f);
+            total -= k;
+        }
+        fclose(f);
+    }
+    blk = image_block_from_path(p5, err, sizeof err);
+    check(blk == NULL && strstr(err, "5 MiB limit") != NULL,
+          "image: oversize error");
+    unlink(p5);
+
+    /* url blocks */
+    blk = image_block_from_url("https://example.com/a.png");
+    check(blk != NULL, "image: https url block");
+    if (blk) {
+        const cJSON *st = cJSON_GetObjectItemCaseSensitive(
+            cJSON_GetObjectItemCaseSensitive(blk, "source"), "type");
+        check(st && cJSON_IsString(st) && !strcmp(st->valuestring, "url"),
+              "image: url source type");
+        char *desc = image_block_desc(blk);
+        check(desc && strstr(desc, "image/url") != NULL,
+              "image: url desc contains image/url");
+        free(desc);
+        cJSON_Delete(blk);
+    }
+    blk = image_block_from_url("ftp://x/y");
+    check(blk == NULL, "image: ftp url rejected");
+    blk = image_block_from_url("http://");
+    check(blk == NULL, "image: empty host url rejected");
+    unlink(path);
+}
+
+static void test_vision_wire(void) {
+    cap_t cap = { 0 };
+    engine_t *e = engine_new(cap_fn, &cap);
+    feed_line(e, "{\"type\":\"llm\",\"endpoint_protocol\":\"openai\","
+                 "\"api_base\":\"http://x/v1\",\"model\":\"m\","
+                 "\"inference_options\":{\"stream\":false,\"temperature\":0.5}}");
+    tr_add(e, "{\"type\":\"user\",\"content\":["
+              "{\"type\":\"text\",\"text\":\"what is this?\"},"
+              "{\"type\":\"image\",\"source\":{\"type\":\"base64\","
+              "\"media_type\":\"image/png\",\"data\":\"iVBORw0KGgo=\"}}]}");
+    wire_t *w = wire_openai_new(PROTO_OPENAI);
+    check(w->build(w, e) == 0, "vision wire: chat build");
+    buf_t p;
+    buf_init(&p);
+    body_messages(w->last_body.data, &p);
+    check(strstr(p.data, "\"type\":\"image_url\"") != NULL,
+          "vision wire: chat image_url part");
+    check(strstr(p.data, "data:image/png;base64,iVBORw0KGgo=") != NULL,
+          "vision wire: chat data url");
+    check(strstr(p.data, "\"type\":\"text\",\"text\":\"what is this?\"") != NULL,
+          "vision wire: chat text part");
+    buf_free(&p);
+    w->destroy(w);
+    engine_free(e);
+
+    /* chat with url-source image */
+    e = engine_new(cap_fn, &cap);
+    feed_line(e, "{\"type\":\"llm\",\"endpoint_protocol\":\"openai\","
+                 "\"api_base\":\"http://x/v1\",\"model\":\"m\","
+                 "\"inference_options\":{\"stream\":false,\"temperature\":0.5}}");
+    tr_add(e, "{\"type\":\"user\",\"content\":["
+              "{\"type\":\"image\",\"source\":{\"type\":\"url\","
+              "\"url\":\"https://example.com/x.png\"}}]}");
+    w = wire_openai_new(PROTO_OPENAI);
+    check(w->build(w, e) == 0, "vision wire: chat url build");
+    buf_init(&p);
+    body_messages(w->last_body.data, &p);
+    check(strstr(p.data, "\"image_url\":{\"url\":\"https://example.com/x.png\"")
+              != NULL,
+          "vision wire: chat url image");
+    buf_free(&p);
+    w->destroy(w);
+    engine_free(e);
+
+    /* responses protocol */
+    e = engine_new(cap_fn, &cap);
+    feed_line(e, "{\"type\":\"llm\",\"endpoint_protocol\":\"openai\","
+                 "\"api_base\":\"http://x/v1\",\"model\":\"m\","
+                 "\"inference_options\":{\"stream\":false,\"temperature\":0.5}}");
+    tr_add(e, "{\"type\":\"user\",\"content\":["
+              "{\"type\":\"text\",\"text\":\"what is this?\"},"
+              "{\"type\":\"image\",\"source\":{\"type\":\"base64\","
+              "\"media_type\":\"image/png\",\"data\":\"iVBORw0KGgo=\"}}]}");
+    w = wire_openai_new(PROTO_RESPONSES);
+    check(w->build(w, e) == 0, "vision wire: responses build");
+    buf_init(&p);
+    body_messages(w->last_body.data, &p);
+    check(strstr(p.data, "\"type\":\"input_image\"") != NULL,
+          "vision wire: responses input_image");
+    check(strstr(p.data, "\"type\":\"input_text\"") != NULL,
+          "vision wire: responses input_text");
+    check(strstr(p.data, "\"image_url\":\"data:image/png;base64,") != NULL,
+          "vision wire: responses data url");
+    buf_free(&p);
+    w->destroy(w);
+    engine_free(e);
+
+    /* text-only parity: chat body keeps plain string content */
+    e = engine_new(cap_fn, &cap);
+    feed_line(e, "{\"type\":\"llm\",\"endpoint_protocol\":\"openai\","
+                 "\"api_base\":\"http://x/v1\",\"model\":\"m\","
+                 "\"inference_options\":{\"stream\":false,\"temperature\":0.5}}");
+    tr_add(e, "{\"type\":\"user\",\"content\":\"plain text\"}");
+    w = wire_openai_new(PROTO_OPENAI);
+    check(w->build(w, e) == 0, "vision wire: text-only build");
+    buf_init(&p);
+    body_messages(w->last_body.data, &p);
+    check(strstr(p.data, "\"type\":\"text\"") == NULL,
+          "vision wire: text-only has no text parts");
+    buf_free(&p);
+    w->destroy(w);
+    engine_free(e);
+
+    /* anthropic */
+    e = engine_new(cap_fn, &cap);
+    feed_line(e, "{\"type\":\"llm\",\"endpoint_protocol\":\"anthropic\","
+                 "\"api_base\":\"http://x\",\"model\":\"m\","
+                 "\"inference_options\":{\"stream\":false,\"max_tokens\":100,\"temperature\":0.5}}");
+    tr_add(e, "{\"type\":\"user\",\"content\":["
+              "{\"type\":\"text\",\"text\":\"what is this?\"},"
+              "{\"type\":\"image\",\"source\":{\"type\":\"base64\","
+              "\"media_type\":\"image/png\",\"data\":\"iVBORw0KGgo=\"}}]}");
+    w = wire_anthropic_new();
+    check(w->build(w, e) == 0, "vision wire: anthropic build");
+    buf_init(&p);
+    body_messages(w->last_body.data, &p);
+    check(strstr(p.data, "\"media_type\":\"image/png\"") != NULL,
+          "vision wire: anthropic media_type");
+    check(strstr(p.data, "iVBORw0KGgo=") != NULL,
+          "vision wire: anthropic b64 data verbatim");
+    buf_free(&p);
+    w->destroy(w);
+    engine_free(e);
+
+    /* anthropic text-only parity */
+    e = engine_new(cap_fn, &cap);
+    feed_line(e, "{\"type\":\"llm\",\"endpoint_protocol\":\"anthropic\","
+                 "\"api_base\":\"http://x\",\"model\":\"m\","
+                 "\"inference_options\":{\"stream\":false,\"max_tokens\":100,\"temperature\":0.5}}");
+    tr_add(e, "{\"type\":\"user\",\"content\":["
+              "{\"type\":\"text\",\"text\":\"hi\"}]}");
+    w = wire_anthropic_new();
+    w->build(w, e);
+    buf_init(&p);
+    body_messages(w->last_body.data, &p);
+    check(strstr(p.data, "\"type\":\"image\"") == NULL,
+          "vision wire: anthropic text-only no image");
+    buf_free(&p);
+    w->destroy(w);
+    engine_free(e);
     cap_destroy(&cap);
 }
 
@@ -3717,6 +4095,19 @@ static void test_agent_tool_streamed(void) {
 
 /* ================= llmkit call ================= */
 
+/* local copy of call.c's cfg_str_add (static there): strdup-append to a
+   growable string list for the vision tests */
+static void img_str_add(char ***v, size_t *n, size_t *cap, const char *s) {
+    char *d = strdup(s);
+    check(d != NULL, "img_str_add: strdup");
+    if (*n == *cap) {
+        *cap = *cap ? *cap * 2 : 4;
+        *v = realloc(*v, *cap * sizeof **v);
+        check(*v != NULL, "img_str_add: realloc");
+    }
+    (*v)[(*n)++] = d;
+}
+
 static void test_call(void) {
     call_cfg_t c;
     char err[256];
@@ -4139,6 +4530,169 @@ static void test_call(void) {
         check(on == 0, "call: empty answer writes nothing");
         free(ob);
         call_cfg_free(&c);
+    }
+
+    /* ---- vision: --image ships an image content block ---- */
+    {
+        char path[] = "/tmp/llmkit-sc-vc-XXXXXX";
+        int fd = mkstemp(path);
+        check(fd >= 0, "call: vision temp png created");
+        const unsigned char png[] = {0x89, 'P', 'N', 'G', 0x0D, 0x0A,
+                                     0x1A, 0x0A, '0', '0', '0', '0'};
+        check(write(fd, png, sizeof png) == (ssize_t)sizeof png,
+              "call: vision temp png written");
+        close(fd);
+        /* the expected data payload: buf_append_b64 of the same bytes */
+        buf_t b64;
+        buf_init(&b64);
+        buf_append_b64(&b64, png, sizeof png);
+        check_str(b64.data, "iVBORw0KGgowMDAw", "call: vision b64 vector");
+        buf_free(&b64);
+        buf_init(&b64);
+        buf_append_b64(&b64, png, sizeof png);
+
+        fturn_t turns[] = {
+            { .recs = (const char *[]){
+                  "{\"type\":\"response\",\"text\":\"ok\","
+                  "\"partial\":false}"},
+              .nrecs = 1, .kind = TURN_FINAL, .abort_after = -1 },
+        };
+        g_factory_wire = fwire_new(turns, 1);
+        memset(&c, 0, sizeof c);
+        c.protocol = PROTO_OPENAI;
+        c.api_base = strdup("http://x");
+        c.prompt = strdup("q");
+        img_str_add(&c.images, &c.nimages, &c.capimages, path);
+        char *ob = NULL, *eb = NULL;
+        size_t on = 0, en = 0;
+        FILE *out = open_memstream(&ob, &on);
+        FILE *er = open_memstream(&eb, &en);
+        int rc = call_run(&c, out, er, "/x", script_factory);
+        fclose(out);
+        fclose(er);
+        check(rc == EXIT_OK, "call: vision image run exits 0");
+        check(strstr(g_seen_content, "\"type\":\"image\"") != NULL,
+              "call: vision image block in user content");
+        check(strstr(g_seen_content, "\"media_type\":\"image/png\"") != NULL,
+              "call: vision media_type image/png");
+        check(strstr(g_seen_content, b64.data) != NULL,
+              "call: vision base64 data payload");
+        buf_free(&b64);
+        free(ob);
+        free(eb);
+        call_cfg_free(&c);
+        unlink(path);
+    }
+
+    /* vision: --image-url ships a url-source image block */
+    {
+        fturn_t turns[] = {
+            { .recs = (const char *[]){
+                  "{\"type\":\"response\",\"text\":\"ok\","
+                  "\"partial\":false}"},
+              .nrecs = 1, .kind = TURN_FINAL, .abort_after = -1 },
+        };
+        g_factory_wire = fwire_new(turns, 1);
+        memset(&c, 0, sizeof c);
+        c.protocol = PROTO_OPENAI;
+        c.api_base = strdup("http://x");
+        c.prompt = strdup("q");
+        img_str_add(&c.image_urls, &c.nimage_urls, &c.capimage_urls,
+                    "https://example.com/x.png");
+        char *ob = NULL, *eb = NULL;
+        size_t on = 0, en = 0;
+        FILE *out = open_memstream(&ob, &on);
+        FILE *er = open_memstream(&eb, &en);
+        int rc = call_run(&c, out, er, "/x", script_factory);
+        fclose(out);
+        fclose(er);
+        check(rc == EXIT_OK, "call: vision url run exits 0");
+        check(strstr(g_seen_content,
+                     "\"source\":{\"type\":\"url\","
+                     "\"url\":\"https://example.com/x.png\"}") != NULL,
+              "call: vision url image block in user content");
+        free(ob);
+        free(eb);
+        call_cfg_free(&c);
+    }
+
+    /* vision: unreadable image is an invalid record, stderr says why */
+    {
+        fturn_t turns[] = {
+            { .recs = (const char *[]){
+                  "{\"type\":\"response\",\"text\":\"ok\","
+                  "\"partial\":false}"},
+              .nrecs = 1, .kind = TURN_FINAL, .abort_after = -1 },
+        };
+        g_factory_wire = fwire_new(turns, 1);
+        memset(&c, 0, sizeof c);
+        c.protocol = PROTO_OPENAI;
+        c.api_base = strdup("http://x");
+        c.prompt = strdup("q");
+        img_str_add(&c.images, &c.nimages, &c.capimages,
+                    "/nonexistent/x.png");
+        char *ob = NULL, *eb = NULL;
+        size_t on = 0, en = 0;
+        FILE *out = open_memstream(&ob, &on);
+        FILE *er = open_memstream(&eb, &en);
+        int rc = call_run(&c, out, er, "/x", script_factory);
+        fclose(out);
+        fclose(er);
+        check(rc == EXIT_INVALID_RECORD,
+              "call: vision bad path is invalid_record");
+        check(strstr(eb, "cannot read image") != NULL,
+              "call: vision bad path stderr");
+        free(ob);
+        free(eb);
+        call_cfg_free(&c);
+        g_factory_wire = NULL;
+    }
+
+    /* vision: CLI parse of --image / --image-url, and missing value */
+    {
+        char path[] = "/tmp/llmkit-sc-vc2-XXXXXX";
+        int fd = mkstemp(path);
+        check(fd >= 0, "call: vision parse temp png created");
+        close(fd);
+        unlink(path);
+        {
+            char a0[] = "--openai", a1[] = "http://x", a2[] = "--prompt",
+                 a3[] = "q", a4[] = "--image";
+            char *av[] = {a0, a1, a2, a3, a4, path};
+            check(call_parse((int)(sizeof av / sizeof av[0]), av, &c, err,
+                             sizeof err) == 0,
+                  "call: --image parses");
+            check(c.nimages == 1, "call: --image captured");
+            check(c.images[0] && strcmp(c.images[0], path) == 0,
+                  "call: --image path copied");
+            call_cfg_free(&c);
+        }
+        {
+            char a0[] = "--openai", a1[] = "http://x", a2[] = "--prompt",
+                 a3[] = "q", a4[] = "--image-url";
+            char *av[] = {a0, a1, a2, a3, a4,
+                          (char *)"https://example.com/x.png"};
+            check(call_parse((int)(sizeof av / sizeof av[0]), av, &c, err,
+                             sizeof err) == 0,
+                  "call: --image-url parses");
+            check(c.nimage_urls == 1, "call: --image-url captured");
+            check(c.image_urls[0] &&
+                      strcmp(c.image_urls[0],
+                             "https://example.com/x.png") == 0,
+                  "call: --image-url url copied");
+            call_cfg_free(&c);
+        }
+        {
+            char a0[] = "--openai", a1[] = "http://x", a2[] = "--image";
+            char *av[] = {a0, a1, a2};
+            check(call_parse_ex((int)(sizeof av / sizeof av[0]), av, &c,
+                                err, sizeof err, true) == 1,
+                  "call: --image missing value errors");
+            check(strstr(err, "missing value for --image") != NULL,
+                  "call: --image missing value message");
+            call_cfg_free(&c);
+        }
+        unlink(path);
     }
 }
 
@@ -4996,6 +5550,220 @@ static void test_repl(void) {
         check(r.rc == EXIT_OK, "repl: anthropic session exits 0");
         check(strstr(r.ob, "r1") != NULL && strstr(r.ob, "r2") != NULL,
               "repl: both anthropic turns answered");
+        repl_session_free(&r);
+        call_cfg_free(&c);
+    }
+
+    /* ---- vision: /image attaches a pending image to the next turn ---- */
+    {
+        char path[] = "/tmp/llmkit-sc-rep-XXXXXX";
+        int fd = mkstemp(path);
+        check(fd >= 0, "repl: vision temp png created");
+        const unsigned char png[] = {0x89, 'P', 'N', 'G', 0x0D, 0x0A,
+                                     0x1A, 0x0A, '0', '0', '0', '0'};
+        check(write(fd, png, sizeof png) == (ssize_t)sizeof png,
+              "repl: vision temp png written");
+        close(fd);
+
+        fturn_t turns[] = {
+            { .recs = (const char *[]){
+                  "{\"type\":\"response\",\"text\":\"r1\",\"partial\":false}"},
+              .nrecs = 1, .kind = TURN_FINAL, .abort_after = -1 },
+        };
+        g_factory_wire = fwire_new(turns, 1);
+        repl_cfg(&c, PROTO_OPENAI);
+        char script[128];
+        int sn = snprintf(script, sizeof script, "/image %s\nhello\n", path);
+        check(sn > 0, "repl: vision script built");
+        repl_out_t r = repl_session(&c, script, (size_t)sn);
+        check(r.rc == EXIT_OK, "repl: vision attach exits 0");
+        check(strstr(r.ob, "attached image/png") != NULL,
+              "repl: /image attach line");
+        check(strstr(r.ob, "(1 pending)") != NULL,
+              "repl: /image pending count");
+        /* the non-tty repl echoes the typed line only (render_user_block);
+           the image marker itself is checked via the probe below */
+        check(strstr(r.ob, "attached image/png, 0.0M b64") != NULL,
+              "repl: attach desc shows size");
+        /* the submit path renders the image marker too: the user record
+           through the non-tty pretty renderer */
+        {
+            FILE *out = fopen("/tmp/llmkit-sc-pretty.txt", "w");
+            check(out != NULL, "repl: marker probe opened");
+            pretty_live_t *pr = pretty_live_new(out);
+            check(pr != NULL, "repl: marker probe live");
+            cJSON *user = cJSON_Parse("{\"type\":\"user\",\"content\":["
+                                      "{\"type\":\"text\",\"text\":\"hello\"},"
+                                      "{\"type\":\"image\",\"source\":"
+                                      "{\"type\":\"base64\","
+                                      "\"media_type\":\"image/png\","
+                                      "\"data\":\"aGk=\"}}]}");
+            check(user != NULL, "repl: marker probe record");
+            pretty_live_record(pr, user);
+            pretty_live_free(pr);
+            fclose(out);
+            cJSON_Delete(user);
+            char *m = NULL;
+            size_t mn = 0;
+            FILE *in = open_memstream(&m, &mn);
+            FILE *src = fopen("/tmp/llmkit-sc-pretty.txt", "r");
+            check(src != NULL, "repl: marker probe read");
+            char tbuf[512];
+            while (fgets(tbuf, sizeof tbuf, src)) fputs(tbuf, in);
+            fclose(src);
+            fclose(in);
+            /* TERM-dependent styling is normalized: the probe may run
+               under a terminal (escapes on) or not; strip \033[..m */
+            {
+                buf_t nb;
+                buf_init(&nb);
+                for (const char *p = m; *p;) {
+                    if (p[0] == '\033' && p[1] == '[') {
+                        p += 2;
+                        while (*p && !isalpha((unsigned char)*p)) p++;
+                        if (*p) p++;
+                        continue;
+                    }
+                    buf_append_byte(&nb, *p++);
+                }
+                free(m);
+                m = buf_steal(&nb, NULL);
+            }
+            check(strstr(m, "[1 image attached: image/png") != NULL,
+                  "repl: pretty image marker rendered");
+            free(m);
+        }
+        /* the fake turn saw the image + the text block ("hello") */
+        check(strstr(g_seen_content, "\"type\":\"image\"") != NULL,
+              "repl: vision turn saw image block");
+        check(strstr(g_seen_content, "\"type\":\"text\"") != NULL &&
+                  strstr(g_seen_content, "hello") != NULL,
+              "repl: vision turn saw text first, then image");
+        repl_session_free(&r);
+        call_cfg_free(&c);
+        unlink(path);
+    }
+
+    /* vision: /image with nothing pending */
+    {
+        fturn_t turns[] = {
+            { .recs = (const char *[]){
+                  "{\"type\":\"response\",\"text\":\"r1\",\"partial\":false}"},
+              .nrecs = 1, .kind = TURN_FINAL, .abort_after = -1 },
+        };
+        g_factory_wire = fwire_new(turns, 1);
+        repl_cfg(&c, PROTO_OPENAI);
+        repl_out_t r = repl_session(&c, "/image\n", 7);
+        check(r.rc == EXIT_OK, "repl: bare /image exits 0");
+        check(strstr(r.ob, "no images pending") != NULL,
+              "repl: bare /image says none pending");
+        repl_session_free(&r);
+        call_cfg_free(&c);
+    }
+
+    /* vision: /image clear drops the pending image; the next turn has
+       no image block */
+    {
+        char path[] = "/tmp/llmkit-sc-rep2-XXXXXX";
+        int fd = mkstemp(path);
+        check(fd >= 0, "repl: vision clear temp png created");
+        const unsigned char png[] = {0x89, 'P', 'N', 'G', 0x0D, 0x0A,
+                                     0x1A, 0x0A};
+        check(write(fd, png, sizeof png) == (ssize_t)sizeof png,
+              "repl: vision clear temp png written");
+        close(fd);
+
+        fturn_t turns[] = {
+            { .recs = (const char *[]){
+                  "{\"type\":\"response\",\"text\":\"r1\",\"partial\":false}"},
+              .nrecs = 1, .kind = TURN_FINAL, .abort_after = -1 },
+        };
+        g_factory_wire = fwire_new(turns, 1);
+        repl_cfg(&c, PROTO_OPENAI);
+        char script[128];
+        int sn = snprintf(script, sizeof script,
+                          "/image %s\n/image clear\nhi\n", path);
+        check(sn > 0, "repl: vision clear script built");
+        repl_out_t r = repl_session(&c, script, (size_t)sn);
+        check(r.rc == EXIT_OK, "repl: /image clear exits 0");
+        check(strstr(r.ob, "cleared pending images") != NULL,
+              "repl: /image clear message");
+        check(strstr(g_seen_content, "image") == NULL,
+              "repl: cleared turn has no image");
+        check(strstr(g_seen_content, "hi") != NULL,
+              "repl: cleared turn still carried the text");
+        repl_session_free(&r);
+        call_cfg_free(&c);
+        unlink(path);
+    }
+
+    /* vision: unreadable image is a non-fatal error; session continues */
+    {
+        fturn_t turns[] = {
+            { .recs = (const char *[]){
+                  "{\"type\":\"response\",\"text\":\"r1\",\"partial\":false}"},
+              .nrecs = 1, .kind = TURN_FINAL, .abort_after = -1 },
+        };
+        g_factory_wire = fwire_new(turns, 1);
+        repl_cfg(&c, PROTO_OPENAI);
+        repl_out_t r = repl_session(&c, "/image /nonexistent.png\nhi\n", 27);
+        check(r.rc == EXIT_OK, "repl: bad /image stays exit 0");
+        check(strstr(r.ob, "cannot read image") != NULL,
+              "repl: bad /image error line");
+        check(strstr(g_seen_content, "hi") != NULL,
+              "repl: bad /image session continued");
+        check(strstr(g_seen_content, "hi") != NULL,
+              "repl: bad /image session continued");
+        check(strstr(g_seen_content, "\"type\":\"image\"") == NULL,
+              "repl: bad /image attached nothing");
+        repl_session_free(&r);
+        call_cfg_free(&c);
+    }
+
+    /* vision: empty line submits with a pending image, no text block */
+    {
+        char path[] = "/tmp/llmkit-sc-rep3-XXXXXX";
+        int fd = mkstemp(path);
+        check(fd >= 0, "repl: vision empty-line temp png created");
+        const unsigned char png[] = {0x89, 'P', 'N', 'G', 0x0D, 0x0A,
+                                     0x1A, 0x0A};
+        check(write(fd, png, sizeof png) == (ssize_t)sizeof png,
+              "repl: vision empty-line temp png written");
+        close(fd);
+
+        fturn_t turns[] = {
+            { .recs = (const char *[]){
+                  "{\"type\":\"response\",\"text\":\"r1\",\"partial\":false}"},
+              .nrecs = 1, .kind = TURN_FINAL, .abort_after = -1 },
+        };
+        g_factory_wire = fwire_new(turns, 1);
+        repl_cfg(&c, PROTO_OPENAI);
+        char script[128];
+        int sn = snprintf(script, sizeof script, "/image %s\n\n", path);
+        check(sn > 0, "repl: vision empty-line script built");
+        repl_out_t r = repl_session(&c, script, (size_t)sn);
+        check(r.rc == EXIT_OK, "repl: image-only submit exits 0");
+        check(strstr(g_seen_content, "\"type\":\"image\"") != NULL,
+              "repl: image-only submit carried the image");
+        check(strstr(g_seen_content, "\"type\":\"text\"") == NULL,
+              "repl: image-only submit has no text block");
+        repl_session_free(&r);
+        call_cfg_free(&c);
+        unlink(path);
+    }
+
+    /* vision: /help lists /image */
+    {
+        fturn_t turns[] = {
+            { .recs = (const char *[]){
+                  "{\"type\":\"response\",\"text\":\"r1\",\"partial\":false}"},
+              .nrecs = 1, .kind = TURN_FINAL, .abort_after = -1 },
+        };
+        g_factory_wire = fwire_new(turns, 1);
+        repl_cfg(&c, PROTO_OPENAI);
+        repl_out_t r = repl_session(&c, "/help\n", 6);
+        check(r.rc == EXIT_OK, "repl: /help exits 0");
+        check(strstr(r.ob, "/image") != NULL, "repl: /help lists /image");
         repl_session_free(&r);
         call_cfg_free(&c);
     }
@@ -8284,8 +9052,14 @@ int main(void) {
     test_jstream();
     fprintf(stderr, "selfcheck: sse parser\n");
     test_sse_parser();
+    fprintf(stderr, "selfcheck: b64\n");
+    test_b64();
     fprintf(stderr, "selfcheck: validation\n");
     test_validation();
+    fprintf(stderr, "selfcheck: image\n");
+    test_image();
+    fprintf(stderr, "selfcheck: vision wire\n");
+    test_vision_wire();
     fprintf(stderr, "selfcheck: state machine\n");
     test_state_machine();
     fprintf(stderr, "selfcheck: exit codes\n");

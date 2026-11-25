@@ -58,15 +58,97 @@ typedef struct owire {
 
 /* ---------------- serialization: message array ---------------- */
 
-static void oai_user_msg(owire_t *w, const trec_t *u, const char *head) {
-    buf_t txt;
-    buf_init(&txt);
-    user_text_join(u, &txt);
+static bool user_has_image(const trec_t *u) {
+    const cJSON *content = cJSON_GetObjectItemCaseSensitive(u->tree, "content");
+    if (!cJSON_IsArray(content)) return false;
+    for (const cJSON *b = content->child; b; b = b->next) {
+        const cJSON *ty = cJSON_GetObjectItemCaseSensitive(b, "type");
+        if (cJSON_IsString(ty) && !strcmp(ty->valuestring, "image")) return true;
+    }
+    return false;
+}
+
+/* append one image block as an openai part; chat uses image_url with a
+   data: URL, responses uses input_image with a plain string */
+static void oai_image_part(owire_t *w, const cJSON *blk, bool responses) {
+    const cJSON *src = cJSON_GetObjectItemCaseSensitive(blk, "source");
+    const cJSON *st = cJSON_GetObjectItemCaseSensitive(src, "type");
+    if (cJSON_IsString(st) && !strcmp(st->valuestring, "url")) {
+        const cJSON *u = cJSON_GetObjectItemCaseSensitive(src, "url");
+        const char *us = cJSON_IsString(u) ? u->valuestring : "";
+        if (responses) {
+            buf_append_str(&w->msgbuf, "{\"type\":\"input_image\",\"image_url\":");
+            buf_append_jstr(&w->msgbuf, us);
+            buf_append_byte(&w->msgbuf, '}');
+        } else {
+            buf_append_str(&w->msgbuf, "{\"type\":\"image_url\",\"image_url\":{\"url\":");
+            buf_append_jstr(&w->msgbuf, us);
+            buf_append_str(&w->msgbuf, "}}");
+        }
+        return;
+    }
+    const cJSON *mt = cJSON_GetObjectItemCaseSensitive(src, "media_type");
+    const cJSON *dt = cJSON_GetObjectItemCaseSensitive(src, "data");
+    const char *m = cJSON_IsString(mt) ? mt->valuestring : "image/png";
+    const char *d = cJSON_IsString(dt) ? dt->valuestring : "";
+    buf_t url;
+    buf_init(&url);
+    buf_append_str(&url, "data:");
+    buf_append_str(&url, m);
+    buf_append_str(&url, ";base64,");
+    buf_append_str(&url, d);
+    if (responses) {
+        buf_append_str(&w->msgbuf, "{\"type\":\"input_image\",\"image_url\":");
+        buf_append_jstr(&w->msgbuf, url.data ? url.data : "");
+        buf_append_byte(&w->msgbuf, '}');
+    } else {
+        buf_append_str(&w->msgbuf, "{\"type\":\"image_url\",\"image_url\":{\"url\":");
+        buf_append_jstr(&w->msgbuf, url.data ? url.data : "");
+        buf_append_str(&w->msgbuf, "}}");
+    }
+    buf_free(&url);
+}
+
+static void oai_user_msg(owire_t *w, const trec_t *u, const char *head,
+                         bool responses) {
+    const cJSON *content = cJSON_GetObjectItemCaseSensitive(u->tree, "content");
+    if (!user_has_image(u)) {
+        buf_t txt;
+        buf_init(&txt);
+        user_text_join(u, &txt);
+        append_msg_sep(&w->msgbuf);
+        buf_append_str(&w->msgbuf, head);
+        buf_append_jstr(&w->msgbuf, txt.data ? txt.data : "");
+        buf_append_byte(&w->msgbuf, '}');
+        buf_free(&txt);
+        return;
+    }
     append_msg_sep(&w->msgbuf);
     buf_append_str(&w->msgbuf, head);
-    buf_append_jstr(&w->msgbuf, txt.data ? txt.data : "");
-    buf_append_byte(&w->msgbuf, '}');
-    buf_free(&txt);
+    buf_append_byte(&w->msgbuf, '[');
+    bool first = true;
+    for (const cJSON *b = content->child; b; b = b->next) {
+        const cJSON *ty = cJSON_GetObjectItemCaseSensitive(b, "type");
+        if (!cJSON_IsString(ty)) continue;
+        if (!strcmp(ty->valuestring, "text")) {
+            const cJSON *tx = cJSON_GetObjectItemCaseSensitive(b, "text");
+            if (!cJSON_IsString(tx)) continue;
+            if (!first) buf_append_byte(&w->msgbuf, ',');
+            first = false;
+            if (responses) {
+                buf_append_str(&w->msgbuf, "{\"type\":\"input_text\",\"text\":");
+            } else {
+                buf_append_str(&w->msgbuf, "{\"type\":\"text\",\"text\":");
+            }
+            buf_append_jstr(&w->msgbuf, tx->valuestring);
+            buf_append_byte(&w->msgbuf, '}');
+        } else if (!strcmp(ty->valuestring, "image")) {
+            if (!first) buf_append_byte(&w->msgbuf, ',');
+            first = false;
+            oai_image_part(w, b, responses);
+        }
+    }
+    buf_append_str(&w->msgbuf, "]}");
 }
 
 /* join a system record's text blocks with \n (the system twin of
@@ -146,7 +228,7 @@ static void oai_serialize_new(owire_t *w, engine_t *e) {
     while ((kg = group_next(&gi)) != G_DONE) {
         if (gi.start < w->done_upto) continue;
         if (kg == G_USER)
-            oai_user_msg(w, gi.user, "{\"role\":\"user\",\"content\":");
+            oai_user_msg(w, gi.user, "{\"role\":\"user\",\"content\":", false);
         else {
             oai_assistant_msg(w, &gi);
             oai_toolresp_msgs(
@@ -226,7 +308,7 @@ static void rsp_serialize_new(owire_t *w, engine_t *e) {
         if (gi.start < w->done_upto) continue;
         if (kg == G_USER)
             oai_user_msg(w, gi.user,
-                         "{\"type\":\"message\",\"role\":\"user\",\"content\":");
+                         "{\"type\":\"message\",\"role\":\"user\",\"content\":", true);
         else {
             rsp_assistant_items(w, &gi);
             rsp_toolresp_items(w, &gi);

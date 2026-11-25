@@ -43,6 +43,8 @@ static inline char *llmkit_strndup(const char *s, size_t n) {
 #endif
 
 /* release builds stamp this: tools/release.sh passes VERSION=<x.y.z> to make */
+#define LLMKIT_IMAGE_MAX (5u * 1024u * 1024u)
+
 #ifndef LLMKIT_VERSION
 #define LLMKIT_VERSION "1.0"
 #endif
@@ -99,6 +101,8 @@ void ptr_push(void ***v, size_t *n, size_t *cap, void *item);
 
 /* append a JSON-encoded string literal (with quotes) */
 void buf_append_jstr(buf_t *b, const char *s);
+/* append a base64 encoding of p (standard alphabet, with padding) */
+void buf_append_b64(buf_t *b, const void *p, size_t n);
 /* append a JSON string literal of s's first head and last tail bytes
    around [...] as one elided value (the trim list's tool arguments) */
 void buf_append_jstr_headtail(buf_t *b, const char *s, size_t head,
@@ -837,6 +841,10 @@ typedef struct call_cfg {
     size_t nproxies, capproxies;
     char **terminals;                /* owned --terminal-tool values */
     size_t nterminals, capterminals;
+    char **images;                   /* owned --image paths, argv order */
+    size_t nimages, capimages;
+    char **image_urls;               /* owned --image-url values */
+    size_t nimage_urls, capimage_urls;
 } call_cfg_t;
 
 void call_cfg_free(call_cfg_t *c);
@@ -858,6 +866,10 @@ cJSON *call_build_tools(const call_cfg_t *c, const char *exe_path); /* NULL */
 cJSON *call_build_agent_tools(const call_cfg_t *c, const char *exe_path,
                               bool read_only, const char *cwd);
 cJSON *call_build_user(const char *prompt);
+/* user record with text block first, then image blocks in flag order;
+   NULL + err on image load failure */
+cJSON *call_build_user_ex(const char *prompt, const call_cfg_t *c, char *err,
+                         size_t errsz);
 /* quote for the shell spawn_shell uses (posix sh / windows cmd.exe) */
 void call_shell_quote(buf_t *b, const char *s);
 /* compile the leading records - llm, optional system, optional tools -
@@ -867,6 +879,15 @@ int call_compile(const call_cfg_t *c, engine_t *e, const char *exe_path);
 /* compile + run one conversation; returns the exit code (design sec.11) */
 int call_run(const call_cfg_t *c, FILE *out, FILE *errf, const char *exe_path,
              wire_t *(*factory)(engine_t *));
+
+/* ================= image.c ================= */
+
+/* build an image content block from a file path; NULL + err on failure */
+cJSON *image_block_from_path(const char *path, char *err, size_t errsz);
+/* build an image content block from an http(s) url; NULL on bad url */
+cJSON *image_block_from_url(const char *url);
+/* short display text ("image/png, 1.2M b64"); owned */
+char *image_block_desc(const cJSON *blk);
 
 /* ================= editor.c ================= */
 

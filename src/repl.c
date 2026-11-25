@@ -1044,6 +1044,8 @@ typedef struct slash_state {
     char *h_effort;           /* owned: the helper's own reasoning
                                  effort, /helper-thinking's; NULL =
                                  inherit the session's */
+    cJSON **pending_images;   /* owned image blocks, argv order */
+    size_t npending, cappending;
 } slash_state_t;
 
 /* the session's command catalogue: one table for /help, the unknown-
@@ -1059,6 +1061,7 @@ static const struct {
     { "/helper-thinking", "pick the reasoning effort of the helper" },
     { "/cd", "change the working directory" },
     { "/new", "start a fresh conversation" },
+    { "/image", "attach an image to the next message" },
 };
 
 /* the reasoning-effort ladder /thinking lists: the common rungs of the
@@ -1866,7 +1869,65 @@ static int slash_new(slash_state_t *sl, engine_t *e) {
 /* one input line: a slash command consumed (its own result), any other
    input falls through to the prompt (1). The model picker gets the
    `model> ` prompt; the session's own is restored around it. */
+static int slash_image(slash_state_t *sl, const char *arg) {
+    dspy_t *d = sl->d;
+    while (*arg == ' ') arg++;
+    if (!*arg) {
+        dspy_ensure_nl(d);
+        if (!sl->npending) {
+            dspy_write_str(d, "no images pending\n");
+            return 0;
+        }
+        dspy_write_str(d, "pending images:\n");
+        for (size_t i = 0; i < sl->npending; i++) {
+            char *desc = image_block_desc(sl->pending_images[i]);
+            dspy_write_str(d, "  ");
+            dspy_write_str(d, desc ? desc : "image");
+            dspy_write_str(d, "\n");
+            free(desc);
+        }
+        return 0;
+    }
+    if (!strcmp(arg, "clear")) {
+        for (size_t i = 0; i < sl->npending; i++) cJSON_Delete(sl->pending_images[i]);
+        free(sl->pending_images);
+        sl->pending_images = NULL;
+        sl->npending = sl->cappending = 0;
+        dspy_ensure_nl(d);
+        dspy_write_str(d, "cleared pending images\n");
+        return 0;
+    }
+    char err[512] = "";
+    cJSON *blk = image_block_from_path(arg, err, sizeof err);
+    if (!blk) {
+        dspy_error_line(d, NULL, err);
+        return 1;
+    }
+    if (sl->npending == sl->cappending) {
+        sl->cappending = sl->cappending ? sl->cappending * 2 : 4;
+        sl->pending_images = realloc(sl->pending_images,
+                                     sl->cappending * sizeof(cJSON *));
+    }
+    sl->pending_images[sl->npending++] = blk;
+    char *desc = image_block_desc(blk);
+    dspy_ensure_nl(d);
+    dspy_write_str(d, "attached ");
+    dspy_write_str(d, desc ? desc : "image");
+    dspy_write_str(d, " (");
+    char buf[64];
+    snprintf(buf, sizeof buf, "%zu pending)\n", sl->npending);
+    dspy_write_str(d, buf);
+    free(desc);
+    return 0;
+}
+
 static int slash_dispatch(slash_state_t *sl, const char *s, engine_t *e) {
+    if (!strncmp(s, "/image", 6) && (!s[6] || s[6] == ' ')) {
+        const char *arg = s + 6;
+        while (*arg == ' ') arg++;
+        slash_image(sl, arg);
+        return 0;
+    }
     if (!strcmp(s, "/help")) {
         slash_help(sl->d);
         return 0;
@@ -2266,7 +2327,7 @@ int repl_run_ex(const call_cfg_t *c, const repl_opts_t *o, int in_fd,
             if (ed.line.len)
                 buf_append(&line, ed.line.data, ed.line.len);
         }
-        if (!line.len) { /* empty input: ignored, no user record, no turn */
+        if (!line.len && !sl.npending) { /* empty input: ignored */
             need_rule = false;
             continue;
         }
@@ -2320,19 +2381,38 @@ int repl_run_ex(const call_cfg_t *c, const repl_opts_t *o, int in_fd,
         }
 
         {
-            cJSON *user = call_build_user(line.data);
+            cJSON *user = cJSON_CreateObject();
+            cJSON_AddStringToObject(user, "type", "user");
+            cJSON *content = cJSON_CreateArray();
+            if (line.len) {
+                cJSON *blk = cJSON_CreateObject();
+                cJSON_AddStringToObject(blk, "type", "text");
+                cJSON_AddStringToObject(blk, "text", line.data);
+                cJSON_AddItemToArray(content, blk);
+            }
+            for (size_t i = 0; i < sl.npending; i++)
+                cJSON_AddItemToArray(content, sl.pending_images[i]);
+            cJSON_AddItemToObject(user, "content", content);
             char *m = validate_content(
                 cJSON_GetObjectItemCaseSensitive(user, "content"));
             if (m) {
                 dspy_error_line(&sink.d, EC_INVALID_RECORD, m);
                 free(m);
                 cJSON_Delete(user);
+                free(sl.pending_images);
+                sl.pending_images = NULL;
+                sl.npending = sl.cappending = 0;
                 rc = EXIT_INVALID_RECORD;
                 goto done;
             }
             store_persist(&sink, user); /* the store's turn opener */
             tlist_ingest(&e->tr, user);
+            /* the transcript duplicated the blocks; user owns the pending
+               blocks now - clear the list without freeing */
             cJSON_Delete(user);
+            free(sl.pending_images);
+            sl.pending_images = NULL;
+            sl.npending = sl.cappending = 0;
         }
 
         /* a turn runs against the cooked terminal: raw mode cycles per

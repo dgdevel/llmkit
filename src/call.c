@@ -29,6 +29,10 @@ void call_cfg_free(call_cfg_t *c) {
     free(c->proxies);
     for (size_t i = 0; i < c->nterminals; i++) free(c->terminals[i]);
     free(c->terminals);
+    for (size_t i = 0; i < c->nimages; i++) free(c->images[i]);
+    free(c->images);
+    for (size_t i = 0; i < c->nimage_urls; i++) free(c->image_urls[i]);
+    free(c->image_urls);
     memset(c, 0, sizeof *c);
 }
 
@@ -124,7 +128,8 @@ int call_parse_ex(int argc, char **argv, call_cfg_t *c, char *err,
                    !strcmp(a, "--system-prompt") ||
                    (with_prompt && !strcmp(a, "--prompt")) ||
                    !strcmp(a, "--header") || !strcmp(a, "--mcp-proxy") ||
-                   !strcmp(a, "--terminal-tool")) {
+                   !strcmp(a, "--terminal-tool") || !strcmp(a, "--image") ||
+                   !strcmp(a, "--image-url")) {
             if (i + 1 >= argc) {
                 usage_err(err, errsz, "missing value for %s", a);
                 goto fail;
@@ -184,6 +189,17 @@ int call_parse_ex(int argc, char **argv, call_cfg_t *c, char *err,
             } else if (!strcmp(a, "--terminal-tool")) {
                 if (cfg_str_add(&c->terminals, &c->nterminals,
                                 &c->capterminals, v)) {
+                    usage_err(err, errsz, "out of memory");
+                    goto fail;
+                }
+            } else if (!strcmp(a, "--image")) {
+                if (cfg_str_add(&c->images, &c->nimages, &c->capimages, v)) {
+                    usage_err(err, errsz, "out of memory");
+                    goto fail;
+                }
+            } else if (!strcmp(a, "--image-url")) {
+                if (cfg_str_add(&c->image_urls, &c->nimage_urls,
+                                &c->capimage_urls, v)) {
                     usage_err(err, errsz, "out of memory");
                     goto fail;
                 }
@@ -419,6 +435,38 @@ cJSON *call_build_user(const char *prompt) {
     return text_record("user", prompt);
 }
 
+cJSON *call_build_user_ex(const char *prompt, const call_cfg_t *c, char *err,
+                         size_t errsz) {
+    cJSON *rec = cJSON_CreateObject();
+    cJSON_AddStringToObject(rec, "type", "user");
+    cJSON *content = cJSON_CreateArray();
+    if (prompt && *prompt) {
+        cJSON *blk = cJSON_CreateObject();
+        cJSON_AddStringToObject(blk, "type", "text");
+        cJSON_AddStringToObject(blk, "text", prompt);
+        cJSON_AddItemToArray(content, blk);
+    }
+    for (size_t i = 0; i < c->nimages; i++) {
+        cJSON *blk = image_block_from_path(c->images[i], err, errsz);
+        if (!blk) {
+            cJSON_Delete(rec);
+            return NULL;
+        }
+        cJSON_AddItemToArray(content, blk);
+    }
+    for (size_t i = 0; i < c->nimage_urls; i++) {
+        cJSON *blk = image_block_from_url(c->image_urls[i]);
+        if (!blk) {
+            snprintf(err, errsz, "invalid image url '%s'", c->image_urls[i]);
+            cJSON_Delete(rec);
+            return NULL;
+        }
+        cJSON_AddItemToArray(content, blk);
+    }
+    cJSON_AddItemToObject(rec, "content", content);
+    return rec;
+}
+
 /* ================= sink and run ================= */
 
 typedef struct call_sink {
@@ -594,7 +642,13 @@ int call_run(const call_cfg_t *c, FILE *out, FILE *errf, const char *exe_path,
     }
 
     {
-        cJSON *user = call_build_user(c->prompt);
+        char err[512] = "";
+        cJSON *user = call_build_user_ex(c->prompt, c, err, sizeof err);
+        if (!user) {
+            sink_error(&s, EC_INVALID_RECORD, err);
+            rc = EXIT_INVALID_RECORD;
+            goto done;
+        }
         char *m = validate_content(
             cJSON_GetObjectItemCaseSensitive(user, "content"));
         if (m) {
@@ -691,6 +745,7 @@ static void call_usage(FILE *out) {
           "                [--header <name=value>]...\n"
           "                [--mcp-proxy <config>]... "
           "[--terminal-tool <name.tool>]...\n"
+          "                [--image <path>]... [--image-url <url>]...\n"
           "                --prompt <text|->\n",
           out);
 }

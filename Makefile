@@ -25,7 +25,7 @@ SRC  = src/buf.c src/sse.c src/platform.c src/jsonl.c src/jstream.c src/wire_ope
        src/crash_report.c \
        src/call.c src/models.c src/editor.c src/repl.c src/acp.c src/mcprepl.c \
        src/update.c \
-       src/pretty.c src/llmproxy.c src/prompts.gen.c \
+       src/pretty.c src/llmproxy.c src/prompts.gen.c src/image.c \
        src/mdterm.c \
        src/vendor/linenoise/linenoise.c src/vendor/md4c/md4c.c
 MAIN = src/main.c

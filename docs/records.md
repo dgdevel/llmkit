@@ -192,7 +192,44 @@ complete:
 
 | field | type | required | description |
 |---|---|---|---|
-| `content` | array | yes | list of `text` content blocks, at least one. Same shape and rules as the `system` record's, see above |
+| `content` | array | yes | list of `text` and `image` content blocks, at least one. `text` has the same shape and rules as the `system` record's, see above |
+
+### image blocks
+
+`user` records may carry images next to (or instead of) text. The block
+shape is anthropic-native; the openai wires translate it (see below).
+`system` records stay text-only.
+
+base64 source (the decoded image is at most 5 MiB, the per-image limit
+of the anthropic api):
+
+```
+{"type":"image","source":{"type":"base64","media_type":"image/png","data":"<base64>"}}
+```
+
+url source (http/https only):
+
+```
+{"type":"image","source":{"type":"url","url":"https://example.com/x.png"}}
+```
+
+| field | type | required | description |
+|---|---|---|---|
+| `type` | string | yes | `image` |
+| `source.type` | string | yes | `base64` or `url` |
+| `source.media_type` | string | base64 only | one of `image/png`, `image/jpeg`, `image/gif`, `image/webp` |
+| `source.data` | string | base64 only | standard base64 with padding, length a multiple of 4, decoding to at most 5 MiB |
+| `source.url` | string | url only | an http(s) url with a non-empty host |
+
+Block order is preserved on every wire. On the openai protocols an
+image-bearing user message becomes an array of parts (`text` /
+`image_url` on chat completions, `input_text` / `input_image` on
+responses) instead of the joined string content; text-only messages
+keep the joined string shape. The anthropic wire passes blocks verbatim.
+
+`llmkit call --image <path>` and `--image-url <url>` build these blocks
+from the command line; the repl's `/image <path>` attaches them to the
+next submitted line.
 
 ## thinking
 

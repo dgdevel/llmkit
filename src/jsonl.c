@@ -183,6 +183,35 @@ char *validate_options(const cJSON *t) {
     return NULL;
 }
 
+static bool b64_alphabet_ok(const char *s, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        char c = s[i];
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+            (c >= '0' && c <= '9') || c == '+' || c == '/' || c == '=')
+            continue;
+        return false;
+    }
+    return true;
+}
+
+static bool valid_http_url(const char *u) {
+    if (!u || !*u) return false;
+    size_t n = strlen(u);
+    const char *scheme;
+    size_t sl;
+    if (!strncmp(u, "https://", 8)) { scheme = "https"; sl = 8; }
+    else if (!strncmp(u, "http://", 7)) { scheme = "http"; sl = 7; }
+    else return false;
+    (void)scheme;
+    const char *host = u + sl;
+    size_t hl = n - sl;
+    if (hl == 0) return false;
+    const char *slash = strchr(host, '/');
+    if (slash) hl = (size_t)(slash - host);
+    if (hl == 0) return false;
+    return true;
+}
+
 char *validate_content(const cJSON *content) {
     if (!cJSON_IsArray(content)) return vmsg("content must be a list of blocks");
     int n = 0;
@@ -190,10 +219,44 @@ char *validate_content(const cJSON *content) {
         n++;
         if (!cJSON_IsObject(b)) return vmsg("content block must be an object");
         const cJSON *ty = cJSON_GetObjectItemCaseSensitive(b, "type");
-        if (!cJSON_IsString(ty) || strcmp(ty->valuestring, "text"))
-            return vmsg("only text content blocks exist in this version");
-        const cJSON *tx = cJSON_GetObjectItemCaseSensitive(b, "text");
-        if (!cJSON_IsString(tx)) return vmsg("text block missing text field");
+        if (!cJSON_IsString(ty)) return vmsg("content block missing type");
+        if (!strcmp(ty->valuestring, "text")) {
+            const cJSON *tx = cJSON_GetObjectItemCaseSensitive(b, "text");
+            if (!cJSON_IsString(tx)) return vmsg("text block missing text field");
+            continue;
+        }
+        if (!strcmp(ty->valuestring, "image")) {
+            const cJSON *src = cJSON_GetObjectItemCaseSensitive(b, "source");
+            if (!cJSON_IsObject(src)) return vmsg("image block missing source");
+            const cJSON *st = cJSON_GetObjectItemCaseSensitive(src, "type");
+            if (!cJSON_IsString(st)) return vmsg("image source missing type");
+            if (!strcmp(st->valuestring, "base64")) {
+                const cJSON *mt = cJSON_GetObjectItemCaseSensitive(src, "media_type");
+                if (!cJSON_IsString(mt)) return vmsg("image source missing media_type");
+                const char *m = mt->valuestring;
+                bool ok = !strcmp(m, "image/png") || !strcmp(m, "image/jpeg") ||
+                          !strcmp(m, "image/gif") || !strcmp(m, "image/webp");
+                if (!ok) return vmsg("unsupported image media_type '%s'", m);
+                const cJSON *dt = cJSON_GetObjectItemCaseSensitive(src, "data");
+                if (!cJSON_IsString(dt) || !dt->valuestring || !dt->valuestring[0])
+                    return vmsg("image source missing data");
+                const char *d = dt->valuestring;
+                size_t dl = strlen(d);
+                if (dl % 4 != 0) return vmsg("image data length not a multiple of 4");
+                if (!b64_alphabet_ok(d, dl)) return vmsg("image data not base64");
+                if ((unsigned long long)dl * 3 / 4 > (unsigned long long)LLMKIT_IMAGE_MAX)
+                    return vmsg("image exceeds 5 MiB limit");
+                continue;
+            }
+            if (!strcmp(st->valuestring, "url")) {
+                const cJSON *u = cJSON_GetObjectItemCaseSensitive(src, "url");
+                if (!cJSON_IsString(u) || !valid_http_url(u->valuestring))
+                    return vmsg("image source url must be http(s)");
+                continue;
+            }
+            return vmsg("unknown image source type '%s'", st->valuestring);
+        }
+        return vmsg("unknown content block type '%s'", ty->valuestring);
     }
     if (n == 0) return vmsg("content must have at least one block");
     return NULL;

@@ -222,3 +222,25 @@ bool utf8_valid(const uint8_t *p, size_t n) { return utf8_scan(p, n, false); }
 bool utf8_valid_prefix(const uint8_t *p, size_t n) {
     return utf8_scan(p, n, true);
 }
+
+/* base64 encode (standard alphabet, with padding) */
+void buf_append_b64(buf_t *b, const void *p, size_t n) {
+    static const char tab[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const unsigned char *in = p;
+    size_t i = 0;
+    while (i < n) {
+        /* the last group may hold 1 or 2 bytes: shift them to the
+           group's high bits, the missing low bytes count as zero */
+        unsigned int v = (unsigned int)in[i++] << 16;
+        int rem = (int)(n - i);
+        if (rem >= 1) v |= (unsigned int)in[i++] << 8;
+        if (rem >= 2) v |= in[i++];
+        buf_append_byte(b, tab[(v >> 18) & 0x3F]);
+        buf_append_byte(b, tab[(v >> 12) & 0x3F]);
+        if (rem >= 1) buf_append_byte(b, tab[(v >> 6) & 0x3F]);
+        else buf_append_byte(b, '=');
+        if (rem >= 2) buf_append_byte(b, tab[v & 0x3F]);
+        else buf_append_byte(b, '=');
+    }
+}

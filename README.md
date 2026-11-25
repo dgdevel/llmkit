@@ -12,6 +12,7 @@ $ llmkit repl --openai http://localhost:9931/v1
 ```
 
 - **Navigation**: Use `/help` for commands, `/models` to change the model, `/thinking` to pick the reasoning effort, `/helper-model` and `/helper-thinking` to give the helper subagent its own setup, and `/new` to start a fresh conversation.
+- **Images**: `/image <path>` attaches a picture to the next message; `llmkit call --image <path>` / `--image-url <url>` do the same on one-off calls.
 - **Files**: Start a word with `@` and press Tab to autocomplete file or directory paths.
 - **Controls**: Ctrl-C stops the current turn; Ctrl-D exits.
 
@@ -102,6 +103,8 @@ Requires one protocol flag (`--anthropic`, `--openai`, `--openai-responses`) and
 - `--header <name>=<value>`: Custom HTTP header.
 - `--mcp-proxy <config.jsonl>`: Attach an MCP proxy configuration.
 - `--terminal-tool <server.tool>`: Mark a tool as the final output.
+- `--image <path>`: Attach an image file (png, jpeg, gif, webp, max 5 MiB) to the prompt. Repeatable.
+- `--image-url <url>`: Attach an image by http(s) url. Repeatable.
 - `--verbose`, `--conversation-store <file>`, `--no-helper`: Agent-specific options for logging, persistence, and subagent control.
 - `--no-deepwiki`: Disable the bundled DeepWiki MCP server.
 - `--read-only`: (Agent only) Hide the file-writing built-in tools.
