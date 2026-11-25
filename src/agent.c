@@ -532,11 +532,25 @@ static int agent_handle(void *ctx, const char *method, cJSON *params,
     return 1;
 }
 
-int cmd_agent(const char *seed_path) {
+int cmd_agent(int argc, char **argv) {
     signals_init();
+    /* --vision: the engine-owned load_image tool rides the listing; the
+       one positional argument is the seed path */
+    bool vision = false;
+    const char *seed_path = NULL;
+    for (int i = 2; i < argc; i++) {
+        if (!strcmp(argv[i], "--vision")) vision = true;
+        else if (!seed_path) seed_path = argv[i];
+        else seed_path = argv[i]; /* last one wins, like a typo guard */
+    }
+    if (!seed_path) {
+        fprintf(stderr, "usage: llmkit agent-as-tool [--vision] <seed.jsonl>\n");
+        return EXIT_OUT_OF_CHANNEL;
+    }
     agent_state_t a;
     memset(&a, 0, sizeof a);
     a.eng = engine_new(agent_sink_fn, NULL);
+    if (vision) engine_set_vision(a.eng, true); /* --vision: load_image */
     /* the helper is a session, not a one-off call: engine_run ends every
        invoke with mcp_kill_all unless this is set, so the seed's servers
        (the builtin one included) would die with the first invoke and

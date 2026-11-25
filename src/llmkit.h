@@ -592,6 +592,10 @@ struct engine {
                       mcp children die at engine_free only (sec.12) */
     bool llm_retry; /* agent: retry failed llm calls on the fibonacci
                        schedule 2,3,5,8,13,21,34,... seconds (sec.12) */
+    bool vision_tool; /* --vision: the engine-owned `load_image` tool
+                         rides the listing; run_tool intercepts it */
+    cJSON *vision_pending_user; /* load_image's image record, emitted
+                                    right after its tool_response */
 
     /* seams for tests */
     tool_exec_fn tool_exec;
@@ -607,6 +611,9 @@ void engine_emit_record(engine_t *e, cJSON *rec); /* sink + ingest */
 void engine_tool_preview(engine_t *e, const char *tool, const char *id,
                          const char *args, size_t n, bool done);
 void engine_apply_config_record(engine_t *e, cJSON *tree); /* llm/options/system/tools snapshot */
+/* the engine-owned load_image tool (the --vision flag): on = one listing
+   entry (srv NULL) + the run_tool intercept; survives listing rebuilds */
+void engine_set_vision(engine_t *e, bool on);
 int engine_input_record(engine_t *e, cJSON *tree); /* reading-state dispatch:
                                                       0 ok, 1 start now, 2 fatal(rec emitted) */
 int engine_start(engine_t *e); /* validate + connect; 0 ok, exit code on fatal */
@@ -668,6 +675,7 @@ typedef struct mcp_mgr {
     mcp_server_t **v;
     size_t n, cap;
     tool_listing_t listing; /* ordered snapshot, rebuilt by mcp_reconcile */
+    bool vision; /* the engine's load_image entry rides every rebuild */
 } mcp_mgr_t;
 
 mcp_mgr_t *mcp_mgr_new(void);
@@ -681,6 +689,9 @@ bool mcp_protocol_supported(const char *rev);
    failed. */
 int mcp_reconcile(mcp_mgr_t *m, engine_t *e, const cJSON *tools_record);
 const tool_listing_t *mcp_listing(mcp_mgr_t *m); /* ordered snapshot */
+/* rebuild the ordered listing from the connected servers (and the
+   engine's load_image entry when the vision flag is on) */
+void mcp_listing_rebuild(mcp_mgr_t *m);
 mcp_server_t *mcp_find(mcp_mgr_t *m, const char *name);
 /* exposed name (server.tool) marked terminal by its server's
    terminal_tools; false when unknown (design sec.6) */
@@ -845,6 +856,7 @@ typedef struct call_cfg {
     size_t nimages, capimages;
     char **image_urls;               /* owned --image-url values */
     size_t nimage_urls, capimage_urls;
+    bool vision;                     /* --vision: the load_image tool */
 } call_cfg_t;
 
 void call_cfg_free(call_cfg_t *c);
@@ -1234,8 +1246,8 @@ void llm_proxy_sse_free(llm_proxy_sse_t *s);
 
 /* ================= commands ================= */
 
-int cmd_runner(void);
-int cmd_agent(const char *seed_path);
+int cmd_runner(int argc, char **argv);
+int cmd_agent(int argc, char **argv);
 int cmd_proxy(const char *config_path);
 int cmd_builtin(int argc, char **argv);
 int cmd_call(int argc, char **argv);

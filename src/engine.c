@@ -149,6 +149,7 @@ void engine_free(engine_t *e) {
     for (size_t i = 0; i < e->npending; i++) cJSON_Delete(e->pending[i]);
     free(e->pending);
     free(e->terminal_id);
+    cJSON_Delete(e->vision_pending_user);
     if (e->inq && !e->inq_shared)
         queue_free(e->inq); /* shared: the stdin reader may still push;
                                leaking at exit beats freeing under it
@@ -162,6 +163,15 @@ void engine_emit_record(engine_t *e, cJSON *rec) {
     if (!rec) return;
     tlist_ingest(&e->tr, rec); /* transcript records only; others ignored */
     e->emit(e->emit_ctx, rec); /* sink consumes the record */
+}
+
+void engine_set_vision(engine_t *e, bool on) {
+    if (!e || e->vision_tool == on) return;
+    e->vision_tool = on;
+    ((mcp_mgr_t *)e->mcp)->vision = on;
+    /* rebuild the listing so the entry appears/disappears now (reconcile
+       rebuilds it on every tools-record change too) */
+    mcp_listing_rebuild((mcp_mgr_t *)e->mcp);
 }
 
 void engine_tool_preview(engine_t *e, const char *tool, const char *id,
@@ -562,6 +572,38 @@ int wire_http_verdict(int rc, http_req_t *req, blkemit_t *be, bool failed,
     return 0;
 }
 
+/* the engine-owned load_image (the --vision flag): the image block lands
+   in the transcript as the next user record; the tool's own answer is a
+   short text line. err/is_error carry a bad invocation */
+static int vision_load_image(engine_t *e, cJSON *args, buf_t *text_out,
+                             bool *is_error, char *err, size_t errsz) {
+    const cJSON *p = cJSON_GetObjectItemCaseSensitive(args, "path");
+    if (!cJSON_IsString(p) || !p->valuestring[0]) {
+        snprintf(err, errsz, "load_image: missing 'path' argument");
+        buf_append_str(text_out, err);
+        *is_error = true;
+        return 0;
+    }
+    char lerr[512] = "";
+    cJSON *blk = image_block_from_path(p->valuestring, lerr, sizeof lerr);
+    if (!blk) {
+        buf_append_str(text_out, lerr);
+        *is_error = true;
+        return 0;
+    }
+    /* the image rides its own user record after this tool_response */
+    cJSON *user = cJSON_CreateObject();
+    cJSON_AddStringToObject(user, "type", "user");
+    cJSON *content = cJSON_AddArrayToObject(user, "content");
+    cJSON_AddItemToArray(content, blk);
+    char *desc = image_block_desc(blk);
+    buf_append_str(text_out, "image attached: ");
+    buf_append_str(text_out, desc ? desc : "image");
+    free(desc);
+    e->vision_pending_user = user; /* emitted right after the response */
+    return 0;
+}
+
 static int default_tool_exec(engine_t *e, const char *tool, cJSON *args,
                              buf_t *text_out, bool *is_error, char *err,
                              size_t errsz, double *u_in, double *u_out,
@@ -577,8 +619,13 @@ static void run_tool(engine_t *e, trec_t *r) {
     char err[512] = "";
     double u_in = 0, u_out = 0;
     bool u_have = false;
-    int rc = e->tool_exec(e, r->tool, r->args, &text, &is_err, err, sizeof err,
-                          &u_in, &u_out, &u_have);
+    int rc = 0;
+    if (e->vision_tool && r->tool && !strcmp(r->tool, "load_image")) {
+        rc = vision_load_image(e, r->args, &text, &is_err, err, sizeof err);
+    } else {
+        rc = e->tool_exec(e, r->tool, r->args, &text, &is_err, err,
+                          sizeof err, &u_in, &u_out, &u_have);
+    }
     if (rc == 2) {
         engine_emit_record(e, rec_tool_response(
                                   r->id,
@@ -604,6 +651,22 @@ static void run_tool(engine_t *e, trec_t *r) {
         if (is_err)
             engine_emit_error(e, EC_TOOL_FAILED,
                               text.data ? text.data : "tool failed", false);
+    }
+    /* load_image: the image block follows the tool_response as its own
+       user record (transcript + sink; the wire groups it as G_USER) */
+    if (e->vision_pending_user) {
+        cJSON *u = e->vision_pending_user;
+        e->vision_pending_user = NULL;
+        char *m = validate_content(
+            cJSON_GetObjectItemCaseSensitive(u, "content"));
+        if (m) {
+            engine_emit_error(e, EC_INVALID_RECORD, m, true);
+            free(m);
+            e->fatal_code = EXIT_INVALID_RECORD;
+            cJSON_Delete(u);
+        } else {
+            engine_emit_record(e, u);
+        }
     }
     buf_free(&text);
 }
@@ -965,9 +1028,19 @@ static int runner_attempt_start(engine_t *e, bool via_flush) {
     return 0;
 }
 
-int cmd_runner(void) {
+int cmd_runner(int argc, char **argv) {
     signals_init();
+    /* --vision: the engine-owned load_image tool rides the listing */
+    bool vision = false;
+    for (int i = 2; i < argc; i++) {
+        if (!strcmp(argv[i], "--vision")) vision = true;
+        else {
+            fprintf(stderr, "usage: llmkit runner [--vision] < records.jsonl\n");
+            return EXIT_OUT_OF_CHANNEL;
+        }
+    }
     engine_t *e = engine_new(jsonl_stdout_sink, NULL);
+    if (vision) engine_set_vision(e, true);
     e->emit(e->emit_ctx, cJSON_Parse("{\"type\":\"header\",\"version\":1}"));
     e->inq = queue_new();
     e->inq_shared = true;

@@ -69,14 +69,8 @@ int main(int argc, char **argv) {
     http_global_init();
     if (argc < 2) return usage(stderr);
     const char *cmd = argv[1];
-    if (!strcmp(cmd, "runner")) {
-        if (argc != 2) return usage(stderr);
-        return cmd_runner();
-    }
-    if (!strcmp(cmd, "agent-as-tool")) {
-        if (argc != 3) return usage(stderr);
-        return cmd_agent(argv[2]);
-    }
+    if (!strcmp(cmd, "runner")) return cmd_runner(argc, argv);
+    if (!strcmp(cmd, "agent-as-tool")) return cmd_agent(argc, argv);
     if (!strcmp(cmd, "mcp-proxy")) {
         if (argc != 3) return usage(stderr);
         return cmd_proxy(argv[2]);

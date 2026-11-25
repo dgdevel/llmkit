@@ -109,7 +109,7 @@ int call_parse_ex(int argc, char **argv, call_cfg_t *c, char *err,
     c->max_tokens = -1;
     bool have_base = false, have_key = false, have_model = false,
          have_system = false, have_prompt = false, have_mt = false,
-         have_effort = false;
+         have_effort = false, have_vision = false;
 
     for (int i = 0; i < argc; i++) {
         const char *a = argv[i];
@@ -122,6 +122,13 @@ int call_parse_ex(int argc, char **argv, call_cfg_t *c, char *err,
             c->protocol = !strcmp(a, "--anthropic")     ? PROTO_ANTHROPIC
                           : !strcmp(a, "--openai")      ? PROTO_OPENAI
                                                          : PROTO_RESPONSES;
+        } else if (!strcmp(a, "--vision")) {
+            if (have_vision) {
+                usage_err(err, errsz, "--vision given twice");
+                goto fail;
+            }
+            have_vision = true;
+            c->vision = true;
         } else if (!strcmp(a, "--key") || !strcmp(a, "--model") ||
                    !strcmp(a, "--reasoning-effort") ||
                    !strcmp(a, "--max-tokens") ||
@@ -630,6 +637,7 @@ int call_run(const call_cfg_t *c, FILE *out, FILE *errf, const char *exe_path,
     }
     engine_t *e = engine_new(call_sink_fn, &s);
     if (factory) e->wire_factory = factory;
+    if (c->vision) engine_set_vision(e, true);
     int rc = 0;
 
     rc = call_compile(c, e, exe_path);
@@ -745,7 +753,8 @@ static void call_usage(FILE *out) {
           "                [--header <name=value>]...\n"
           "                [--mcp-proxy <config>]... "
           "[--terminal-tool <name.tool>]...\n"
-          "                [--image <path>]... [--image-url <url>]...\n"
+          "                [--image <path>]... [--image-url <url>]... "
+          "[--vision]\n"
           "                --prompt <text|->\n",
           out);
 }

@@ -2061,6 +2061,7 @@ int repl_run_ex(const call_cfg_t *c, const repl_opts_t *o, int in_fd,
     if (factory) e->wire_factory = factory;
     e->keep_mcp = true; /* the session continues; engine_free tears down */
     e->llm_retry = o->llm_retry; /* agent: fibonacci retry of llm calls */
+    if (c->vision) engine_set_vision(e, true); /* --vision: load_image */
 
     /* input first: every goto done below releases what it meets */
     bool tty = isatty(in_fd);
@@ -2494,7 +2495,7 @@ static void repl_usage(FILE *out) {
           "[--system-prompt <text>]\n"
           "                [--header <name=value>]...\n"
           "                [--mcp-proxy <config>]... "
-          "[--terminal-tool <name.tool>]...\n"
+          "[--terminal-tool <name.tool>]... [--vision]\n"
           "                [--bell] [--end-turn-command <command>]\n",
           out);
 }
@@ -2708,7 +2709,7 @@ static void agent_usage(FILE *out) {
           "[--no-helper]\n"
           "                [--helper-model <name>] "
           "[--helper-reasoning-effort <value>]\n"
-          "                [--no-deepwiki] [--read-only] [--bell]\n"
+          "                [--no-deepwiki] [--read-only] [--vision] [--bell]\n"
           "                [--end-turn-command <command>]\n",
           out);
 }

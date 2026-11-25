@@ -1,0 +1,1 @@
+Load an image file into the conversation so you can see it. Supported types: png, jpeg, gif, webp.

@@ -1311,6 +1311,387 @@ static wire_t *script_factory(engine_t *e) {
     return g_factory_wire;
 }
 
+/* ================= vision tool (the --vision flag) ================= */
+
+/* tiny png fixture via mkstemp; returns fd <0 on failure */
+static int vision_tmp_png(char *path /* size >= 64 */) {
+    snprintf(path, 64, "/tmp/llmkit-selfcheck-vis-XXXXXX");
+    int fd = mkstemp(path);
+    if (fd >= 0) {
+        const unsigned char png[12] = {0x89, 'P', 'N', 'G', 0x0D, 0x0A,
+                                       0x1A, 0x0A, '0', '0', '0', '0'};
+        if (write(fd, png, sizeof png) != (ssize_t)sizeof png) {
+            close(fd);
+            return -1;
+        }
+        close(fd);
+    }
+    return fd;
+}
+
+static void test_vision_tool(void) {
+    cap_t cap = { 0 };
+
+    /* 1. listing on/off */
+    {
+        engine_t *e = engine_new(cap_fn, &cap);
+        engine_set_vision(e, true);
+        const tool_listing_t *tl = mcp_listing((mcp_mgr_t *)e->mcp);
+        check(tl->n == 1, "vision: listing has one entry with flag on");
+        if (tl->n == 1) {
+            check_str(tl->v[0].exposed_name, "load_image",
+                      "vision: exposed_name load_image");
+            check(tl->v[0].srv == NULL, "vision: entry srv is NULL");
+            char *s = cJSON_PrintUnformatted(tl->v[0].tool);
+            check(s && strstr(s, "\"path\"") != NULL,
+                  "vision: inputSchema has path");
+            free(s);
+        }
+        engine_set_vision(e, false);
+        tl = mcp_listing((mcp_mgr_t *)e->mcp);
+        check(tl->n == 0, "vision: flag off removes the entry");
+        engine_set_vision(e, true);
+        tl = mcp_listing((mcp_mgr_t *)e->mcp);
+        check(tl->n == 1, "vision: flag back on re-adds the entry");
+        engine_free(e);
+    }
+
+    /* 2. wire listing carries the tool (and stays clean without it) */
+    {
+        engine_t *e = engine_new(cap_fn, &cap);
+        feed_line(e, "{\"type\":\"llm\",\"endpoint_protocol\":\"openai\","
+                     "\"api_base\":\"http://x/v1\",\"model\":\"m\","
+                     "\"inference_options\":{\"stream\":false,"
+                     "\"temperature\":0.5}}");
+        feed_line(e, "{\"type\":\"user\",\"content\":["
+                     "{\"type\":\"text\",\"text\":\"look\"}]}");
+        engine_set_vision(e, true);
+        wire_t *w = wire_openai_new(PROTO_OPENAI);
+        check(w->build(w, e) == 0, "vision: wire build with flag");
+        check(strstr(w->last_body.data, "\"load_image\"") != NULL,
+              "vision: wire body carries load_image");
+        w->destroy(w);
+        engine_free(e);
+
+        e = engine_new(cap_fn, &cap);
+        feed_line(e, "{\"type\":\"llm\",\"endpoint_protocol\":\"openai\","
+                     "\"api_base\":\"http://x/v1\",\"model\":\"m\","
+                     "\"inference_options\":{\"stream\":false,"
+                     "\"temperature\":0.5}}");
+        feed_line(e, "{\"type\":\"user\",\"content\":["
+                     "{\"type\":\"text\",\"text\":\"look\"}]}");
+        w = wire_openai_new(PROTO_OPENAI);
+        check(w->build(w, e) == 0, "vision: wire build without flag");
+        check(strstr(w->last_body.data, "\"load_image\"") == NULL,
+              "vision: no flag -> no load_image in body");
+        w->destroy(w);
+        engine_free(e);
+    }
+
+    /* 3. the call: image lands as a user record after the tresp */
+    {
+        char path[64];
+        int fd = vision_tmp_png(path);
+        check(fd >= 0, "vision: tmp png fixture");
+        if (fd < 0) { cap_destroy(&cap); return; }
+        char req[512];
+        snprintf(req, sizeof req,
+                 "{\"type\":\"tool_request\",\"id\":\"t1\","
+                 "\"tool\":\"load_image\",\"arguments\":{\"path\":\"%s\"}}",
+                 path);
+        fturn_t turns[] = {
+            { .recs = (const char *[]){ req }, .nrecs = 1,
+              .kind = TURN_TOOLS, .abort_after = -1 },
+            { .recs = (const char *[]){
+                  "{\"type\":\"response\",\"text\":\"done\","
+                  "\"partial\":false}" },
+              .nrecs = 1, .kind = TURN_FINAL, .abort_after = -1 },
+        };
+        g_factory_wire = fwire_new(turns, 2);
+        engine_t *e = engine_new(cap_fn, &cap);
+        e->wire_factory = script_factory;
+        e->inq = queue_new();
+        engine_set_vision(e, true);
+        feed_line(e, "{\"type\":\"llm\",\"endpoint_protocol\":\"openai\","
+                     "\"api_base\":\"http://x/v1\",\"model\":\"m\","
+                     "\"inference_options\":{\"stream\":false,"
+                     "\"temperature\":0.5}}");
+        feed_line(e, "{\"type\":\"user\",\"content\":["
+                     "{\"type\":\"text\",\"text\":\"look\"}]}");
+        check(engine_start(e) == 0, "vision: start ok");
+        cap_reset(&cap);
+        int rc = engine_run(e);
+        check(rc == EXIT_OK, "vision: run exits 0");
+        ssize_t itresp = -1;
+        for (size_t i = 0; i < e->tr.n; i++) {
+            trec_t *t = e->tr.v[i];
+            if (t->kind == T_TREQ && t->tool &&
+                !strcmp(t->tool, "load_image"))
+                check(true, "vision: transcript has load_image treq");
+            else if (t->kind == T_TRESP && t->text &&
+                     strstr(t->text, "image attached"))
+                itresp = (ssize_t)i;
+        }
+        check(itresp >= 0, "vision: tresp says image attached");
+        /* the last user record (index 0 is the initial prompt) carries
+           the image block */
+        ssize_t last_user = -1;
+        for (size_t i = e->tr.n; i > 0; i--)
+            if (e->tr.v[i - 1]->kind == T_USER) {
+                last_user = (ssize_t)i - 1;
+                break;
+            }
+        check(last_user > itresp, "vision: image user after tresp");
+        bool has_img = false;
+        if (last_user > 0) {
+            const cJSON *content = cJSON_GetObjectItemCaseSensitive(
+                e->tr.v[last_user]->tree, "content");
+            const cJSON *it = content ? content->child : NULL;
+            for (; it; it = it->next) {
+                const cJSON *src = cJSON_GetObjectItemCaseSensitive(
+                    it, "source");
+                const cJSON *mt = src ? cJSON_GetObjectItemCaseSensitive(
+                                            src, "media_type")
+                                      : NULL;
+                if (mt && cJSON_IsString(mt) &&
+                    !strcmp(mt->valuestring, "image/png"))
+                    has_img = true;
+            }
+        }
+        check(has_img, "vision: image user has png image block");
+        /* no other user records after the image one */
+        bool extra = false;
+        for (size_t i = (size_t)last_user + 1; i < e->tr.n; i++)
+            if (e->tr.v[i]->kind == T_USER) extra = true;
+        check(!extra, "vision: no extra user after the image record");
+        engine_free(e);
+        cap_reset(&cap);
+        unlink(path);
+    }
+
+    /* 4. bad path: is_error tresp, no user record added */
+    {
+        fturn_t turns[] = {
+            { .recs = (const char *[]){
+                  "{\"type\":\"tool_request\",\"id\":\"t1\","
+                  "\"tool\":\"load_image\","
+                  "\"arguments\":{\"path\":\"/nonexistent/x.png\"}}" },
+              .nrecs = 1, .kind = TURN_TOOLS, .abort_after = -1 },
+            { .recs = (const char *[]){
+                  "{\"type\":\"response\",\"text\":\"done\","
+                  "\"partial\":false}" },
+              .nrecs = 1, .kind = TURN_FINAL, .abort_after = -1 },
+        };
+        g_factory_wire = fwire_new(turns, 2);
+        engine_t *e = engine_new(cap_fn, &cap);
+        e->wire_factory = script_factory;
+        e->inq = queue_new();
+        engine_set_vision(e, true);
+        feed_line(e, "{\"type\":\"llm\",\"endpoint_protocol\":\"openai\","
+                     "\"api_base\":\"http://x/v1\",\"model\":\"m\","
+                     "\"inference_options\":{\"stream\":false,"
+                     "\"temperature\":0.5}}");
+        feed_line(e, "{\"type\":\"user\",\"content\":["
+                     "{\"type\":\"text\",\"text\":\"look\"}]}");
+        check(engine_start(e) == 0, "vision: start ok (bad path)");
+        cap_reset(&cap);
+        int rc = engine_run(e);
+        check(rc == EXIT_OK, "vision: bad path exits 0");
+        ssize_t itresp = -1;
+        bool is_err = false;
+        int nuser = 0;
+        for (size_t i = 0; i < e->tr.n; i++) {
+            trec_t *t = e->tr.v[i];
+            if (t->kind == T_USER) nuser++;
+            if (t->kind == T_TRESP) itresp = (ssize_t)i;
+        }
+        if (itresp >= 0) {
+            trec_t *t = e->tr.v[itresp];
+            is_err = t->is_error;
+            check(t->text && strstr(t->text, "cannot read image") != NULL,
+                  "vision: bad path tresp names the read failure");
+            check(rec_bool(t->tree, "is_error", false),
+                  "vision: bad path tresp is_error");
+        }
+        check(is_err || itresp < 0,
+              "vision: bad path tresp flagged is_error");
+        check(nuser == 1, "vision: bad path adds no user record");
+        engine_free(e);
+        cap_reset(&cap);
+    }
+
+    /* 5. missing path argument */
+    {
+        fturn_t turns[] = {
+            { .recs = (const char *[]){
+                  "{\"type\":\"tool_request\",\"id\":\"t1\","
+                  "\"tool\":\"load_image\",\"arguments\":{}}" },
+              .nrecs = 1, .kind = TURN_TOOLS, .abort_after = -1 },
+            { .recs = (const char *[]){
+                  "{\"type\":\"response\",\"text\":\"done\","
+                  "\"partial\":false}" },
+              .nrecs = 1, .kind = TURN_FINAL, .abort_after = -1 },
+        };
+        g_factory_wire = fwire_new(turns, 2);
+        engine_t *e = engine_new(cap_fn, &cap);
+        e->wire_factory = script_factory;
+        e->inq = queue_new();
+        engine_set_vision(e, true);
+        feed_line(e, "{\"type\":\"llm\",\"endpoint_protocol\":\"openai\","
+                     "\"api_base\":\"http://x/v1\",\"model\":\"m\","
+                     "\"inference_options\":{\"stream\":false,"
+                     "\"temperature\":0.5}}");
+        feed_line(e, "{\"type\":\"user\",\"content\":["
+                     "{\"type\":\"text\",\"text\":\"look\"}]}");
+        engine_start(e);
+        cap_reset(&cap);
+        engine_run(e);
+        bool ok = false;
+        for (size_t i = 0; i < e->tr.n; i++) {
+            trec_t *t = e->tr.v[i];
+            if (t->kind == T_TRESP && t->text &&
+                strstr(t->text, "missing 'path'"))
+                ok = true;
+        }
+        check(ok, "vision: missing path named in tresp");
+        engine_free(e);
+        cap_reset(&cap);
+    }
+
+    /* 6. no flag: the request falls through to mcp_call's guard */
+    {
+        fturn_t turns[] = {
+            { .recs = (const char *[]){
+                  "{\"type\":\"tool_request\",\"id\":\"t1\","
+                  "\"tool\":\"load_image\",\"arguments\":{}}" },
+              .nrecs = 1, .kind = TURN_TOOLS, .abort_after = -1 },
+            { .recs = (const char *[]){
+                  "{\"type\":\"response\",\"text\":\"done\","
+                  "\"partial\":false}" },
+              .nrecs = 1, .kind = TURN_FINAL, .abort_after = -1 },
+        };
+        g_factory_wire = fwire_new(turns, 2);
+        engine_t *e = engine_new(cap_fn, &cap);
+        e->wire_factory = script_factory;
+        e->inq = queue_new();
+        feed_line(e, "{\"type\":\"llm\",\"endpoint_protocol\":\"openai\","
+                     "\"api_base\":\"http://x/v1\",\"model\":\"m\","
+                     "\"inference_options\":{\"stream\":false,"
+                     "\"temperature\":0.5}}");
+        feed_line(e, "{\"type\":\"user\",\"content\":["
+                     "{\"type\":\"text\",\"text\":\"look\"}]}");
+        check(engine_start(e) == 0, "vision: start ok (no flag)");
+        cap_reset(&cap);
+        int rc = engine_run(e);
+        check(rc == EXIT_OK, "vision: no-flag run exits 0 (no crash)");
+        bool err = false, named = false;
+        for (size_t i = 0; i < e->tr.n; i++) {
+            trec_t *t = e->tr.v[i];
+            if (t->kind == T_TRESP && t->is_error) {
+                err = true;
+                if (t->text && (strstr(t->text, "no server prefix") ||
+                                strstr(t->text, "engine-internal")))
+                    named = true;
+            }
+        }
+        check(err, "vision: no-flag tresp is_error");
+        check(named, "vision: no-flag tresp names the guard");
+        engine_free(e);
+        cap_reset(&cap);
+    }
+
+    /* 7. direct mcp_call guard on the engine-internal entry */
+    {
+        engine_t *e = engine_new(cap_fn, &cap);
+        engine_set_vision(e, true);
+        buf_t out;
+        buf_init(&out);
+        char err[256];
+        bool ie = false;
+        int rc = mcp_call((mcp_mgr_t *)e->mcp, "load_image",
+                          cJSON_Parse("{\"path\":\"x\"}"), &out, &ie, err,
+                          sizeof err, -1, NULL, NULL, NULL);
+        check(rc == 1, "vision: direct mcp_call returns 1");
+        check(strstr(err, "engine-internal") != NULL,
+              "vision: mcp_call err names engine-internal");
+        buf_free(&out);
+        engine_free(e);
+    }
+
+    /* 8. wire body after the load: the image user serializes as parts */
+    {
+        char path[64];
+        if (vision_tmp_png(path) < 0) { cap_destroy(&cap); return; }
+        char req[512];
+        snprintf(req, sizeof req,
+                 "{\"type\":\"tool_request\",\"id\":\"t1\","
+                 "\"tool\":\"load_image\",\"arguments\":{\"path\":\"%s\"}}",
+                 path);
+        fturn_t turns[] = {
+            { .recs = (const char *[]){ req }, .nrecs = 1,
+              .kind = TURN_TOOLS, .abort_after = -1 },
+            { .recs = (const char *[]){
+                  "{\"type\":\"response\",\"text\":\"done\","
+                  "\"partial\":false}" },
+              .nrecs = 1, .kind = TURN_FINAL, .abort_after = -1 },
+        };
+        g_factory_wire = fwire_new(turns, 2);
+        engine_t *e = engine_new(cap_fn, &cap);
+        e->wire_factory = script_factory;
+        e->inq = queue_new();
+        engine_set_vision(e, true);
+        feed_line(e, "{\"type\":\"llm\",\"endpoint_protocol\":\"openai\","
+                     "\"api_base\":\"http://x/v1\",\"model\":\"m\","
+                     "\"inference_options\":{\"stream\":false,"
+                     "\"temperature\":0.5}}");
+        feed_line(e, "{\"type\":\"user\",\"content\":["
+                     "{\"type\":\"text\",\"text\":\"look\"}]}");
+        engine_start(e);
+        cap_reset(&cap);
+        engine_run(e);
+        wire_t *w = wire_openai_new(PROTO_OPENAI);
+        check(w->build(w, e) == 0, "vision: post-load wire build");
+        buf_t p;
+        buf_init(&p);
+        body_messages(w->last_body.data, &p);
+        check(strstr(p.data, "\"type\":\"image_url\"") != NULL,
+              "vision: post-load body has image_url part");
+        check(strstr(p.data, "data:image/png;base64,") != NULL,
+              "vision: post-load body has png data url");
+        buf_free(&p);
+        w->destroy(w);
+        engine_free(e);
+        cap_reset(&cap);
+        unlink(path);
+    }
+
+    /* 9. CLI parse */
+    {
+        call_cfg_t c;
+        char err[256];
+        char a1[] = "--openai", a2[] = "http://x", a3[] = "--prompt",
+             a4[] = "q", a5[] = "--vision";
+        char *argv1[] = { a1, a2, a3, a4, a5 };
+        memset(&c, 0, sizeof c);
+        int rc = call_parse_ex(5, argv1, &c, err, sizeof err, true);
+        check(rc == 0, "vision: --vision parses");
+        check(c.vision, "vision: cfg.vision set");
+        call_cfg_free(&c);
+
+        char b1[] = "--openai", b2[] = "http://x", b3[] = "--vision",
+             b4[] = "--vision", b5[] = "--prompt", b6[] = "q";
+        char *argv2[] = { b1, b2, b3, b4, b5, b6 };
+        memset(&c, 0, sizeof c);
+        rc = call_parse_ex(6, argv2, &c, err, sizeof err, true);
+        check(rc == 1, "vision: --vision twice is a usage error");
+        check(strstr(err, "given twice") != NULL,
+              "vision: twice err says given twice");
+        call_cfg_free(&c);
+    }
+
+    cap_destroy(&cap);
+}
+
 static void test_state_machine(void) {
     cap_t cap = { 0 };
 
@@ -3807,7 +4188,7 @@ static void test_agent_tool(void) {
         dup2(out_pipe[1], 1);
         close(in_pipe[0]); close(in_pipe[1]);
         close(out_pipe[0]); close(out_pipe[1]);
-        int rc = cmd_agent("/tmp/llmkit-test-agent-seed.jsonl");
+        int rc = cmd_agent(3, (char *[]){"llmkit", "agent-as-tool", "/tmp/llmkit-test-agent-seed.jsonl"});
         _exit(rc == 0 ? 0 : 1);
     }
     close(in_pipe[0]);
@@ -3955,7 +4336,7 @@ static void test_agent_tool(void) {
             if (mf) dup2(fileno(mf), 2);
             close(min_pipe[0]); close(min_pipe[1]);
             close(mout_pipe[0]); close(mout_pipe[1]);
-            int rc = cmd_agent("/tmp/llmkit-test-agent-mirror-seed.jsonl");
+            int rc = cmd_agent(3, (char *[]){"llmkit", "agent-as-tool", "/tmp/llmkit-test-agent-mirror-seed.jsonl"});
             _exit(rc == 0 ? 0 : 1);
         }
         close(min_pipe[0]);
@@ -4047,7 +4428,7 @@ static void agent_stream_case(const char *mode, const char *label,
         dup2(out_pipe[1], 1);
         close(in_pipe[0]); close(in_pipe[1]);
         close(out_pipe[0]); close(out_pipe[1]);
-        int rc = cmd_agent("/tmp/llmkit-test-agent-stream-seed.jsonl");
+        int rc = cmd_agent(3, (char *[]){"llmkit", "agent-as-tool", "/tmp/llmkit-test-agent-stream-seed.jsonl"});
         _exit(rc == 0 ? 0 : 1);
     }
     close(in_pipe[0]);
@@ -7739,7 +8120,7 @@ static void test_terminal_tools(void) {
             dup2(out_pipe[1], 1);
             close(in_pipe[0]); close(in_pipe[1]);
             close(out_pipe[0]); close(out_pipe[1]);
-            int rc3 = cmd_agent("/tmp/llmkit-test-agent-term-seed.jsonl");
+            int rc3 = cmd_agent(3, (char *[]){"llmkit", "agent-as-tool", "/tmp/llmkit-test-agent-term-seed.jsonl"});
             _exit(rc3 == 0 ? 0 : 1);
         }
         close(in_pipe[0]);
@@ -9060,6 +9441,8 @@ int main(void) {
     test_image();
     fprintf(stderr, "selfcheck: vision wire\n");
     test_vision_wire();
+    fprintf(stderr, "selfcheck: vision tool\n");
+    test_vision_tool();
     fprintf(stderr, "selfcheck: state machine\n");
     test_state_machine();
     fprintf(stderr, "selfcheck: exit codes\n");

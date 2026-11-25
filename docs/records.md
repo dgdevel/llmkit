@@ -231,6 +231,14 @@ keep the joined string shape. The anthropic wire passes blocks verbatim.
 from the command line; the repl's `/image <path>` attaches them to the
 next submitted line.
 
+With `--vision` (repl, agent, call, runner, agent-as-tool) the engine
+offers the model a `load_image(path)` tool. A call loads the file and
+appends the image as its own `user` record right after the tool's
+response, so the model sees it on the next round; the tool's own text
+answer is `image attached: <media_type, size>`. Load failures (missing
+file, unknown type, over 5 MiB) answer with an error tool response
+instead - no user record is added.
+
 ## thinking
 
 A reasoning-trace block, emitted while the model thinks. On stdout it arrives as `partial` records, then one final record closing the block. On input (replay) partials concatenate before the final one.

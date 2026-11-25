@@ -2,6 +2,7 @@
    design sec.6) and the shared json-rpc stdio server loop (design sec.9, sec.10). */
 #include "llmkit.h"
 #include "crash_report.h"
+#include "prompts.gen.h"
 
 #include <curl/curl.h>
 #include <errno.h>
@@ -82,6 +83,7 @@ void mcp_kill_all(mcp_mgr_t *m) {
    names every server: the next mcp_reconcile (engine_start) respawns
    the stdio ones, at spawn cwd = the caller's new directory */
 static void listing_rebuild(mcp_mgr_t *m); /* defined below reconcile */
+void mcp_listing_rebuild(mcp_mgr_t *m);     /* public: engine_set_vision */
 void mcp_drop_stdio(mcp_mgr_t *m) {
     for (size_t i = 0; i < m->n;) {
         if (m->v[i]->type != MCP_STDIO) {
@@ -551,6 +553,32 @@ static void listing_rebuild(mcp_mgr_t *m) {
             te->terminal = cfg_marks_terminal(s->cfg, nm);
         }
     }
+    /* the engine-owned load_image tool (the --vision flag): one entry
+       after the servers' tools, srv NULL - run_tool intercepts it */
+    if (m->vision) {
+        if (m->listing.n == m->listing.cap) {
+            m->listing.cap = m->listing.cap ? m->listing.cap * 2 : 16;
+            m->listing.v = realloc(
+                m->listing.v, m->listing.cap * sizeof *m->listing.v);
+        }
+        tool_entry_t *te = &m->listing.v[m->listing.n++];
+        memset(te, 0, sizeof *te);
+        te->tool = cJSON_CreateObject();
+        cJSON_AddStringToObject(te->tool, "name", "load_image");
+        cJSON_AddStringToObject(te->tool, "description",
+                                prompt_mcp_load_image_description);
+        cJSON *schema = cJSON_AddObjectToObject(te->tool, "inputSchema");
+        cJSON_AddStringToObject(schema, "type", "object");
+        cJSON *props = cJSON_AddObjectToObject(schema, "properties");
+        cJSON *p = cJSON_AddObjectToObject(props, "path");
+        cJSON_AddStringToObject(p, "type", "string");
+        cJSON_AddStringToObject(p, "description",
+                                prompt_mcp_load_image_arguments_path);
+        cJSON *req = cJSON_AddArrayToObject(schema, "required");
+        cJSON_AddItemToArray(req, cJSON_CreateString("path"));
+        te->exposed_name = strdup("load_image");
+        te->terminal = false;
+    }
 }
 
 int mcp_reconcile(mcp_mgr_t *m, engine_t *e, const cJSON *tools_record) {
@@ -672,6 +700,8 @@ int mcp_reconcile(mcp_mgr_t *m, engine_t *e, const cJSON *tools_record) {
 
 const tool_listing_t *mcp_listing(mcp_mgr_t *m) { return &m->listing; }
 
+void mcp_listing_rebuild(mcp_mgr_t *m) { listing_rebuild(m); }
+
 bool mcp_tool_is_terminal(mcp_mgr_t *m, const char *tool) {
     for (size_t i = 0; i < m->listing.n; i++)
         if (!strcmp(m->listing.v[i].exposed_name, tool))
@@ -768,10 +798,17 @@ int mcp_call(mcp_mgr_t *m, const char *tool, cJSON *args, buf_t *text_out,
             if (!strcmp(tl->v[i].exposed_name, tool)) {
                 s = tl->v[i].srv;
                 upstream = rec_str(tl->v[i].tool, "name");
-                snprintf(srvname, sizeof srvname, "%s", s->name);
+                if (s) snprintf(srvname, sizeof srvname, "%s", s->name);
                 break;
             }
         if (!s) {
+            /* a listing entry with srv NULL is the engine's own
+               load_image (the --vision flag): run_tool intercepts it, so
+               a call that reaches here is a bug or a forged name */
+            if (upstream) {
+                snprintf(err, errsz, "tool '%s' is engine-internal", tool);
+                return 1;
+            }
             snprintf(err, errsz, "tool '%s' has no server prefix", tool);
             return 1;
         }
