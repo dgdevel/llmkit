@@ -451,6 +451,24 @@ typedef struct tlist {
 void tlist_clear(tlist_t *l);
 bool tlist_ingest(tlist_t *l, cJSON *record_tree); /* false = wrong type */
 
+/* the rebuilt record of a transcript entry: a fresh tree the caller
+   deletes (T_THINK/T_TEXT from their fields, T_USER a duplicate) */
+cJSON *trec_record(const trec_t *t);
+
+/* transcript sizes in bytes: the sum of cJSON_PrintUnformatted over
+   the transcript's records (T_THINK/T_TEXT rebuilt from their fields
+   through the record builders, the same shape store_persist writes) */
+size_t tlist_bytes(const tlist_t *l);
+/* compact the transcript in place with the `compaction` levels: 1 rewrite
+   non-empty tool response text to "content removed", 2 also drop tool
+   requests and responses, 3 also drop thinking. user and response
+   records are never touched. returns the number of records removed;
+   before/after (either may be NULL) receive the byte sizes. */
+size_t tlist_compact(tlist_t *l, int level, size_t *before, size_t *after);
+/* the size tlist_compact at `level` would leave, on the list as it
+   stands (no mutation, no block merge): the repl's preview */
+size_t tlist_bytes_level(const tlist_t *l, int level);
+
 /* group iteration over a transcript: groups are
    G_USER (one T_USER) or G_ASSIST (block/req run + following TRESP run) */
 enum { G_DONE = 0, G_USER, G_ASSIST };

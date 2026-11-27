@@ -1061,6 +1061,8 @@ static const struct {
     { "/helper-thinking", "pick the reasoning effort of the helper" },
     { "/cd", "change the working directory" },
     { "/new", "start a fresh conversation" },
+    { "/compaction",
+      "shrink the conversation: drop tool results, tool calls, reasoning" },
     { "/image", "attach an image to the next message" },
 };
 
@@ -1866,6 +1868,143 @@ static int slash_new(slash_state_t *sl, engine_t *e) {
     return 0;
 }
 
+/* does this transcript entry survive compaction at `level`? the same
+   predicate tlist_compact applies: tool records die at 2, thinking
+   fragments at 3, everything else lives. (the llm_mark recount.) */
+static bool trec_survives(const trec_t *t, int level) {
+    if (level >= 2 && (t->kind == T_TREQ || t->kind == T_TRESP)) return false;
+    if (level >= 3 && t->kind == T_THINK) return false;
+    return true;
+}
+
+/* rewrite the conversation store after an in-place compaction: the file
+   is append-only, so the compacted transcript must be written out whole
+   or the next session's replay would resurrect the dropped records.
+   the pre-compaction bytes move to `store.pre-compaction` (a previous
+   backup is overwritten), then the store is truncated and replayed from
+   the compacted transcript. returns true on success. */
+static bool compaction_rewrite_store(engine_t *e, const char *path) {
+    repl_sink_t *s = e->emit_ctx;
+    if (s->store) { /* closed first: the rewrite owns the file now */
+        fclose(s->store);
+        s->store = NULL;
+    }
+    char bak[4096];
+    snprintf(bak, sizeof bak, "%s.pre-compaction", path);
+    remove(bak);
+    if (rename(path, bak) != 0) return false;
+    FILE *f = fopen(path, "w");
+    if (!f) {
+        rename(bak, path); /* the original back in place */
+        return false;
+    }
+    bool ok = true;
+    for (size_t i = 0; i < e->tr.n && ok; i++) {
+        cJSON *rec = trec_record(e->tr.v[i]);
+        char *p = rec ? cJSON_PrintUnformatted(rec) : NULL;
+        if (!p) {
+            ok = false;
+        } else {
+            size_t n = strlen(p);
+            if (fwrite(p, 1, n, f) != n || fputc('\n', f) == EOF)
+                ok = false;
+            cJSON_free(p);
+        }
+        cJSON_Delete(rec);
+    }
+    if (fflush(f) != 0) ok = false;
+    if (fclose(f) != 0) ok = false;
+    if (!ok) {
+        /* the rewrite failed midway: the original replaces the partial
+           file, nothing is lost */
+        remove(path);
+        rename(bak, path);
+        return false;
+    }
+    /* reopened for append: the session keeps persisting from here */
+    s->store = fopen(path, "a");
+    return s->store != NULL;
+}
+
+/* `/compaction`: measure what each level would leave of the live
+   transcript, let the user pick one, apply it in place. the store (when
+   one runs) is rewritten whole - see compaction_rewrite_store. always
+   0: whatever happens, the session continues. */
+static int slash_compaction(slash_state_t *sl, engine_t *e) {
+    dspy_t *d = sl->d;
+    dspy_ensure_nl(d);
+    if (e->tr.n == 0) {
+        dspy_write_str(d, "nothing to compact\n");
+        return 0;
+    }
+    size_t orig = tlist_bytes(&e->tr);
+    for (int level = 1; level <= 3; level++) {
+        int pct = orig ? (int)((100 * tlist_bytes_level(&e->tr, level) +
+                               orig / 2) / orig)
+                       : 100;
+        char msg[64];
+        int mn = snprintf(msg, sizeof msg, "Level %d: %d%% of original\n",
+                          level, pct);
+        dspy_write(d, msg, (size_t)mn >= sizeof msg ? sizeof msg - 1
+                                                    : (size_t)mn);
+    }
+    dspy_write_str(d, "(1-3 to apply, empty or ctrl-c cancels)\n");
+    /* the pick: the same reader the other pickers ride - on the tty the
+       swapped bold `compact> ` prompt reads through the editor (the
+       restore is the dispatch wrapper's), plain through the plain
+       reader */
+    if (sl->ed) {
+        int r = editor_line(sl->ed);
+        if (r != ED_SUBMIT) return 0; /* cancel/EOF: the session stays */
+        buf_clear(&sl->pick);
+        buf_append(&sl->pick, sl->ed->line.data, sl->ed->line.len);
+    } else if (pick_read_line(sl->pr, &sl->pick))
+        return 0; /* cancel/EOF */
+    const char *s = sl->pick.data;
+    while (*s == ' ' || *s == '\t') s++;
+    size_t ln = strlen(s);
+    while (ln && (s[ln - 1] == ' ' || s[ln - 1] == '\t')) ln--;
+    if (ln != 1 || s[0] < '1' || s[0] > '3') {
+        dspy_write_str(d, "(1, 2 or 3 - canceled)\n");
+        return 0;
+    }
+    int level = s[0] - '0';
+    /* the llm mark is an index: recount it as the survivors of the
+       records it covered before the compaction drops any */
+    size_t mark_old = e->llm_mark, mark_new = 0;
+    for (size_t i = 0; i < mark_old && i < e->tr.n; i++)
+        if (trec_survives(e->tr.v[i], level)) mark_new++;
+    size_t before, after;
+    size_t removed = tlist_compact(&e->tr, level, &before, &after);
+    e->llm_mark = mark_new;
+    e->cfg_epoch++; /* both wires rebuild their cached serialized history */
+    int pct = before ? (int)((100 * after + before / 2) / before) : 100;
+    char msg[160];
+    int mn = snprintf(msg, sizeof msg,
+                      "compacted to level %d: %zu records removed, "
+                      "%zu -> %zu bytes (%d%% of original)\n",
+                      level, removed, before, after, pct);
+    dspy_write(d, msg, (size_t)mn >= sizeof msg ? sizeof msg - 1 : (size_t)mn);
+    /* the store: rewritten whole or the replay resurrects the dropped
+       records (compaction_rewrite_store's comment) */
+    if (sl->o->store && *sl->o->store &&
+        !compaction_rewrite_store(e, sl->o->store)) {
+        repl_sink_t *sink = e->emit_ctx;
+        if (sink->store) {
+            fclose(sink->store);
+            sink->store = NULL;
+        }
+        sink->store_fail = true;
+        char emsg[300 + 64];
+        int en = snprintf(emsg, sizeof emsg,
+                          "cannot rewrite the conversation store '%s'",
+                          sl->o->store);
+        dspy_error_line(d, NULL, emsg);
+        (void)en;
+    }
+    return 0;
+}
+
 /* one input line: a slash command consumed (its own result), any other
    input falls through to the prompt (1). The model picker gets the
    `model> ` prompt; the session's own is restored around it. */
@@ -1982,6 +2121,18 @@ static int slash_dispatch(slash_state_t *sl, const char *s, engine_t *e) {
     }
     if (!strcmp(s, "/new")) {
         slash_new(sl, e);
+        return 0;
+    }
+    if (!strcmp(s, "/compaction")) {
+        if (sl->ed) {
+            /* the bold `compact> ` prompt, styled like the session's own */
+            static _Thread_local char pp[80];
+            snprintf(pp, sizeof pp, "%scompact> ", sl->d->st->bold);
+            sl->ed->prompt = pp;
+        }
+        int r = slash_compaction(sl, e);
+        if (sl->ed) sl->ed->prompt = sl->main_prompt;
+        (void)r; /* whatever happened, the session continues */
         return 0;
     }
     {

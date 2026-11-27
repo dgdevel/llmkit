@@ -630,7 +630,8 @@ int cmd_prettyprint(const char *path) {
 /* the conversation filter: returns 1 emit, 0 drop. Levels cumulative:
    1 rewrite non-empty tool_response text, 2 also drop tool records,
    3 also drop thinking (every fragment). Never touched: user, system,
-   llm, tools, options, response, config and lifecycle records. */
+   llm, tools, options, response, config and lifecycle records.
+   Levels mirror tlist_compact in jsonl.c: change both. */
 static int compaction_record(cJSON *rec, int level) {
     switch (rec_classify(rec)) {
     case R_TOOL_RESPONSE:

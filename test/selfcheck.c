@@ -7393,6 +7393,90 @@ static void test_agent(void) {
                                           took it */
         g_factory_wire = NULL;
     }
+
+    /* ---- /compaction rewrites the store: backup, compacted replay ---- */
+    {
+        const char *spath = "/tmp/llmkit-test-agent/cmp.jsonl";
+        const char *bpath = "/tmp/llmkit-test-agent/cmp.jsonl.pre-compaction";
+        fturn_t tturns[] = {
+            { .recs = (const char *[]){
+                  "{\"type\":\"tool_request\",\"tool\":\"files_search\","
+                  "\"arguments\":{\"path\":\"x\"},\"id\":\"t1\"}"},
+              .nrecs = 1, .kind = TURN_TOOLS, .abort_after = -1 },
+            { .recs = (const char *[]){
+                  "{\"type\":\"response\",\"text\":\"done\","
+                  "\"partial\":false}"},
+              .nrecs = 1, .kind = TURN_FINAL, .abort_after = -1 },
+        };
+        ftool_t ttools[] = { { .tool = "files_search", .text = "big reply",
+                               .rc = 0 } };
+        g_ftools = (ftool_script_t){ ttools, 1, 0 };
+        repl_opts_t co = { .store = spath };
+        g_factory_wire = fwire_new(tturns, 2);
+        repl_cfg(&c, PROTO_OPENAI);
+        repl_out_t cr = repl_session_opt_ft(&c, &co, "hi\n", 3);
+        check(cr.rc == EXIT_OK, "compaction: store session exits 0");
+        repl_session_free(&cr);
+        call_cfg_free(&c);
+        {
+            FILE *sf = fopen(spath, "r");
+            bool has_resp = false;
+            char lb[512];
+            while (sf && fgets(lb, sizeof lb, sf))
+                if (strstr(lb, "big reply")) has_resp = true;
+            if (sf) fclose(sf);
+            check(has_resp, "compaction: the store holds the tool reply");
+        }
+        /* the second session: replay, then /compaction at level 2 */
+        g_ftools = (ftool_script_t){ ttools, 1, 0 };
+        g_factory_wire = fwire_new(tturns, 2);
+        repl_cfg(&c, PROTO_OPENAI);
+        cr = repl_session_opt_ft(&c, &co, "/compaction\n2\n", 14);
+        check(cr.rc == EXIT_OK, "compaction: compacting session exits 0");
+        check(strstr(cr.ob, "Level 1:") != NULL &&
+                  strstr(cr.ob, "Level 2:") != NULL &&
+                  strstr(cr.ob, "Level 3:") != NULL,
+              "compaction: the three levels list");
+        check(strstr(cr.ob, "compacted to level 2") != NULL,
+              "compaction: level 2 applied and reported");
+        repl_session_free(&cr);
+        call_cfg_free(&c);
+        fwire_destroy(g_factory_wire); /* slash only: never taken */
+        g_factory_wire = NULL;
+        {
+            FILE *sf = fopen(spath, "r");
+            bool resp_gone = true, user_kept = false, text_kept = false;
+            char lb[512];
+            while (sf && fgets(lb, sizeof lb, sf)) {
+                if (strstr(lb, "tool_response") || strstr(lb, "tool_request"))
+                    resp_gone = false;
+                if (strstr(lb, "\"type\":\"user\"")) user_kept = true;
+                if (strstr(lb, "done")) text_kept = true;
+            }
+            if (sf) fclose(sf);
+            check(sf && resp_gone && user_kept && text_kept,
+                  "compaction: the store is rewritten without tool records");
+        }
+        {
+            FILE *bf = fopen(bpath, "r");
+            bool orig = false;
+            char lb[512];
+            while (bf && fgets(lb, sizeof lb, bf))
+                if (strstr(lb, "big reply")) orig = true;
+            if (bf) fclose(bf);
+            check(bf && orig, "compaction: the backup keeps the original");
+        }
+        /* the third session replays the compacted store: no tool traffic */
+        repl_cfg(&c, PROTO_OPENAI);
+        cr = repl_session_opt(&c, &co, "", 0);
+        check(cr.rc == EXIT_OK && strstr(cr.ob, "done") != NULL &&
+                  strstr(cr.ob, "big reply") == NULL,
+              "compaction: the compacted store replays clean");
+        repl_session_free(&cr);
+        call_cfg_free(&c);
+        fwire_destroy(g_factory_wire); /* replay only: never taken */
+        g_factory_wire = NULL;
+    }
     system("rm -rf /tmp/llmkit-test-agent");
 }
 
@@ -9609,6 +9693,168 @@ static void test_compaction(void) {
 #undef RUN
 }
 
+/* the shared ingest vector of test_tlist_compact: user, thinking
+   partial+final(sig) (merged on ingest: one T_THINK), response
+   partial+final (merged: one T_TEXT "a-part done"), tool_request,
+   tool_response, user2, response2 - 7 entries. */
+static const char *const tc_recs[] = {
+    "{\"type\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"q1\"}]}",
+    "{\"type\":\"thinking\",\"text\":\"th\",\"partial\":true}",
+    "{\"type\":\"thinking\",\"text\":\"\",\"partial\":false,"
+    "\"signature\":\"sig\"}",
+    "{\"type\":\"response\",\"text\":\"a-part\",\"partial\":true}",
+    "{\"type\":\"response\",\"text\":\" done\",\"partial\":false}",
+    "{\"type\":\"tool_request\",\"tool\":\"get\",\"arguments\":{},"
+    "\"id\":\"c1\"}",
+    "{\"type\":\"tool_response\",\"id\":\"c1\",\"text\":\"big long tool "
+    "output, far more bytes than the rewrite leaves, so level 1 shrinks\"}",
+    "{\"type\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"q2\"}]}",
+    "{\"type\":\"response\",\"text\":\"a2\",\"partial\":false}",
+};
+static const size_t tc_nrecs = sizeof tc_recs / sizeof tc_recs[0];
+
+/* a fresh transcript from the vector above (each level's own copy) */
+static void tc_ingest(tlist_t *l) {
+    memset(l, 0, sizeof *l);
+    for (size_t i = 0; i < tc_nrecs; i++) {
+        cJSON *rec = jsonl_parse_line(tc_recs[i]);
+        check(rec != NULL, "tlist compact: vector line parses");
+        if (rec) {
+            check(tlist_ingest(l, rec), "tlist compact: ingest");
+            cJSON_Delete(rec); /* ingest duplicated what it needs */
+        }
+    }
+}
+
+static void test_tlist_compact(void) {
+    /* the byte size: matches a manual sum over trec_record */
+    {
+        tlist_t l;
+        tc_ingest(&l);
+        size_t b0 = tlist_bytes(&l);
+        check(b0 > 0, "tlist compact: bytes positive");
+        size_t sum = 0;
+        for (size_t i = 0; i < l.n; i++) {
+            cJSON *rec = trec_record(l.v[i]);
+            char *s = cJSON_PrintUnformatted(rec);
+            sum += strlen(s) + 1;
+            cJSON_free(s);
+            cJSON_Delete(rec);
+        }
+        check(b0 == sum, "tlist compact: bytes equal manual sum");
+        tlist_clear(&l);
+    }
+    /* the preview (tlist_bytes_level) is exactly what tlist_compact
+       lands on: the repl's percentages match the report it prints */
+    for (int level = 1; level <= 3; level++) {
+        tlist_t l;
+        tc_ingest(&l);
+        size_t preview = tlist_bytes_level(&l, level);
+        size_t before = 0, after = 0;
+        tlist_compact(&l, level, &before, &after);
+        check(preview == after, "tlist compact: preview equals the result");
+        tlist_clear(&l);
+    }
+    /* level 1: nothing dropped, the tool response text rewritten */
+    {
+        tlist_t l;
+        tc_ingest(&l);
+        size_t before, after;
+        size_t removed = tlist_compact(&l, 1, &before, &after);
+        check(removed == 0, "tlist compact: level 1 removes nothing");
+        check(after < before, "tlist compact: level 1 shrinks");
+        bool rewrote = false;
+        int nuser = 0, nthink = 0;
+        for (size_t i = 0; i < l.n; i++) {
+            trec_t *t = l.v[i];
+            if (t->kind == T_USER) nuser++;
+            else if (t->kind == T_THINK) nthink++;
+            else if (t->kind == T_TRESP &&
+                     t->text && !strcmp(t->text, "content removed"))
+                rewrote = true;
+        }
+        check(rewrote, "tlist compact: level 1 rewrites tool response");
+        check(nuser == 2, "tlist compact: level 1 keeps users");
+        check(nthink == 1, "tlist compact: level 1 keeps merged thinking");
+        tlist_clear(&l);
+    }
+    /* level 2: the tool pair drops */
+    {
+        tlist_t l;
+        tc_ingest(&l);
+        size_t before, after;
+        size_t removed = tlist_compact(&l, 2, &before, &after);
+        check(removed == 2, "tlist compact: level 2 removes the tool pair");
+        check(after < before, "tlist compact: level 2 shrinks");
+        bool only = true;
+        for (size_t i = 0; i < l.n; i++)
+            if (l.v[i]->kind == T_TREQ || l.v[i]->kind == T_TRESP) only = false;
+        check(only, "tlist compact: level 2 leaves no tool records");
+        tlist_clear(&l);
+    }
+    /* level 3: thinking goes too, the merged response text survives */
+    {
+        tlist_t l;
+        tc_ingest(&l);
+        size_t before, after;
+        size_t removed = tlist_compact(&l, 3, &before, &after);
+        check(removed == 3, "tlist compact: level 3 removes 3");
+        check(after < before, "tlist compact: level 3 shrinks");
+        bool only = true;
+        trec_t *first_text = NULL;
+        for (size_t i = 0; i < l.n; i++) {
+            if (l.v[i]->kind != T_USER && l.v[i]->kind != T_TEXT) only = false;
+            if (l.v[i]->kind == T_TEXT && !first_text) first_text = l.v[i];
+        }
+        check(only, "tlist compact: level 3 leaves users+responses");
+        check(first_text && first_text->text &&
+                  !strcmp(first_text->text, "a-part done"),
+              "tlist compact: merged response text survives");
+        tlist_clear(&l);
+    }
+    /* trec_record round trip: the thinking final's signature and closedness */
+    {
+        tlist_t l;
+        tc_ingest(&l);
+        trec_t *th = NULL;
+        for (size_t i = 0; i < l.n; i++)
+            if (l.v[i]->kind == T_THINK && l.v[i]->complete) th = l.v[i];
+        check(th != NULL, "tlist compact: a complete thinking entry");
+        cJSON *rec = trec_record(th);
+        const cJSON *sig =
+            cJSON_GetObjectItemCaseSensitive(rec, "signature");
+        const cJSON *part = cJSON_GetObjectItemCaseSensitive(rec, "partial");
+        check(cJSON_IsString(sig) && sig->valuestring &&
+                  !strcmp(sig->valuestring, "sig"),
+              "tlist compact: trec_record signature round trip");
+        check(cJSON_IsBool(part) && !cJSON_IsTrue(part),
+              "tlist compact: trec_record partial false");
+        cJSON_Delete(rec);
+        tlist_clear(&l);
+    }
+    /* the slash flow through the repl harness: a turn lands in the
+       transcript, /compaction lists the levels, the pick of 3 applies
+       and reports. no store (sl->o->store NULL): skipped silently. */
+    {
+        fturn_t turns[] = {
+            { .recs = (const char *[]){
+                  "{\"type\":\"response\",\"text\":\"ok\",\"partial\":false}"},
+              .nrecs = 1, .kind = TURN_FINAL, .abort_after = -1 },
+        };
+        g_factory_wire = fwire_new(turns, 1);
+        call_cfg_t c;
+        repl_cfg(&c, PROTO_OPENAI);
+        repl_out_t r = repl_session(&c, "hi\n/compaction\n3\n", 16);
+        check(r.rc == EXIT_OK, "tlist compact: slash session exits 0");
+        check(strstr(r.ob ? r.ob : "", "Level 1:") != NULL,
+              "tlist compact: slash lists level 1");
+        check(strstr(r.ob ? r.ob : "", "compacted to level 3") != NULL,
+              "tlist compact: slash applies level 3");
+        repl_session_free(&r);
+        call_cfg_free(&c);
+    }
+}
+
 int main(void) {
     setenv("LLMKIT_EXEC_WAIT_MS", "2000", 1); /* process_exec tests: fast */
     signals_init();
@@ -9665,6 +9911,8 @@ int main(void) {
     fprintf(stderr, "selfcheck: llm proxy\n");
     test_llm_proxy();
     fprintf(stderr, "selfcheck: compaction\n");
+    fprintf(stderr, "selfcheck: tlist compact\n");
+    test_tlist_compact();
     test_compaction();
     fprintf(stderr, "selfcheck: html tools\n");
     test_html();

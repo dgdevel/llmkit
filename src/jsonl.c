@@ -599,6 +599,100 @@ bool tlist_ingest(tlist_t *l, cJSON *record) {
     }
 }
 
+/* the rebuilt record of a transcript entry: a fresh tree the caller
+   deletes - the shape store_persist writes, the shape the sizes count */
+cJSON *trec_record(const trec_t *t) {
+    switch (t->kind) {
+    case T_USER:
+        return cJSON_Duplicate(t->tree, 1);
+    case T_TREQ:
+        return rec_tool_request(t->tool, t->args, t->id);
+    case T_TRESP:
+        return rec_tool_response(t->id, t->text, t->is_error);
+    case T_THINK:
+        return t->complete ? rec_thinking_final(t->text, t->signature)
+                           : rec_text("thinking", t->text, true);
+    default: /* T_TEXT */
+        return rec_text("response", t->text, !t->complete);
+    }
+}
+
+/* one transcript entry's serialized size: the record plus its newline */
+static size_t trec_bytes(const trec_t *t) {
+    cJSON *rec = trec_record(t);
+    char *s = rec ? cJSON_PrintUnformatted(rec) : NULL;
+    size_t n = s ? strlen(s) + 1 : 0;
+    cJSON_free(s);
+    cJSON_Delete(rec);
+    return n;
+}
+
+/* transcript sizes in bytes: the sum of cJSON_PrintUnformatted over the
+   transcript's records (T_THINK/T_TEXT rebuilt from their fields through
+   the record builders, the same shape store_persist writes) */
+size_t tlist_bytes(const tlist_t *l) {
+    size_t n = 0;
+    for (size_t i = 0; i < l->n; i++) n += trec_bytes(l->v[i]);
+    return n;
+}
+
+/* compact the transcript in place with the `compaction` levels: 1 rewrite
+   non-empty tool response text to "content removed", 2 also drop tool
+   requests and responses, 3 also drop thinking. user and response records
+   are never touched. levels mirror compaction_record in pretty.c: change
+   both. returns the number of records removed; before/after (either
+   may be NULL) receive the byte sizes. */
+size_t tlist_compact(tlist_t *l, int level, size_t *before, size_t *after) {
+    if (before) *before = tlist_bytes(l);
+    size_t n_before = l->n, k = 0;
+    for (size_t i = 0; i < l->n; i++) {
+        trec_t *t = l->v[i];
+        bool drop =
+            (level >= 2 && (t->kind == T_TREQ || t->kind == T_TRESP)) ||
+            (level >= 3 && t->kind == T_THINK);
+        if (drop) {
+            trec_free(t);
+            continue;
+        }
+        if (level == 1 && t->kind == T_TRESP && t->text && t->text[0]) {
+            free(t->text);
+            t->text = strdup("content removed");
+            if (t->tree) {
+                cJSON *x = cJSON_GetObjectItemCaseSensitive(t->tree, "text");
+                if (cJSON_IsString(x))
+                    cJSON_SetValuestring(x, "content removed");
+            }
+        }
+        l->v[k++] = t;
+    }
+    l->n = k; /* no realloc down: the capacity keeps */
+    if (after) *after = tlist_bytes(l);
+    return n_before - k;
+}
+
+/* the size tlist_compact at `level` would leave, measured on the list
+   as it stands: the survivors' records with the level's rewrite applied
+   to a copy. the preview the repl shows before the user picks - the
+   same arithmetic tlist_compact lands on, no merge, no mutation */
+size_t tlist_bytes_level(const tlist_t *l, int level) {
+    size_t n = 0;
+    for (size_t i = 0; i < l->n; i++) {
+        const trec_t *t = l->v[i];
+        if (level >= 2 && (t->kind == T_TREQ || t->kind == T_TRESP)) continue;
+        if (level >= 3 && t->kind == T_THINK) continue;
+        if (level == 1 && t->kind == T_TRESP && t->text && t->text[0]) {
+            cJSON *rec = rec_tool_response(t->id, "content removed", t->is_error);
+            char *s = rec ? cJSON_PrintUnformatted(rec) : NULL;
+            n += s ? strlen(s) + 1 : 0;
+            cJSON_free(s);
+            cJSON_Delete(rec);
+            continue;
+        }
+        n += trec_bytes(t);
+    }
+    return n;
+}
+
 /* ---- grouping ---- */
 
 void group_begin(group_iter_t *g, const tlist_t *l) {
