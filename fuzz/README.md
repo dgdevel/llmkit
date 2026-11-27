@@ -52,13 +52,26 @@ Write corpus growth to `fuzz/out/<name>/` (gitignored) and keep
   parser. Remote DoS via `web_fetch` on any page containing it. Fixed
   (consume the stray `=`); the regressor is kept as
   `fuzz/seeds/html/3.txt`.
-- glibc `regcomp` DFA blowup: ~70 bytes of `[\++++...` pattern make
-  glibc allocate >2GB in `regcomp` (reached through
-  `builtin_regex_match`). glibc bug class, not project code; the
-  artifact lives in the fuzzing logs (oom-*). Mitigations: none in
-  project code (pattern length already capped at tool level by the
-  harness); consider a regcomp timeout or a bounded regex engine
-  upstream.
+- glibc `regcomp` blowup, reached through `builtin_regex_match`
+  (`fuzz_regex`). glibc's `calc_eclosure` cost is exponential in
+  shapes no real pattern has, and the guard in `src/builtin/util.c`
+  (`rx_size`) now rejects them before `regcomp` runs. Five timeouts
+  in one session, each fixed by one rule:
+  - stacked quantifiers (`a++++++++++++++++++++`, 10.9s): undefined
+    ere, cost ~4x per stacked op. Any stack is rejected.
+  - `{n,m}` on a stack (`x??+{20}` = 5s, `{33}` > 10s): glibc turns m
+    into an exponent. Covered by the stack rule.
+  - a quantifier on a zero-width anchor (`(\<|\>)(\<|\>)(\<|\>)+` x4 =
+    0.85s, x5 = 20s; the `\b` translation spells `(\<|\>)`, native
+    `\b` is just as slow: `(\b)+` x8 = 7s). Semantically a no-op
+    (`(\b)+` = `\b`), rejected.
+  Regressors: `fuzz/seeds/regex/stacked-timeout*.bin`,
+  `anchor-quantified-timeout.bin`. The earlier `[\++++` oom is the
+  stack class too. Rule of thumb when a new one lands: find the
+  minimal shape with plain `regcomp` (not the harness), measure the
+  growth, then reject the shape in `rx_size` - modeling glibc's cost
+  curve numerically does not work (tried: 2x, 4x weights, both
+  bypassed).
 
 ## Findings from the docker bring-up (fuzz_mcp_tools)
 

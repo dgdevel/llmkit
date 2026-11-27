@@ -288,14 +288,15 @@ static char *rx_ere(const char *pat) {
     return buf_steal(&b, NULL);
 }
 
-/* worst-case repetition guard: glibc's regcomp duplicates the token
-   tree per repetition operator, stacked ones multiply (a+++... is 2^n
-   nodes -> gigabytes). the estimate below walks the ere like regcomp
-   does: branches add, nesting multiplies, reps multiply the sub-tree
-   by their bound (stacked +-?* count as 2 each, {n,} as n+1). patterns
-   a person writes stay far under the cap; anything above is rejected
-   with a clear error before libc allocates. */
-#define BM_RX_MAX_EXPANSION (1u << 20)
+/* worst-case repetition guard for glibc's regcomp: branches add,
+   nesting multiplies, {n,m} multiplies the sub-tree by its bound ({n,}
+   as n+1); the total is capped before libc allocates. a quantifier
+   stacked on another (a+++, x??+{33}) is undefined ere that glibc
+   accepts with an exponential calc_eclosure cost (measured: a+16 =
+   0.06s, a+20 = 2s, (\<|\>)++++ > 15s, x??+{20} = 5s - four fuzzer
+   timeouts), so any stack is rejected outright: no real pattern has
+   one, (x+)+ and (a|b)+ are not stacks (the group closes the rep) */
+#define BM_RX_MAX_EXPANSION (1u << 18)
 
 /* true when p points at an {n,m}/{n}/{n,} repetition; on success *end
    is the '}' and n/m the bounds ({n,} gives m = n+1: unbounded reps
@@ -333,20 +334,27 @@ static bool rx_bound(const char *p, unsigned long long *n,
    single atoms, [...] one atom, groups recurse (depth capped: glibc's
    parser recurses too), branches add, a repetition replaces the last
    atom by m copies ({n,} counts as n+1: unbounded, only the cap
-   matters, +-?* as 2 each). returns false when the estimate crosses
-   BM_RX_MAX_EXPANSION or the nesting is absurd; syntax slips go to
-   regcomp which reports them. *end receives the position of the
-   matching ')' (the caller's p++ steps past it), or NUL at the end. */
+   matters, +-?* as 2 each) or a quantifier lands on another one or on
+   a zero-width anchor ((\b)+ = \b, glibc's closure explodes: 4 such
+   groups = 0.85s, 5 = 20s). returns false when the estimate crosses
+   BM_RX_MAX_EXPANSION, a rep is stacked or on an anchor, or the nesting
+   is absurd; syntax slips go to regcomp which reports them. *end
+   receives the position of the matching ')' (the caller's p++ steps
+   past it), or NUL at the end. *anchor (may be NULL) is true when the
+   walked unit is zero-width only. */
 #define BM_RX_MAX_DEPTH 128
 
 static bool rx_size(const char *p, int depth, unsigned long long *count,
-                    const char **end) {
+                    const char **end, bool *anchor) {
     *count = 0;
     unsigned long long cur = 0;   /* atoms so far in this alternative */
     unsigned long long last = 0;  /* atom count of the last atom */
     bool repped = false; /* a rep op already consumed the last atom: a
                             stacked one doubles the sub-tree in glibc's
                             parse_dup_op (a+++... is 2^n nodes) */
+    bool last_anchor = false; /* the last unit is zero-width only: ^ $ \<
+                                 \> or a group of those (\b's spelling) */
+    bool pure = true;   /* every branch so far is anchor-only */
     for (; *p; p++) {
         char c = *p;
         if (c == '\\' && p[1]) {
@@ -354,6 +362,15 @@ static bool rx_size(const char *p, int depth, unsigned long long *count,
             cur++;
             last = 1;
             repped = false;
+            last_anchor = *p == '<' || *p == '>';
+            if (!last_anchor) pure = false;
+            continue;
+        }
+        if (c == '^' || c == '$') {
+            cur++;
+            last = 1;
+            repped = false;
+            last_anchor = true;
             continue;
         }
         if (c == '[') {
@@ -366,21 +383,27 @@ static bool rx_size(const char *p, int depth, unsigned long long *count,
             cur++;
             last = 1;
             repped = false;
+            last_anchor = false;
+            pure = false;
             continue;
         }
         if (c == '(') {
             unsigned long long inner;
+            bool ia = false;
             if (depth >= BM_RX_MAX_DEPTH) return false;
-            if (!rx_size(p + 1, depth + 1, &inner, &p)) return false;
+            if (!rx_size(p + 1, depth + 1, &inner, &p, &ia)) return false;
             cur += inner;
             last = inner ? inner : 1; /* () is an empty but matchable unit */
             repped = false;
+            last_anchor = ia;
+            if (!ia) pure = false;
             if (*p == ')') continue; /* p is at ')', the p++ below steps past it */
             break; /* end of string: group unterminated, regcomp reports */
         }
         if (c == ')' ) {
             *count += cur;
             *end = p;
+            if (anchor) *anchor = pure;
             return true;
         }
         if (c == '|') {
@@ -389,6 +412,7 @@ static bool rx_size(const char *p, int depth, unsigned long long *count,
             cur = 0;
             last = 0;
             repped = false;
+            last_anchor = false;
             continue;
         }
         if (c == '{') {
@@ -397,7 +421,11 @@ static bool rx_size(const char *p, int depth, unsigned long long *count,
             if (rx_bound(p, &n, &m, &q)) {
                 if (last == 0) return false; /* rep on nothing: regcomp
                                                 reports */
-                if (repped) last *= 2; /* stacked on +-?*: doubles */
+                if (last_anchor) return false; /* (\b)+ = \b: glibc's
+                                                   closure explodes */
+                if (repped) return false; /* {n,m} on a rep: undefined
+                                             ere, glibc turns m into an
+                                             exponent (x??+{20} = 5s) */
                 cur = cur - last + m * last;
                 if (cur > BM_RX_MAX_EXPANSION) return false;
                 p = q;
@@ -408,12 +436,11 @@ static bool rx_size(const char *p, int depth, unsigned long long *count,
         }
         if (c == '+' || c == '*' || c == '?') {
             if (last == 0) return false; /* leading rep: regcomp reports */
-            if (repped) { /* stacked: the tree doubles per op */
-                cur = cur + last;
-                last *= 2;
-            } else {
-                cur += last;
-            }
+            if (last_anchor) return false; /* (\b)+ = \b, (\<^$>)+ = ^:
+                                              glibc's closure explodes */
+            if (repped) return false; /* stacked: undefined ere (a+++...),
+                                         glibc's closure cost explodes */
+            cur += last;
             if (cur > BM_RX_MAX_EXPANSION) return false;
             repped = true;
             continue;
@@ -421,9 +448,12 @@ static bool rx_size(const char *p, int depth, unsigned long long *count,
         cur++; /* literal atom */
         last = 1;
         repped = false;
+        last_anchor = false;
+        pure = false;
     }
     *count += cur;
     *end = p;
+    if (anchor) *anchor = pure;
     return *count <= BM_RX_MAX_EXPANSION;
 }
 
@@ -431,12 +461,12 @@ static bool rx_size(const char *p, int depth, unsigned long long *count,
 static bool bm_rx_sane(const char *pat) {
     unsigned long long count;
     const char *end;
-    if (!rx_size(pat, 0, &count, &end)) return false;
+    if (!rx_size(pat, 0, &count, &end, NULL)) return false;
     if (!*end) return true; /* consumed the whole pattern */
     /* stopped at ')': unmatched at top level; count the rest, regcomp
        reports the syntax slip itself */
     unsigned long long rest;
-    return rx_size(end + 1, 0, &rest, &end) && count + rest <= BM_RX_MAX_EXPANSION;
+    return rx_size(end + 1, 0, &rest, &end, NULL) && count + rest <= BM_RX_MAX_EXPANSION;
 }
 
     /* compile a pattern for the file tools; false + err on invalid syntax */

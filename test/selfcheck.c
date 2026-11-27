@@ -2483,6 +2483,56 @@ static void test_builtin(void) {
     check(builtin_regex_match("\\bfile_edit\\b", "file_edit(x)", NULL, 0) &&
               builtin_regex_match("\\bfoo\\b", "  (foo)", NULL, 0),
           "builtin: \\b at string edges");
+    /* the stacked-quantifier guard: a quantifier on another (a+++,
+       x??+{33}) is undefined ere that glibc compiles with an
+       exponential calc_eclosure cost (measured: a+16 = 0.06s, a+20 =
+       2s, (\<|\>)++++ > 15s, x??+{20} = 5s - four fuzzer timeouts); any
+       stack is rejected before regcomp, the non-stack shapes stay */
+    {
+        static const char *const stacks[] = {
+            "a++", "a++++++++++;++++++++++++++++++++z++*+++\xd9\xd9\xd9++",
+            "k+*+", "\\b\\b++++", "x??+{33}", "a+{2}", "a?*", "(a+)+*",
+        };
+        for (size_t i = 0; i < sizeof stacks / sizeof stacks[0]; i++) {
+            snprintf(err, sizeof err, "%s", "");
+            bool m = builtin_regex_match(stacks[i], "x", err, sizeof err);
+            char nm[96];
+            snprintf(nm, sizeof nm, "builtin: stacked quantifier rejected "
+                                    "(%.24s)", stacks[i]);
+            check(!m && strstr(err, "too many repetitions") != NULL, nm);
+        }
+        check(builtin_regex_match("a+", "aaa", NULL, 0) &&
+                  builtin_regex_match("(x+){8}", "xxxxxxxx", NULL, 0) &&
+                  builtin_regex_match("\\bfoo\\b", "a foo b", NULL, 0) &&
+                  builtin_regex_match("(a|b)+c", "ababc", NULL, 0),
+              "builtin: group reps, alternation and \\b still compile");
+        snprintf(err, sizeof err, "%s", "");
+        builtin_regex_match("(ab+)+(cd+){10}", "x", err, sizeof err);
+        check(!err[0], "builtin: a counted repetition on a group compiles");
+        /* a quantifier on a zero-width anchor is a no-op ((\b)+ = \b)
+           and glibc's closure explodes on it: 4 such groups = 0.85s,
+           5 = 20s (the fuzzer's fifth timeout) - rejected like a stack */
+        static const char *const anchors[] = {
+            "(\\b)+", "(\\<|\\>)+", "(\\b){3}", "(\\b\\b\\b)+", "\\b+",
+            "^*", "(^|$)+", "$?",
+        };
+        for (size_t i = 0; i < sizeof anchors / sizeof anchors[0]; i++) {
+            snprintf(err, sizeof err, "%s", "");
+            bool m = builtin_regex_match(anchors[i], "x", err, sizeof err);
+            char nm[96];
+            snprintf(nm, sizeof nm, "builtin: quantified anchor rejected "
+                                    "(%.24s)", anchors[i]);
+            check(!m && strstr(err, "too many repetitions") != NULL, nm);
+        }
+        check(builtin_regex_match("\\bfoo\\b", "a foo b", NULL, 0) &&
+                  builtin_regex_match("(\\bfoo)+", "foofoo", NULL, 0) &&
+                  builtin_regex_match("^a+$", "aaa", NULL, 0) &&
+                  builtin_regex_match("(^|a)+b", "aab", NULL, 0),
+              "builtin: anchors next to literals still compile");
+        snprintf(err, sizeof err, "%s", "");
+        builtin_regex_match("a{1000}", "x", err, sizeof err);
+        check(!err[0], "builtin: a large counted repetition still compiles");
+    }
 
     /* tools/list: every tool present, descriptions bundled (src/prompts) */
     {
