@@ -3375,7 +3375,8 @@ static void test_builtin(void) {
                 "\"seq 1 12\"}",
                 &ie);
     check(!ie && t && strstr(t, "Exit code: 0") &&
-              strstr(t, "To repeat invocation use ") &&
+              !strstr(t, "To repeat invocation use ") &&
+              !strstr(t, ".sh") &&
               strstr(t, "First and last three output lines:\n") &&
               strstr(t, ": 1\n") && strstr(t, ": 2\n") &&
               strstr(t, ": 3\n") && strstr(t, "[...]\n") &&
@@ -3418,6 +3419,34 @@ static void test_builtin(void) {
         check(pf && ef && lines == 12 && elines == 0 && stamped && named,
               "builtin: process temp files split and stamped");
     }
+    free(t);
+
+    /* direct exec: a plain single command runs without a temp script,
+       no repeat line, argv splitting collapses whitespace runs */
+    t = bc_call("process_exec",
+                "{\"cmdline\":\"printf plain-%s-%s one two\"}", &ie);
+    check(!ie && t && strstr(t, "Exit code: 0") &&
+              strstr(t, ": plain-one-two\n") &&
+              !strstr(t, "To repeat invocation use ") &&
+              !strstr(t, ".sh"),
+          "builtin: process_exec direct exec of a plain command");
+    free(t);
+
+    t = bc_call("process_exec",
+                "{\"cmdline\":\"echo   spaced\tout\"}", &ie);
+    check(!ie && t && strstr(t, "Exit code: 0") &&
+              strstr(t, ": spaced out\n") &&
+              !strstr(t, "To repeat invocation use "),
+          "builtin: process_exec direct exec collapses whitespace");
+    free(t);
+
+    /* a missing binary resolves to nothing: the shell path takes it,
+       and sh's own "not found" exit code is 127 */
+    t = bc_call("process_exec",
+                "{\"cmdline\":\"no-such-binary-xyz arg\"}", &ie);
+    check(!ie && t && strstr(t, "Exit code: 127") &&
+              strstr(t, "To repeat invocation use "),
+          "builtin: process_exec missing binary goes through the shell");
     free(t);
 
     /* the cmdline lands verbatim in a temp script, named in the reply;
@@ -3539,8 +3568,10 @@ static void test_builtin(void) {
           "builtin: process_exec recap carries a sane duration");
     free(t);
 
+    /* exit is a shell builtin, no executable to resolve: shell path */
     t = bc_call("process_exec", "{\"cmdline\":\"exit 7\"}", &ie);
     check(!ie && t && strstr(t, "Exit code: 7") &&
+              strstr(t, "To repeat invocation use ") &&
               strstr(t, "Duration: "),
           "builtin: process_exec exit code");
     free(t);

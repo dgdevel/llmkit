@@ -22,8 +22,12 @@
    but partial-line interleave at the boundary is accepted), a detached
    reader stamps each line "HH:MM:SS: " per source pipe, appends it to
    the stream's temp file and rotates
-   a three-line tail. The reply quotes at most three leading and three
-   trailing lines, each cut at 150 bytes (utf-8 safe) with a note. */
+   a three-line tail. On posix a plain single command with no shell
+   syntax, whose first word resolves to an executable file, is
+   executed directly (execvp) with no temp script and no repeat
+   line; everything else goes through the shell script as before.
+   The reply quotes at most three leading and three trailing lines,
+   each cut at 150 bytes (utf-8 safe) with a note. */
 
 #define BM_PROC_WAIT_MS 120000 /* process_exec completion wait */
 #define BM_PROC_WAIT_MAX_S 600 /* process_wait timeout ceiling, seconds */
@@ -62,7 +66,10 @@ typedef struct proc_rec {
     int nhead;
     char *out_path;            /* the temp file with stdout */
     char *err_path;            /* the temp file with stderr */
-    char *script_path;         /* the temp script the cmdline lives in */
+    char *script_path;         /* the temp script the cmdline lives in;
+                                  NULL when the cmdline runs directly */
+    char **exec_argv;          /* NULL-terminated argv for direct exec
+                                  (posix only), freed right after spawn */
     FILE *out;                 /* reader-owned while the reader lives */
     FILE *err;                 /* same, for stderr */
     int out_fd;                /* the stdout pipe, reader-owned */
@@ -440,6 +447,139 @@ static bool proc_mktemp_pair(char *opath, size_t osz, FILE **of,
 #endif
 }
 
+/* whether the cmdline carries shell syntax: quotes, pipes,
+   redirection, expansion, globbing, comments, leading assignment or
+   newline-separated commands. false means "a single command with
+   arguments, safe characters only" - the caller still has to find
+   the executable before running it without the shell. conservative:
+   when in doubt, use the shell */
+static bool proc_needs_shell(const char *s) {
+    if (!*s) return true;
+    bool word_start = true;
+    for (const char *c = s; *c; c++) {
+        if (*c == ' ' || *c == '\t') {
+            word_start = true;
+            continue;
+        }
+        if (strchr("|&;<>()$`\\\"'~#\n", *c)) return true;
+        if (word_start) {
+            /* a leading assignment or a glob means shell */
+            const char *w = c;
+            bool glob = false, sep = false;
+            if (*w == '~') return true;
+            for (; *w && *w != ' ' && *w != '\t'; w++) {
+                if (strchr("*?[", *w)) glob = true;
+                if (*w == '=' && !sep) return true;
+                if (strchr("/.-", *w)) sep = true;
+            }
+            if (glob) return true;
+        }
+        word_start = false;
+    }
+    return false;
+}
+
+/* resolve argv[0] to an executable file, the way a shell's PATH
+   lookup does: a name with a separator is taken as a path, a bare
+   name is searched in PATH (each candidate checked with access(X_OK),
+   so a directory or a non-executable is skipped). posix only, and
+   the reason the direct path is reliable: a shell builtin (exit, cd,
+   test on some systems, echo where no binary exists) has no
+   executable and lands in the shell. returns a malloc'd path, NULL
+   when nothing executable is found */
+#ifndef _WIN32
+static char *proc_resolve_exec(const char *name) {
+    if (!*name) return NULL;
+    if (strchr(name, '/')) {
+        char *r = strdup(name);
+        if (r && BM_ACCESS(r, X_OK) != 0) {
+            free(r);
+            return NULL;
+        }
+        return r;
+    }
+    const char *path = getenv("PATH");
+    if (!path) path = "/usr/bin:/bin";
+    char *full = malloc(strlen(path) + strlen(name) + 2);
+    if (!full) return NULL;
+    const char *seg = path;
+    for (;;) {
+        const char *colon = strchr(seg, ':');
+        size_t slen = colon ? (size_t)(colon - seg) : strlen(seg);
+        if (!slen) { /* an empty PATH segment means the cwd */
+            if (snprintf(full, strlen(path) + strlen(name) + 2, "./%s",
+                         name) > 0 &&
+                BM_ACCESS(full, X_OK) == 0)
+                return full;
+        } else {
+            memcpy(full, seg, slen);
+            full[slen] = '/';
+            memcpy(full + slen + 1, name, strlen(name) + 1);
+            if (BM_ACCESS(full, X_OK) == 0) return full;
+        }
+        if (!colon) break;
+        seg = colon + 1;
+    }
+    free(full);
+    return NULL;
+}
+#endif
+
+/* free a NULL-terminated argv array */
+static void proc_free_argv(char **argv) {
+    if (!argv) return;
+    for (int i = 0; argv[i]; i++) free(argv[i]);
+    free(argv);
+}
+
+/* split a plain cmdline into words: separators are runs of spaces,
+   tabs and newlines, nothing else is special (the caller has already
+   established there is no quote, escape, expansion or glob in it, so
+   the words come out exactly as a shell would split them). returns
+   argc, or -1 on out of memory. always NULL-terminated */
+static int proc_split_args(const char *s, char ***out) {
+    char **argv = NULL;
+    int n = 0, cap = 0;
+    while (*s) {
+        while (*s == ' ' || *s == '\t' || *s == '\n') s++;
+        if (!*s) break;
+        if (n + 1 >= cap) {
+            int ncap = cap ? cap * 2 : 8;
+            char **na = realloc(argv, ncap * sizeof *na);
+            if (!na) {
+                if (argv) argv[n] = NULL;
+                proc_free_argv(argv);
+                return -1;
+            }
+            argv = na;
+            cap = ncap;
+        }
+        const char *start = s;
+        while (*s && *s != ' ' && *s != '\t' && *s != '\n') s++;
+        char *word = malloc((size_t)(s - start) + 1);
+        if (!word) {
+            argv[n] = NULL;
+            proc_free_argv(argv);
+            return -1;
+        }
+        memcpy(word, start, (size_t)(s - start));
+        word[s - start] = '\0';
+        argv[n++] = word;
+    }
+    if (n + 1 > cap) {
+        char **na = realloc(argv, (n + 1) * sizeof *na);
+        if (!na) {
+            argv[n] = NULL;
+            proc_free_argv(argv);
+            return -1;
+        }
+        argv = na;
+    }
+    argv[n] = NULL;
+    *out = argv;
+    return n;
+}
+
 #ifdef _WIN32
 
 /* powershell -File <script>, stdin on NUL, stdout and stderr on two
@@ -545,8 +685,8 @@ static void proc_reap(proc_rec_t *p) {
 
 #else /* posix */
 
-/* /bin/sh <script>, stdin on /dev/null, stdout and stderr on two
-   pipes so the streams stay distinguishable */
+/* execvp on the split argv, or /bin/sh <script>; stdin on /dev/null,
+   stdout and stderr on two pipes so the streams stay distinguishable */
 static int proc_spawn(const char *cmdline, proc_rec_t *p) {
     (void)cmdline; /* posix runs the script below, not the line */
     int out_pipe[2], err_pipe[2];
@@ -582,7 +722,10 @@ static int proc_spawn(const char *cmdline, proc_rec_t *p) {
         long maxfd = sysconf(_SC_OPEN_MAX);
         if (maxfd < 0) maxfd = 16384;
         for (int fd = 3; fd < maxfd; fd++) close(fd);
-        execl("/bin/sh", "sh", p->script_path, (char *)NULL);
+        if (p->exec_argv)
+            execvp(p->exec_argv[0], p->exec_argv);
+        else
+            execl("/bin/sh", "sh", p->script_path, (char *)NULL);
         _exit(127);
     }
     close(out_pipe[1]);
@@ -740,9 +883,36 @@ void tool_process_exec(const cJSON *args, buf_t *out, bool *is_error) {
     p->out_path = strdup(path);
     p->err_path = strdup(epath);
     /* the cmdline goes verbatim into a sibling temp script: stem is
-       the pair's path minus the ".stdout" suffix */
+       the pair's path minus the ".stdout" suffix. a plain single
+       command with no shell syntax skips the script and runs
+       directly from a split argv; a split failure falls back to the
+       shell path */
     char spath[BM_PATH_MAX];
     size_t slen = strlen(path);
+    bool need_shell = true;
+#ifndef _WIN32 /* powershell builtins (echo, dir, ...) have no file to
+                 resolve: windows always runs the script */
+    need_shell = proc_needs_shell(cmdline);
+    if (!need_shell) {
+        p->exec_argv = NULL;
+        int argc = proc_split_args(cmdline, &p->exec_argv);
+        /* argv[0] must resolve to an executable file, else a shell
+           builtin (exit, cd, ...) or a missing program would change
+           meaning or lose the shell's error message: shell path */
+        char *exe = argc > 0 && p->exec_argv
+                        ? proc_resolve_exec(p->exec_argv[0]) : NULL;
+        if (!exe) {
+            proc_free_argv(p->exec_argv);
+            p->exec_argv = NULL;
+            need_shell = true;
+        } else {
+            free(p->exec_argv[0]);
+            p->exec_argv[0] = exe; /* the resolved path: execvp would
+                                      re-search PATH and could pick a
+                                      different file than the one checked */
+        }
+    }
+#endif
     if (slen < 8 || strcmp(path + slen - 7, ".stdout")) {
         buf_clear(out);
         buf_append_str(out, "process_exec failed: cannot create temp script");
@@ -756,6 +926,7 @@ void tool_process_exec(const cJSON *args, buf_t *out, bool *is_error) {
         free(p);
         return;
     }
+    if (need_shell) {
     memcpy(spath, path, slen - 7);
 #ifdef _WIN32
     memcpy(spath + slen - 7, ".ps1", 5);
@@ -786,7 +957,8 @@ void tool_process_exec(const cJSON *args, buf_t *out, bool *is_error) {
         if (wok && BM_CHMOD(spath, 0700) == 0)
             p->script_path = strdup(spath);
     }
-    if (!p->script_path) {
+    } /* need_shell */
+    if (need_shell && !p->script_path) {
         remove(spath);
         buf_clear(out);
         buf_append_str(out, "process_exec failed: cannot create temp script");
@@ -801,7 +973,10 @@ void tool_process_exec(const cJSON *args, buf_t *out, bool *is_error) {
         return;
     }
     pthread_mutex_init(&p->m, NULL);
-    if (proc_spawn(cmdline, p) || thread_start_detached(proc_reader, p) != 0) {
+    int spawn_rc = proc_spawn(cmdline, p);
+    proc_free_argv(p->exec_argv); /* child's exec already done or failed */
+    p->exec_argv = NULL;
+    if (spawn_rc || thread_start_detached(proc_reader, p) != 0) {
         /* nothing is watching the child yet: kill, reap, wipe */
 #ifdef _WIN32
         if (p->hproc) {

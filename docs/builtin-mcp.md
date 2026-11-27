@@ -167,7 +167,11 @@ size 17b, type text/plain, 3 lines
 
 ### process_exec(cmdline)
 
-`cmdline` is written verbatim into a temp script (`${tmpdir}/llmkit-proc-XXXXXX.sh` on posix, `llmkit-proc-....ps1` in the user temp dir on windows), which is then executed by `/bin/sh` (posix) or `powershell.exe -File` (windows), stdin on the null device. The tool waits up to 120 seconds for it to finish. stdout and stderr arrive on two separate pipes and are kept apart: each stream goes into its own temp file. Every line is stamped with a wall-clock timestamp, in the `annotate-output.sh` style. A line is attributed when it is read. The order between the two streams at their boundary is therefore the reader's order, not a global one:
+`cmdline` is written verbatim into a temp script (`${tmpdir}/llmkit-proc-XXXXXX.sh` on posix, `llmkit-proc-....ps1` in the user temp dir on windows), which is then executed by `/bin/sh` (posix) or `powershell.exe -File` (windows), stdin on the null device.
+
+On posix, a cmdline with no shell syntax (a single command and its arguments, no quotes, pipes, redirection, expansion, globbing, comments, assignments or newlines) whose first word resolves to an executable file (a path, or a `PATH` lookup with the executable bit checked) is executed directly with `execvp`: no temp script, no `To repeat invocation use ...` line in the reply. Shell builtins (`exit`, `cd`, ...) and unknown programs resolve to nothing and go through the temp script as before, so their semantics and error messages do not change. Windows always runs the temp script (powershell builtins have no file to resolve). Anything with shell syntax goes through the temp script on both platforms.
+
+The tool waits up to 120 seconds for it to finish. stdout and stderr arrive on two separate pipes and are kept apart: each stream goes into its own temp file. Every line is stamped with a wall-clock timestamp, in the `annotate-output.sh` style. A line is attributed when it is read. The order between the two streams at their boundary is therefore the reader's order, not a global one:
 
 ```
 HH:MM:SS: the line
