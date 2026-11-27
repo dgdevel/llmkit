@@ -1267,6 +1267,10 @@ void *acp_test_state_new(const char *flag_line); /* NULL on a bad line */
 void acp_test_serve(void *st, const char *line); /* one ndjson line */
 void acp_test_state_free(void *st);
 int cmd_prettyprint(const char *path); /* NULL or "-": stdin */
+int cmd_compaction(int argc, char **argv);
+/* compact the conversation read from in onto stdout; returns the exit
+   code: 0 compacted, 2 invalid record, 1 write failure */
+int compaction_run(FILE *in, FILE *out, int level);
 int cmd_llmproxy(int argc, char **argv);
 int cmd_models(int argc, char **argv); /* llmkit models: GET /models */
 int cmd_update(int argc, char **argv); /* llmkit update: self-update */

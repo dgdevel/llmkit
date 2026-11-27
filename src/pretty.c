@@ -624,3 +624,121 @@ int cmd_prettyprint(const char *path) {
     if (in != stdin) fclose(in);
     return rc;
 }
+
+/* ================= compaction ================= */
+
+/* the conversation filter: returns 1 emit, 0 drop. Levels cumulative:
+   1 rewrite non-empty tool_response text, 2 also drop tool records,
+   3 also drop thinking (every fragment). Never touched: user, system,
+   llm, tools, options, response, config and lifecycle records. */
+static int compaction_record(cJSON *rec, int level) {
+    switch (rec_classify(rec)) {
+    case R_TOOL_RESPONSE:
+        if (level < 1) return 1;
+        if (level >= 2) return 0;
+        {
+            cJSON *t = cJSON_GetObjectItemCaseSensitive(rec, "text");
+            if (cJSON_IsString(t) && t->valuestring &&
+                t->valuestring[0])
+                cJSON_SetValuestring(t, "content removed");
+        }
+        return 1;
+    case R_TOOL_REQUEST:
+        return level < 2;
+    case R_THINKING: /* partial or not: every fragment goes */
+        return level < 3;
+    default: /* pass through, engine-replayable as-is */
+        return 1;
+    }
+}
+
+typedef struct compaction_ctx {
+    int level;
+    long line; /* 1-based, for the malformed message */
+    int rc;    /* EXIT_INVALID_RECORD once a line failed, else EXIT_OK */
+    FILE *out; /* compacted records, one per line */
+} compaction_ctx_t;
+
+static void compaction_line(void *ctx, char *line /*malloc'd*/) {
+    compaction_ctx_t *c = ctx;
+    c->line++;
+    cJSON *rec = jsonl_parse_line(line);
+    free(line);
+    if (!rec) {
+        fprintf(stderr,
+                "llmkit compaction: malformed json line on line %ld\n",
+                c->line);
+        c->rc = EXIT_INVALID_RECORD;
+        return;
+    }
+    if (compaction_record(rec, c->level)) {
+        char *s = cJSON_PrintUnformatted(rec);
+        if (s) {
+            fputs(s, c->out);
+            fputc('\n', c->out);
+        }
+        free(s);
+    }
+    cJSON_Delete(rec);
+}
+
+/* compact the conversation read from in onto out; the exit code:
+   0 compacted, 2 invalid record, 1 stdout write failure */
+int compaction_run(FILE *in, FILE *out, int level) {
+    compaction_ctx_t c = { level, 0, EXIT_OK, out };
+    bool ok = jsonl_read_stream(in, compaction_line, &c);
+    int rc = c.rc;
+    if (!ok) {
+        if (rc == EXIT_OK)
+            fprintf(stderr,
+                    "llmkit compaction: invalid utf-8 or NUL byte in input\n");
+        rc = EXIT_INVALID_RECORD;
+    }
+    if (ferror(out)) rc = EXIT_OUT_OF_CHANNEL;
+    return rc;
+}
+
+static void compaction_usage(FILE *out) {
+    fputs("usage: llmkit compaction [--level N] [conversation.jsonl]\n"
+          "       (no argument, or '-', reads stdin; --level 1..3,\n"
+          "       default 1)\n",
+          out);
+}
+
+int cmd_compaction(int argc, char **argv) {
+    int level = 1;
+    const char *path = NULL;
+    for (int i = 2; i < argc; i++) {
+        if (!strcmp(argv[i], "--level")) {
+            if (i + 1 >= argc) {
+                compaction_usage(stderr);
+                return EXIT_OUT_OF_CHANNEL;
+            }
+            level = atoi(argv[++i]);
+            if (level < 1 || level > 3) {
+                compaction_usage(stderr);
+                return EXIT_OUT_OF_CHANNEL;
+            }
+        } else if (argv[i][0] == '-' && argv[i][1]) {
+            compaction_usage(stderr);
+            return EXIT_OUT_OF_CHANNEL;
+        } else if (!path) {
+            path = argv[i];
+        } else {
+            compaction_usage(stderr);
+            return EXIT_OUT_OF_CHANNEL;
+        }
+    }
+    FILE *in = stdin;
+    if (path && strcmp(path, "-")) {
+        in = fopen(path, "r");
+        if (!in) {
+            fprintf(stderr, "llmkit compaction: cannot open '%s'\n", path);
+            compaction_usage(stderr);
+            return EXIT_OUT_OF_CHANNEL;
+        }
+    }
+    int rc = compaction_run(in, stdout, level);
+    if (in != stdin) fclose(in);
+    return rc;
+}

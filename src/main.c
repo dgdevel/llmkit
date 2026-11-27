@@ -31,6 +31,10 @@ static int usage(FILE *out) {
           "  prettyprint [file]     render a conversation jsonl with the\n"
           "                         repl's typography; stdin without a\n"
           "                         file\n"
+          "  compaction [--level N] [file]\n"
+          "                         compact a conversation jsonl: 1 replace tool\n"
+          "                         response content, 2 drop tool records, 3 drop\n"
+          "                         reasoning too; stdin without a file\n"
           "  proxy <flags>          plain-http llm endpoint that forwards\n"
           "                         to one upstream and prints the passing\n"
           "                         conversation prettyprint-style\n"
@@ -87,6 +91,7 @@ int main(int argc, char **argv) {
         if (argc > 3) return usage(stderr);
         return cmd_prettyprint(argc == 3 ? argv[2] : NULL);
     }
+    if (!strcmp(cmd, "compaction")) return cmd_compaction(argc, argv);
     if (!strcmp(cmd, "proxy")) return cmd_llmproxy(argc, argv);
     if (!strcmp(cmd, "acp")) return cmd_acp(argc, argv);
     if (!strcmp(cmd, "models")) return cmd_models(argc, argv);

@@ -25,7 +25,9 @@ This document gives context and instructions for agents that work on the `llmkit
       holds the tool table and the json-rpc dispatch. `builtin/` has one file
       per tool family (`files.c`, `analyze.c`, `process.c`, `web.c`,
       `skills.c`) plus shared helpers (`util.c`, `internal.h`).
-    - `call.c`, `models.c`, `repl.c`, `mcprepl.c`, `pretty.c`: the command front-ends (one-off call, models listing, interactive repl, mcp console, transcript rendering).
+    - `call.c`, `models.c`, `repl.c`, `mcprepl.c`, `pretty.c`: the command
+      front-ends (one-off call, models listing, interactive repl, mcp
+      console, transcript rendering and the `compaction` conversation filter).
     - `mdterm.c` + `vendor/md4c/`: markdown rendering for the terminal
       (LLM response text): a whole-document md4c-SAX renderer and a
       streaming line machine, styled through `style_probe`'s tty gate

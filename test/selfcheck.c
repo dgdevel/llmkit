@@ -9454,6 +9454,161 @@ static void test_mdterm(void) {
     test_md_line();
 }
 
+static void test_compaction(void) {
+    /* helper: run compaction over in-memory input, return output buffer
+       (caller frees *ob) and exit code in *rc */
+    char *obs[8];
+    int rcs[8];
+    int idx = 0;
+#define RUN(IN, LVL)                                                    \
+    do {                                                                \
+        FILE *in_ = fmemopen((void *)(IN), strlen(IN), "r");            \
+        check(in_ != NULL, "compaction: fmemopen");                     \
+        size_t on_ = 0;                                                 \
+        obs[idx] = NULL;                                                \
+        FILE *out_ = open_memstream(&obs[idx], &on_);                   \
+        check(out_ != NULL, "compaction: memstream");                   \
+        rcs[idx] = compaction_run(in_, out_, (LVL));                    \
+        fclose(in_);                                                    \
+        fclose(out_);                                                   \
+        idx++;                                                          \
+    } while (0)
+
+    /* 1: level 1 rewrites non-empty tool_response text, keeps the rest */
+    RUN("{\"type\":\"tool_response\",\"id\":\"c1\",\"text\":\"big\","
+        "\"is_error\":false}\n"
+        "{\"type\":\"tool_response\",\"id\":\"c2\",\"text\":\"\"}\n"
+        "{\"type\":\"user\",\"content\":[{\"type\":\"text\","
+        "\"text\":\"hi\"}]}\n"
+        "{\"type\":\"response\",\"text\":\"ans\",\"partial\":false}\n"
+        "{\"type\":\"tool_request\",\"tool\":\"get\","
+        "\"arguments\":{},\"id\":\"c3\"}\n",
+        1);
+    check(rcs[0] == EXIT_OK, "compaction: level 1 exit");
+    check(obs[0] && strstr(obs[0], "\"content removed\"") != NULL,
+          "compaction: level 1 rewrites text");
+    check(obs[0] && strstr(obs[0], "\"text\":\"big\"") == NULL,
+          "compaction: level 1 drops original text");
+    check(obs[0] && strstr(obs[0], "\"id\":\"c2\",\"text\":\"\"") != NULL,
+          "compaction: level 1 keeps empty text");
+    check(obs[0] && strstr(obs[0], "\"type\":\"user\"") != NULL,
+          "compaction: level 1 keeps user");
+    check(obs[0] && strstr(obs[0], "\"type\":\"response\"") != NULL,
+          "compaction: level 1 keeps response");
+    check(obs[0] && strstr(obs[0], "\"type\":\"tool_request\"") != NULL,
+          "compaction: level 1 keeps tool_request");
+    free(obs[0]);
+
+    /* 2: level 2 drops tool_request and tool_response */
+    RUN("{\"type\":\"tool_response\",\"id\":\"c1\",\"text\":\"big\"}\n"
+        "{\"type\":\"tool_request\",\"tool\":\"get\","
+        "\"arguments\":{},\"id\":\"c1\"}\n"
+        "{\"type\":\"user\",\"content\":[{\"type\":\"text\","
+        "\"text\":\"hi\"}]}\n"
+        "{\"type\":\"response\",\"text\":\"ans\",\"partial\":false}\n",
+        2);
+    check(rcs[1] == EXIT_OK, "compaction: level 2 exit");
+    check(obs[1] && strstr(obs[1], "tool_response") == NULL,
+          "compaction: level 2 drops tool_response");
+    check(obs[1] && strstr(obs[1], "tool_request") == NULL,
+          "compaction: level 2 drops tool_request");
+    check(obs[1] && strstr(obs[1], "\"type\":\"user\"") != NULL &&
+              strstr(obs[1], "\"type\":\"response\"") != NULL,
+          "compaction: level 2 keeps user+response");
+    free(obs[1]);
+
+    /* 3: level 3 drops thinking fragments, keeps partial response */
+    RUN("{\"type\":\"thinking\",\"text\":\"p1\",\"partial\":true}\n"
+        "{\"type\":\"thinking\",\"text\":\"p2\",\"partial\":false,"
+        "\"signature\":\"s\"}\n"
+        "{\"type\":\"response\",\"text\":\"ans\",\"partial\":true}\n",
+        3);
+    check(rcs[2] == EXIT_OK, "compaction: level 3 exit");
+    check(obs[2] && strstr(obs[2], "thinking") == NULL,
+          "compaction: level 3 drops all thinking fragments");
+    check(obs[2] && strstr(obs[2], "\"type\":\"response\"") != NULL &&
+              strstr(obs[2], "\"partial\":true") != NULL,
+          "compaction: level 3 keeps partial response verbatim");
+    free(obs[2]);
+
+    /* 4: config/lifecycle/unknown pass through */
+    RUN("{\"type\":\"header\",\"version\":1}\n"
+        "{\"type\":\"llm\",\"api\":\"x\"}\n"
+        "{\"type\":\"tools\",\"definitions\":[]}\n"
+        "{\"type\":\"options\",\"model\":\"m\"}\n"
+        "{\"type\":\"system\",\"content\":[]}\n"
+        "{\"type\":\"start\"}\n"
+        "{\"type\":\"error\",\"code\":\"e\",\"message\":\"m\"}\n"
+        "{\"type\":\"flush\"}\n"
+        "{\"type\":\"expose\",\"tool\":\"t\"}\n"
+        "{\"type\":\"weird\",\"a\":1}\n",
+        2);
+    check(rcs[3] == EXIT_OK, "compaction: pass-through exit");
+    const char *pt[] = {"\"type\":\"header\"", "\"type\":\"llm\"",
+                        "\"type\":\"tools\"", "\"type\":\"options\"",
+                        "\"type\":\"system\"", "\"type\":\"start\"",
+                        "\"type\":\"error\"", "\"type\":\"flush\"",
+                        "\"type\":\"expose\"", "\"type\":\"weird\""};
+    for (size_t i = 0; i < sizeof pt / sizeof pt[0]; i++)
+        check(obs[3] && strstr(obs[3], pt[i]) != NULL, pt[i]);
+    free(obs[3]);
+
+    /* 5: malformed json line -> invalid record, earlier records kept */
+    RUN("{\"type\":\"start\"}\nnot json\n", 1);
+    check(rcs[4] == EXIT_INVALID_RECORD,
+          "compaction: malformed line exit code");
+    check(obs[4] && strstr(obs[4], "start") != NULL,
+          "compaction: records before bad line emitted");
+    check(obs[4] && strstr(obs[4], "not json") == NULL,
+          "compaction: bad line not emitted");
+    free(obs[4]);
+
+    /* 6: empty input */
+    RUN("", 1);
+    check(rcs[5] == EXIT_OK, "compaction: empty input exit");
+    check(obs[5] != NULL && obs[5][0] == '\0', "compaction: empty output");
+    free(obs[5]);
+
+    /* 7: level 2 output ingests as transcript, no tool records */
+    RUN("{\"type\":\"user\",\"content\":[{\"type\":\"text\","
+        "\"text\":\"q1\"}]}\n"
+        "{\"type\":\"response\",\"text\":\"a1\",\"partial\":false}\n"
+        "{\"type\":\"tool_request\",\"tool\":\"get\","
+        "\"arguments\":{},\"id\":\"c1\"}\n"
+        "{\"type\":\"tool_response\",\"id\":\"c1\",\"text\":\"r\"}\n"
+        "{\"type\":\"user\",\"content\":[{\"type\":\"text\","
+        "\"text\":\"q2\"}]}\n"
+        "{\"type\":\"response\",\"text\":\"a2\",\"partial\":false}\n",
+        2);
+    check(rcs[6] == EXIT_OK, "compaction: ingest exit");
+    tlist_t l;
+    memset(&l, 0, sizeof l);
+    char *dup = strdup(obs[6] ? obs[6] : "");
+    char *save = NULL;
+    int nuser = 0, ntext = 0, ntreq = 0, ntresp = 0;
+    for (char *line = strtok_r(dup, "\n", &save); line;
+         line = strtok_r(NULL, "\n", &save)) {
+        cJSON *rec = jsonl_parse_line(line);
+        check(rec != NULL, "compaction: output line parses");
+        if (!rec) continue;
+        if (tlist_ingest(&l, rec)) {
+            trec_t *t = l.v[l.n - 1];
+            if (t->kind == T_USER) nuser++;
+            else if (t->kind == T_TEXT) ntext++;
+            else if (t->kind == T_TREQ) ntreq++;
+            else if (t->kind == T_TRESP) ntresp++;
+        }
+    }
+    free(dup);
+    check(nuser == 2, "compaction: ingest user count");
+    check(ntext >= 1, "compaction: ingest text count");
+    check(ntreq == 0, "compaction: ingest tool_request count");
+    check(ntresp == 0, "compaction: ingest tool_response count");
+    tlist_clear(&l);
+    free(obs[6]);
+#undef RUN
+}
+
 int main(void) {
     setenv("LLMKIT_EXEC_WAIT_MS", "2000", 1); /* process_exec tests: fast */
     signals_init();
@@ -9509,6 +9664,8 @@ int main(void) {
     test_terminal_tools();
     fprintf(stderr, "selfcheck: llm proxy\n");
     test_llm_proxy();
+    fprintf(stderr, "selfcheck: compaction\n");
+    test_compaction();
     fprintf(stderr, "selfcheck: html tools\n");
     test_html();
     fprintf(stderr, "selfcheck: acp\n");

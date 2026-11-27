@@ -68,6 +68,7 @@ Description: Introduction: Generate and Test Search is a heuristic search techni
 
 ### Monitoring and Debugging
 - **`prettyprint`**: Renders a recorded JSONL conversation file into a human-readable format.
+- **`compaction`**: Compacts a recorded JSONL conversation: replaces tool response content, drops tool and thinking records at higher levels.
 - **`proxy`**: A local HTTP server that forwards traffic to an LLM and prints the conversation to your terminal in real-time.
 - **`models`**: Lists available models from an endpoint.
 
@@ -84,6 +85,7 @@ Description: Introduction: Generate and Test Search is a heuristic search techni
 | `repl <flags>` | Interactive chat |
 | `mcp-repl <flags>` | Interactive MCP tool console |
 | `prettyprint [file.jsonl]` | Human-readable conversation viewer |
+| `compaction [--level N] [file.jsonl]` | Compact a conversation: 1 replace tool responses, 2 drop tool records, 3 drop reasoning |
 | `proxy <flags>` | HTTP LLM proxy with live terminal output |
 | `models <flags>` | List models of an endpoint |
 | `help` | Show usage |
