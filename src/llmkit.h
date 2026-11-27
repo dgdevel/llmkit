@@ -465,6 +465,8 @@ size_t tlist_bytes(const tlist_t *l);
    records are never touched. returns the number of records removed;
    before/after (either may be NULL) receive the byte sizes. */
 size_t tlist_compact(tlist_t *l, int level, size_t *before, size_t *after);
+/* does this entry die at `level` (tool records at 2, thinking at 3)? */
+bool trec_drops(const trec_t *t, int level);
 /* the size tlist_compact at `level` would leave, on the list as it
    stands (no mutation, no block merge): the repl's preview */
 size_t tlist_bytes_level(const tlist_t *l, int level);

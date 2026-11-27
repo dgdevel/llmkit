@@ -636,6 +636,37 @@ size_t tlist_bytes(const tlist_t *l) {
     return n;
 }
 
+/* does this entry die at `level`? tool records at 2, thinking at 3; the
+   one predicate tlist_compact, tlist_bytes_level and the repl's llm_mark
+   recount all ask */
+bool trec_drops(const trec_t *t, int level) {
+    if (level >= 2 && (t->kind == T_TREQ || t->kind == T_TRESP)) return true;
+    return level >= 3 && t->kind == T_THINK;
+}
+
+/* the size compaction at `level` leaves on the list as it stands: the
+   survivors' records with the level's rewrite applied to a copy. both
+   the preview the repl shows before the pick and tlist_compact's
+   after-size come from here - one arithmetic, no merge, no mutation */
+size_t tlist_bytes_level(const tlist_t *l, int level) {
+    size_t n = 0;
+    for (size_t i = 0; i < l->n; i++) {
+        const trec_t *t = l->v[i];
+        if (trec_drops(t, level)) continue;
+        if (level == 1 && t->kind == T_TRESP && t->text && t->text[0]) {
+            cJSON *rec =
+                rec_tool_response(t->id, "content removed", t->is_error);
+            char *s = rec ? cJSON_PrintUnformatted(rec) : NULL;
+            n += s ? strlen(s) + 1 : 0;
+            cJSON_free(s);
+            cJSON_Delete(rec);
+            continue;
+        }
+        n += trec_bytes(t);
+    }
+    return n;
+}
+
 /* compact the transcript in place with the `compaction` levels: 1 rewrite
    non-empty tool response text to "content removed", 2 also drop tool
    requests and responses, 3 also drop thinking. user and response records
@@ -644,13 +675,11 @@ size_t tlist_bytes(const tlist_t *l) {
    may be NULL) receive the byte sizes. */
 size_t tlist_compact(tlist_t *l, int level, size_t *before, size_t *after) {
     if (before) *before = tlist_bytes(l);
+    if (after) *after = tlist_bytes_level(l, level);
     size_t n_before = l->n, k = 0;
     for (size_t i = 0; i < l->n; i++) {
         trec_t *t = l->v[i];
-        bool drop =
-            (level >= 2 && (t->kind == T_TREQ || t->kind == T_TRESP)) ||
-            (level >= 3 && t->kind == T_THINK);
-        if (drop) {
+        if (trec_drops(t, level)) {
             trec_free(t);
             continue;
         }
@@ -666,31 +695,7 @@ size_t tlist_compact(tlist_t *l, int level, size_t *before, size_t *after) {
         l->v[k++] = t;
     }
     l->n = k; /* no realloc down: the capacity keeps */
-    if (after) *after = tlist_bytes(l);
     return n_before - k;
-}
-
-/* the size tlist_compact at `level` would leave, measured on the list
-   as it stands: the survivors' records with the level's rewrite applied
-   to a copy. the preview the repl shows before the user picks - the
-   same arithmetic tlist_compact lands on, no merge, no mutation */
-size_t tlist_bytes_level(const tlist_t *l, int level) {
-    size_t n = 0;
-    for (size_t i = 0; i < l->n; i++) {
-        const trec_t *t = l->v[i];
-        if (level >= 2 && (t->kind == T_TREQ || t->kind == T_TRESP)) continue;
-        if (level >= 3 && t->kind == T_THINK) continue;
-        if (level == 1 && t->kind == T_TRESP && t->text && t->text[0]) {
-            cJSON *rec = rec_tool_response(t->id, "content removed", t->is_error);
-            char *s = rec ? cJSON_PrintUnformatted(rec) : NULL;
-            n += s ? strlen(s) + 1 : 0;
-            cJSON_free(s);
-            cJSON_Delete(rec);
-            continue;
-        }
-        n += trec_bytes(t);
-    }
-    return n;
 }
 
 /* ---- grouping ---- */

@@ -1868,15 +1868,6 @@ static int slash_new(slash_state_t *sl, engine_t *e) {
     return 0;
 }
 
-/* does this transcript entry survive compaction at `level`? the same
-   predicate tlist_compact applies: tool records die at 2, thinking
-   fragments at 3, everything else lives. (the llm_mark recount.) */
-static bool trec_survives(const trec_t *t, int level) {
-    if (level >= 2 && (t->kind == T_TREQ || t->kind == T_TRESP)) return false;
-    if (level >= 3 && t->kind == T_THINK) return false;
-    return true;
-}
-
 /* rewrite the conversation store after an in-place compaction: the file
    is append-only, so the compacted transcript must be written out whole
    or the next session's replay would resurrect the dropped records.
@@ -1973,7 +1964,7 @@ static int slash_compaction(slash_state_t *sl, engine_t *e) {
        records it covered before the compaction drops any */
     size_t mark_old = e->llm_mark, mark_new = 0;
     for (size_t i = 0; i < mark_old && i < e->tr.n; i++)
-        if (trec_survives(e->tr.v[i], level)) mark_new++;
+        if (!trec_drops(e->tr.v[i], level)) mark_new++;
     size_t before, after;
     size_t removed = tlist_compact(&e->tr, level, &before, &after);
     e->llm_mark = mark_new;
